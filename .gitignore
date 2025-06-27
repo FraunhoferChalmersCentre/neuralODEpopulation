@@ -1,0 +1,23 @@
+# Byte-compiled Python files
+*.pyc
+__pycache__/
+
+# Virtual environments
+venv/
+.env/
+
+# IDE-specific files
+.idea/
+.vscode/
+
+# Ignore data directory
+data/
+results/
+saved_models/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+~$*
