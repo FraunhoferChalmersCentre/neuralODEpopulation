@@ -1,0 +1,636 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jun 29 14:54:39 2025
+
+@author: Baaz
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun 27 10:09:11 2025
+
+@author: Baaz
+"""
+import ast
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
+from torchdiffeq import odeint_adjoint as odeint
+
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score
+from scipy.integrate import solve_ivp
+
+import os
+
+# ---- Settings ----
+compartment = 'C2'
+
+
+
+
+def plot_from_training_records(latent_dim,
+    records,
+    func,
+    reducer,
+    initial_encoder,
+    ODEWrapper,
+    t_dense,
+    conc_mean,
+    conc_std,
+    max_plots=6,
+    MAX_TIME=1.0,
+    MAX_DOSE=1.0,
+    compartment="central",
+    nr_row=2,
+    nr_col=3,
+):
+
+    device = next(func.parameters()).device  # get device from model (usually cuda)
+    n = min(len(records), max_plots)
+
+    # Prepare batch data containers
+    subject_ids = []
+    ts = []
+    xs = []
+    doses = []
+    dose_times_list = []
+    z_refined_list = []
+    
+
+    
+    for i in range(n):
+        subject_id, t_real, x_real, dose, dose_times, z_refined = records[i]
+        subject_ids.append(subject_id)
+        ts.append(t_real)
+        xs.append(x_real)
+        doses.append(dose)
+        dose_times_list.append(dose_times if isinstance(dose_times, torch.Tensor) else torch.tensor(dose_times))
+        z_refined_list.append(z_refined if isinstance(z_refined, torch.Tensor) else torch.tensor(z_refined))
+    
+    doses = [d.unsqueeze(0) if d.dim() == 0 else d for d in doses]
+    doses = torch.stack(doses)  # Now shape: [batch_size, 1]
+    
+
+    dose_times = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True)  # [batch_size, max_len]
+    dose_mask = (dose_times != 0)        # boolean mask where dose times exist
+    z_refined = torch.stack(z_refined_list)  # [batch_size, latent_dim]
+ 
+
+
+    x0_list = []
+    for x in xs:
+        out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
+        if out.dim() == 1:
+            out = out.unsqueeze(0)  # convert [4] -> [1, 4]
+        x0_list.append(out)
+    x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
+
+  
+
+    x0 = torch.cat([x0_tensor, z_refined], dim=1)  # shape [batch_size, 6]
+    #x0 = torch.cat(x0_list, dim=0)  # shape: [batch_size, features]
+ 
+    # Concatenate dose scalar to latent initial condition (expand dose to 2D)
+   # x0 = torch.cat([x0_latent, doses.unsqueeze(-1), z_refined], dim=-1)  # [batch_size, latent_dim+1]
+   # doses = torch.stack(doses).unsqueeze(1)
+
+    # Instantiate batched ODEWrapper
+    doses = doses.to(device)
+    dose_times = dose_times.to(device)
+    dose_mask = dose_mask.to(device)
+    z_refined = z_refined.to(device)
+    x0 = x0.to(device)
+    t_dense = t_dense.to(device)
+    # After moving tensors to device
+
+    
+    ode_func = ODEWrapper(func, dose_times, doses, dose_mask)
+    
+  
+    pred = odeint(ode_func, x0, t_dense, method='dopri5')
+
+
+    # Apply reducer on latent dims only (exclude dose dim)
+    x_pred = reducer(pred[:, :, :latent_dim])  # [time_steps, batch_size, 1]
+
+    # Plot
+    fig, axs = plt.subplots(nr_row, nr_col, figsize=(nr_col * 6, nr_row * 5), sharex=True)
+    axs = axs.flatten()
+
+    for i in range(n):
+        ax = axs[i]
+
+        # Interpolate actual x onto t_dense for smooth plot
+        x_interp = torch.tensor(
+            np.interp(
+                t_dense.cpu().numpy(),
+                ts[i].cpu().numpy(),
+                xs[i].cpu().numpy()
+            ),
+            dtype=torch.float32,
+            device=ts[i].device,
+        )
+
+        ax.plot(ts[i].cpu().numpy() * MAX_TIME, (xs[i].cpu().numpy() * conc_std) + conc_mean, 'o-', label='Actual')
+        ax.plot(t_dense.cpu().numpy() * MAX_TIME, (x_pred[:, i].detach().cpu().numpy() * conc_std) + conc_mean, '-', label='Predicted')
+        ax.set_title(f"Individual {subject_ids[i]} - Dose: {doses[i].item() * MAX_DOSE:.0f} mg")
+        ax.set_ylabel(f"Concentration ({compartment})")
+        ax.set_xlim(0, 24)
+        ax.set_ylim(0, 20)
+        ax.grid(True)
+        ax.legend()
+
+    axs[-1].set_xlabel("Time (hours)")
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+
+
+
+
+def train_model_vae(dim_parameter_encoder, latent_dim,
+    dataloader, func, reducer, initial_encoder,
+    refiner1, refiner2, noise,
+    optimizer, scheduler, device, t_dense,
+    kl_weight, alpha, n_epochs, warmup_epochs,
+    smoothing_start_epoch, print_epoch, plot_epoch,
+    ODEWrapper, conc_std, conc_mean,
+    MAX_TIME, MAX_DOSE
+):
+    for epoch in range(n_epochs):
+    
+        total_loss = 0.0
+        z_individual_list = []
+        trajectory_records = []
+
+        # === Enable or disable noise learning ===
+        for param in noise.parameters():
+            param.requires_grad = epoch >= warmup_epochs
+
+        for id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list in dataloader:
+            t_padded, x_padded, mask = t_padded.to(device), x_padded.to(device), mask.to(device)
+            dose_tensor = dose_tensor.to(device)
+            dose_times_list = [dt.to(device) for dt in dose_times_list]
+            batch_size = t_padded.size(0)
+
+            dose_times_padded, dose_times_mask = pad_dose_times(dose_times_list)
+
+            # === Create dose masks ===
+            mask_low = dose_tensor == 0.5
+            mask_high = dose_tensor == 1.0
+
+            # === Prepare data for each group ===
+            t_low, x_low = t_padded[mask_low], x_padded[mask_low]
+            t_high, x_high = t_padded[mask_high], x_padded[mask_high]
+
+            # === Refine latents for each group ===
+            mu_q_low, logvar_q_low = refiner1(t_low, x_low)
+            mu_q_high, logvar_q_high = refiner2(t_high, x_high)
+
+            # === Merge low and high dose latent representations ===
+            #latent_dim = mu_q_low.shape[1]
+            mu_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
+            logvar_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
+            mu_q[mask_low] = mu_q_low
+            mu_q[mask_high] = mu_q_high
+            logvar_q[mask_low] = logvar_q_low
+            logvar_q[mask_high] = logvar_q_high
+
+            std_q = torch.exp(0.5 * logvar_q)
+            eps = torch.randn_like(std_q)
+            z_refined = mu_q + eps * std_q
+          #  print(mu_q)
+          #  mask_z = (torch.rand(batch_size) < alpha).to(device)
+          #  z_input = torch.where(mask_z.unsqueeze(-1), z_refined, global_latent.mu.detach().unsqueeze(0).expand(batch_size, -1))
+           
+            # === ODE Prediction ===
+            x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
+            #x0 = torch.cat([x0_latent, dose_tensor.unsqueeze(-1),z_refined], dim=-1)
+
+            x0 = torch.cat([x0_1, z_refined], dim=1)
+            
+           
+            ode_func = ODEWrapper(func, dose_times_padded,dose_tensor.unsqueeze(-1), dose_times_mask)
+            pred = odeint(ode_func, x0, t_dense, method='dopri5')
+            
+            pred_batch = pred.permute(1, 0, 2)  # [batch, time, features]
+
+            # === Interpolate and Calculate Loss ===
+            t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
+            test = reducer(pred_batch[:, :, :latent_dim])
+            pred_interp = batch_linear_interpolate_1d(test, t_dense_exp, t_padded)
+            recon_loss_noise = noise.nll(x_padded, pred_interp, mask)
+            # Create standard Gaussian targets for low-level latents
+            mu_std_low = torch.zeros_like(mu_q_low)
+            logvar_std_low = torch.zeros_like(logvar_q_low)
+            
+            # Create standard Gaussian targets for high-level latents
+            mu_std_high = torch.zeros_like(mu_q_high)
+            logvar_std_high = torch.zeros_like(logvar_q_high)
+            
+            # Compute KL divergence against standard normal for both levels
+            KL_loss = kl_divergence_gaussians(mu_q_low, logvar_q_low, mu_std_low, logvar_std_low) + \
+                      kl_divergence_gaussians(mu_q_high, logvar_q_high, mu_std_high, logvar_std_high)
+            loss = recon_loss_noise + kl_weight * KL_loss
+
+            # === Backprop ===
+
+            optimizer.zero_grad()
+
+            loss.backward()
+   
+            optimizer.step()
+  
+
+            residual = x_padded - pred_interp
+    
+            # === Store for analysis ===
+            z_individual_list.append(z_refined.detach())
+            for i in range(batch_size):
+                trajectory_records.append((
+                    id_list[i],
+                    t_padded[i, mask[i]],
+                    x_padded[i, mask[i]],
+                    dose_tensor[i],
+                    dose_times_list[i],
+                    z_refined[i].detach()
+                ))
+
+        # === Global latent and EMA updates ===
+        z_all = torch.cat(z_individual_list, dim=0)
+        with torch.no_grad():
+            if epoch > smoothing_start_epoch:
+                func.update_ema(alpha=0.1)
+                reducer.update_ema(alpha=0.1)
+                initial_encoder.update_ema(alpha=0.1)
+                refiner1.update_ema(alpha=0.1)
+                refiner2.update_ema(alpha=0.1)
+             
+
+        scheduler.step()
+
+        # === Logging ===
+        if epoch % print_epoch == 0:
+            with torch.no_grad():
+                print(
+                    f"Epoch {epoch}, "
+                    f"-LL: {recon_loss_noise.item():.4f}, "
+                    f"KL loss: {KL_loss.item():.4f}, "
+                    f"Add. error: {(conc_std * torch.exp(noise.log_sigma_add)).item():.4f}, "
+                    f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, ")
+
+        if epoch % plot_epoch == 0:
+            plot_from_training_records(latent_dim=latent_dim, records=trajectory_records, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=t_dense, conc_mean=conc_mean, conc_std=conc_std, max_plots=6, MAX_TIME=MAX_TIME, MAX_DOSE=MAX_DOSE) if epoch % plot_epoch == 0 else None
+
+
+
+def approx_dirac_delta_vectorized(t, dose_times, dt, scaling=0.02,normalize=1):
+    epsilon = scaling
+    return np.sum(np.exp(-((t - dose_times) / epsilon)**2) / (epsilon * np.sqrt(np.pi)))/normalize
+
+#def approx_dirac_delta_vectorized(t, dose_times, epsilon=0.01):
+    # make sure t and dose_times are NumPy arrays
+ #   t = np.asarray(t)
+ #   dose_times = np.asarray(dose_times)
+ #   return np.sum(np.exp(-((t - dose_times) / epsilon)**2) / (epsilon * np.sqrt(np.pi)))
+
+
+def pk_2cpt_step(y, ka, cl, v, dose_amount, dose_times, t, dt):
+    # y: shape (N_samples, 2) for C1, C2 at time t
+    C1 = y[:, 0]
+    C2 = y[:, 1]
+    ka = np.asarray(ka)
+    cl = np.asarray(cl)
+    v = float(v)  # scalar
+    dose_amount = float(dose_amount)  # scalar
+    dose_times = np.asarray(dose_times)
+    y = np.asarray(y)
+
+    # Vectorized dose input (same for all samples since dose times & amount same)
+    dose_input = dose_amount * approx_dirac_delta_vectorized(t, dose_times,dt)
+
+    dC1dt = -ka * C1 + dose_input
+    dC2dt = ka * C1 - (cl / v) * C2
+
+    dy = np.stack([dC1dt, dC2dt], axis=1)
+    y_next = y + dy * dt
+    return y_next
+
+def solve_individual_vectorized(ka, cl, v, dose_amount, dose_times, t_eval):
+    # ka, cl shape: (N_samples,)
+    N_samples = ka.shape[0]
+    y = np.zeros((N_samples, 2))
+    y[:, 0] = 0  # initial C1
+    y[:, 1] = 0            # initial C2
+
+    y_out = np.zeros((N_samples, len(t_eval)))
+    y_out[:, 0] = y[:, 1]
+
+    for i in range(1, len(t_eval)):
+        dt = t_eval[i] - t_eval[i-1]
+        y = pk_2cpt_step(y, ka, cl, v, dose_amount, dose_times, t_eval[i-1], dt)
+        y_out[:, i] = y[:,1]  # store C2
+
+    return y_out
+
+
+def log_prior(phi, mu_prior, sigma_prior):
+    # phi: vector of parameters [log ka, log cl, log v]
+    # Assuming independent normals
+    return -0.5 * np.sum(((phi - mu_prior) / sigma_prior)**2)
+
+def log_likelihood(phi, t_np,t_data, y_obs, dose, dose_times, add_error, prop_error):
+    """
+    phi: array-like, log parameters [log(ka), log(cl)]
+    t_np: 1D np.array of time points to evaluate
+    y_obs: observed data at t_np
+    dose: scalar dose amount
+    dose_times: array-like of dose administration times
+    add_error: additive error std dev
+    prop_error: proportional error coefficient
+    """
+
+    ka, cl = np.exp(phi)
+    v = np.log(5.0)  # fixed
+
+    # Convert to 1D arrays if scalar (batch size = 1)
+    ka_arr = np.atleast_1d(ka)
+    cl_arr = np.atleast_1d(cl)
+
+    # Solve ODE with batch size = 1
+    sol = solve_individual_vectorized(
+        ka_arr, cl_arr, v,
+        dose,
+        dose_times,
+        t_np
+    )
+    # sol shape: (batch_size, len(t_np)) = (1, T)
+    y_pred_dense = torch.tensor(sol, dtype=torch.float32)      # [batch=1, T_dense]
+    t_dense = torch.tensor(t_np, dtype=torch.float32).unsqueeze(0)  # [1, T_dense]
+    t_target = torch.tensor(t_data, dtype=torch.float32).unsqueeze(0)         # [1, T_obs]
+   
+
+
+     # Interpolate predictions at observed times
+    y_pred_interp = torch_linear_interpolate(t_dense,y_pred_dense, t_target)
+    y_pred_interp_np = y_pred_interp[0].numpy()  # back to numpy 1D array
+    
+     # Calculate residuals and std dev
+    sigma = np.sqrt(add_error**2 + (prop_error * y_pred_interp_np)**2)
+    residuals = y_obs - y_pred_interp_np
+    log_like = -0.5 * np.sum((residuals / sigma) ** 2 + np.log(2 * np.pi * sigma ** 2))
+
+    return log_like
+
+
+
+def metropolis_hastings_sampling(
+    y_obs, t_np,t_data, dose, dose_times, add_error, prop_error,
+    mu_prior, sigma_prior,
+    n_samples, burn_in, thinning
+):
+    
+
+    # Initial guess at prior mean
+    phi_curr = mu_prior.copy()
+    log_post_curr = log_prior(phi_curr, mu_prior, sigma_prior) + log_likelihood(phi_curr, t_np,t_data, y_obs, dose, dose_times, add_error, prop_error)
+
+    samples = []
+    proposal_std = 0.1  # Tune this for acceptance rate ~0.3
+
+    for i in range(n_samples * thinning + burn_in):
+        phi_prop = phi_curr + np.random.normal(0, proposal_std, size=phi_curr.shape)
+        log_post_prop = log_prior(phi_prop, mu_prior, sigma_prior) + log_likelihood(phi_prop, t_np,t_data, y_obs, dose, dose_times, add_error, prop_error)
+        
+        accept_ratio = np.exp(log_post_prop - log_post_curr)
+        if np.random.rand() < accept_ratio:
+            phi_curr = phi_prop
+            log_post_curr = log_post_prop
+        
+        if i >= burn_in and (i - burn_in) % thinning == 0:
+            samples.append(phi_curr.copy())
+
+    return np.array(samples)
+
+def pad_dose_times(dose_times_list, pad_value=-1.0):
+    batch_size = len(dose_times_list)
+    max_len = max([dt.size(0) for dt in dose_times_list])
+    
+    dose_times_padded = torch.full((batch_size, max_len), pad_value, dtype=dose_times_list[0].dtype, device=dose_times_list[0].device)
+    mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=dose_times_list[0].device)
+    
+    for i, dt in enumerate(dose_times_list):
+        length = dt.size(0)
+        dose_times_padded[i, :length] = dt
+        mask[i, :length] = 1
+    
+    return dose_times_padded, mask
+
+def batch_linear_interpolate_1d(y, t_src, t_target):
+    """
+    y: [batch, N] tensor - values at source times
+    t_src: [batch, N] tensor - source time points (must be sorted ascending)
+    t_target: [batch, M] tensor - target time points for interpolation
+    
+    Returns:
+    y_interp: [batch, M] tensor - interpolated values at t_target
+    """
+    device = y.device
+    batch_size, N = y.shape
+    t_src = t_src.to(device)
+    t_target = t_target.to(device)
+    M = t_target.shape[1]
+
+    y_interp = torch.zeros(batch_size, M, device=y.device, dtype=y.dtype)
+
+    for i in range(batch_size):
+        # get source and target for batch i
+        t_src_i = t_src[i]      # shape: [N]
+        y_i = y[i]              # shape: [N]
+        t_target_i = t_target[i]  # shape: [M]
+
+        # Find indices k such that t_src_i[k] <= t_target_i < t_src_i[k+1]
+        k = torch.searchsorted(t_src_i, t_target_i, right=True) - 1
+        k = torch.clamp(k, 0, N - 2)
+
+        t0 = t_src_i[k]         # [M]
+        t1 = t_src_i[k + 1]     # [M]
+        y0 = y_i[k]             # [M]
+        y1 = y_i[k + 1]         # [M]
+
+        # Linear interpolation weights
+        denom = (t1 - t0)
+        denom[denom == 0] = 1e-8  # avoid div by zero
+        alpha = (t_target_i - t0) / denom  # [M]
+
+        y_interp[i] = y0 + alpha * (y1 - y0)
+
+    return y_interp
+
+    
+def torch_linear_interpolate(x_dense, y_dense, x_target):
+    batch_size, N = x_dense.shape
+    M = x_target.shape[1]
+
+    # Find indices for interpolation
+    idx = torch.searchsorted(x_dense, x_target, right=True)
+    idx = torch.clamp(idx, 1, N - 1)  # shape: [batch, M]
+
+    # Batch indices for advanced indexing
+    batch_indices = torch.arange(batch_size, device=x_dense.device).unsqueeze(1).expand(-1, M)
+
+    x0 = x_dense[batch_indices, idx - 1]
+    x1 = x_dense[batch_indices, idx]
+    y0 = y_dense[batch_indices, idx - 1]
+    y1 = y_dense[batch_indices, idx]
+
+    denom = x1 - x0
+    denom[denom == 0] = 1e-8
+    slope = (y1 - y0) / denom
+
+    return y0 + slope * (x_target - x0)
+
+def torch_linear_interpolate2(x_dense, y_dense, x_target):
+    """
+    Differentiable linear interpolation in PyTorch.
+    Assumes x_dense is sorted and x_target lies within x_dense range.
+    """
+    idx = torch.searchsorted(x_dense, x_target, right=True)
+    idx = torch.clamp(idx, 1, len(x_dense) - 1)
+
+    x0 = x_dense[idx - 1]
+    x1 = x_dense[idx]
+    y0 = y_dense[idx - 1]
+    y1 = y_dense[idx]
+
+    slope = (y1 - y0) / (x1 - x0)
+    return y0 + slope * (x_target - x0)
+
+
+
+
+
+
+def estimate_max_dose(df, dose_col='Dose', max_allowed=100.0):
+    """Estimate max dose from dataframe but limit to max_allowed."""
+    max_dose = df[dose_col].max()
+    return min(max_dose, max_allowed)
+
+def estimate_max_time(df, time_col='Time', max_allowed=24.0):
+    """Estimate max time from dataframe but limit to max_allowed."""
+    max_time = df[time_col].max()
+    return min(max_time, max_allowed)
+
+
+
+def standardize_concentration(conc, mean, std): return (conc - mean) / std
+def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
+
+
+
+
+class TrajectoryDataset(Dataset):
+    def __init__(self, path, compartment='C2'):
+        self.df = pd.read_csv(path)
+        self.compartment = compartment
+
+        # Calculate max dose and time here
+        self.max_dose = self.estimate_max_dose()
+        self.max_time = self.estimate_max_time()
+
+        # Normalization functions as instance methods
+        def normalize_dose(dose): 
+            return dose / self.max_dose
+        def normalize_time(time): 
+            return time / self.max_time
+
+        # Normalize columns
+        self.df['Dose_norm'] = normalize_dose(self.df['Dose'])
+        self.df['Time_norm'] = normalize_time(self.df['Time'])
+        self.conc_mean = self.df[self.compartment].mean()
+        self.conc_std = self.df[self.compartment].std()
+        self.df['C2_norm'] = (self.df[self.compartment] - self.conc_mean) / self.conc_std
+
+        # Parse dose times column (string of list)
+        self.df['DoseTimesParsed'] = self.df['Dose times'].apply(ast.literal_eval)
+        self.df['DoseTimesNorm'] = self.df['DoseTimesParsed'].apply(lambda lst: [t / self.max_time for t in lst])
+
+        # Add DoseLabel (0,1,2,...)
+        unique_doses = sorted(self.df['Dose'].unique())
+        dose_to_label = {dose: i for i, dose in enumerate(unique_doses)}
+        self.df['DoseLabel'] = self.df['Dose'].map(dose_to_label)
+        self.dose_to_label = dose_to_label
+
+        # Extract trajectories
+        self.trajectories = self._extract_trajectories()
+
+    def estimate_max_dose(self):
+        return self.df['Dose'].max()
+
+    def estimate_max_time(self):
+        return self.df['Time'].max()
+
+    def _extract_trajectories(self):
+        start_idxs = self.df[self.df['Time'] == 0].index.tolist() + [len(self.df)]
+        trajectories = []
+        for i in range(len(start_idxs) - 1):
+            group = self.df.iloc[start_idxs[i]:start_idxs[i+1]]
+            t = torch.tensor(group['Time_norm'].values, dtype=torch.float32)
+            x = torch.tensor(group['C2_norm'].values, dtype=torch.float32)
+            dose = torch.tensor(group['Dose_norm'].values[0], dtype=torch.float32)
+            dose_times = torch.tensor(group['DoseTimesNorm'].values[0], dtype=torch.float32)
+            subject_id = group['ID'].iloc[0]
+            dose_label = torch.tensor(group['DoseLabel'].values[0], dtype=torch.long)
+            trajectories.append((t, x, dose, dose_times, subject_id))
+        return trajectories
+
+    def __len__(self):
+        return len(self.trajectories)
+
+    def __getitem__(self, idx):
+        return self.trajectories[idx]
+
+
+
+# ---- Collate ----
+def collate_fn(batch):
+    t_list, x_list, dose_list, dose_times_list, id_list = zip(*batch)
+
+    t_padded = pad_sequence(t_list, batch_first=True)
+    x_padded = pad_sequence(x_list, batch_first=True)
+
+    max_len = t_padded.size(1)
+    mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
+    for i, t in enumerate(t_list):
+        mask[i, :len(t)] = 1
+
+    dose_tensor = torch.stack(dose_list)
+ 
+
+    return id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list
+
+
+
+
+
+
+
+
+
+def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p):
+   """KL[q||p] between two diagonal Gaussians"""
+   var_q = torch.exp(logvar_q)
+   var_p = torch.exp(logvar_p)
+   
+   return 0.5 * torch.sum(
+       (var_q + (mu_q - mu_p)**2) / var_p - 1 + logvar_p - logvar_q
+   )
+
