@@ -14,10 +14,14 @@ Created on Fri Jun 27 10:21:33 2025
 
 import os
 import torch
+    
+import math
+from torch.utils.data import DataLoader
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import random
 from torchdiffeq import odeint_adjoint as odeint
 
 from sklearn.ensemble import RandomForestRegressor
@@ -25,27 +29,39 @@ from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import r2_score
 
 from lib.utils.my_utils_parallel import *
+from lib.utils.my_utils_parallel import destandardize_concentration
 
 
 
-def plot_individual_samples_vs_data_vectorized_vae(dose_times,
+
+def plotIndividualFits_MCMC(
+    df, dataset, latent_dim,
     individual_data,  # (id, t_real, x_real, dose, dose_times)
     refiner1, refiner2,
-    func, reducer, initial_encoder, ODEWrapper,
-    t_dense, conc_mean, conc_std, MAX_TIME, MAX_DOSE,
+    func, reducer, initial_encoder, ODEWrapper,t_dense,
     n_samples=100,
     n_mcmc_samples=1000,
     burn_in=10,
     device='cpu'
 ):
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import torch
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    dose_times = torch.from_numpy(unique_times_np).to(dtype=torch.float32, device=device)
+    dose_times_tensor = dose_times / MAX_TIME
+    
+    t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
+    
     
     t_dense_np = MAX_TIME* t_dense.cpu().numpy() if torch.is_tensor(t_dense) else t_dense
     t_dense_np2 = MAX_TIME* t_dense.cpu().numpy() if torch.is_tensor(t_dense) else t_dense
     
-    dose_times_np = MAX_TIME * dose_times.cpu().numpy() if torch.is_tensor(dose_times) else dose_times
+    dose_times_np = dose_times.cpu().numpy() if torch.is_tensor(dose_times) else dose_times
     
     
 
@@ -163,7 +179,7 @@ def plot_individual_samples_vs_data_vectorized_vae(dose_times,
     ode_func = ODEWrapper(func, dose_times_padded_rep,dose_tensor, dose_mask_rep)
     pred = odeint(ode_func, x0, t_dense.to(device), method='dopri5')  # [time, n_samples, latent_dim+1]
     
-    x_pred = reducer(pred[:, :, :4])
+    x_pred = reducer(pred[:, :, :latent_dim])
     x_preds = x_pred.squeeze(-1).unsqueeze(0)  # Shape: [1, 120]
 
     print(x_pred.size())
@@ -216,17 +232,162 @@ def plot_individual_samples_vs_data_vectorized_vae(dose_times,
     plt.show()
 
     
-    
-    
-    
+
+def plotIndividualFits_test(
+    test_dataset, df, latent_dim,
+    refiner1, refiner2,
+    func, reducer, initial_encoder, ODEWrapper, t_dense,
+    max_individuals=6, n_samples=50, device="cpu",
+    truncation=0.5  # <-- NEW ARGUMENT: normalized time (0-1)
+):
+    import math
+
+    t_dense = t_dense.to(device)
+    MAX_TIME = test_dataset.max_time
+    MAX_DOSE = test_dataset.max_dose
+    conc_mean, conc_std = test_dataset.conc_mean, test_dataset.conc_std
+
+    # Separate indices by dose group
+    dose_05_indices = []
+    dose_10_indices = []
+
+    for idx in range(len(test_dataset)):
+        t, x, dose_tensor, dose_times_tensor, subject_id = test_dataset[idx]
+        dose_val = dose_tensor.item()
+        if abs(dose_val - 0.5) < 1e-3:
+            dose_05_indices.append(idx)
+        elif abs(dose_val - 1.0) < 1e-3:
+            dose_10_indices.append(idx)
+
+    n_each = max_individuals // 2
+    selected_indices = dose_05_indices[:n_each] + dose_10_indices[:n_each]
+
+    ncols = 3
+    nrows = math.ceil(max_individuals / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+
+    for i, idx in enumerate(selected_indices):
+        t, x, dose_tensor, dose_times_tensor, subject_id = test_dataset[idx]
+
+        t, x = t.to(device), x.to(device)
+        dose_tensor = dose_tensor.to(device).unsqueeze(0)
+        dose = dose_tensor.item()
+        dose_times_tensor = dose_times_tensor.to(device)
+
+        # Normalize and truncate input for encoding
+        t_full = t
+        x_full = x
+        t_norm = t_full
+        x_std = x_full * conc_std + conc_mean
+
+        # Mask for time <= truncation
+        train_mask = t_norm <= truncation
+        t_trunc = t_norm[train_mask].unsqueeze(0)
+        x_trunc = x_full[train_mask].unsqueeze(0)
+
+
+        refiner = refiner1 if abs(dose - 0.5) < 1e-3 else refiner2
+        _, mu, logvar,_ = refiner(t_trunc, x_trunc)
+        print("mu mean:", mu.mean().item(), "logvar mean:", logvar.mean().item())
+ 
+
+        t_rep = t_trunc.repeat(n_samples, 1)
+        x_rep = x_trunc.repeat(n_samples, 1)
+
+        _,mu, logvar,_ = refiner(t_rep, x_rep)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+
+        x0 = torch.cat([initial_encoder(x_trunc[:, 0].unsqueeze(1)).repeat(n_samples, 1), z], dim=1)
+
+        dose_times_padded = torch.nn.utils.rnn.pad_sequence([dose_times_tensor], batch_first=True).to(device)
+        dose_mask = (dose_times_padded != 0).to(device)
+        dose_times_padded = dose_times_padded.repeat(n_samples, 1)
+        dose_mask = dose_mask.repeat(n_samples, 1)
+        dose_rep = dose_tensor.repeat(n_samples, 1)
+
+        ode_func = ODEWrapper(func, dose_times_padded, dose_rep, dose_mask)
+        pred = odeint(ode_func, x0, t_dense, method='dopri5')
+        pred = reducer(pred[:, :, :latent_dim])
+        pred = destandardize_concentration(pred, conc_mean, conc_std)
+
+        perc10 = torch.quantile(pred, 0.10, dim=1)
+        perc90 = torch.quantile(pred, 0.90, dim=1)
+        median = torch.median(pred, dim=1).values
+        
+        # Convert to numpy on CPU
+        perc10 = perc10.detach().cpu().numpy()
+        perc90 = perc90.detach().cpu().numpy()
+        median = median.detach().cpu().numpy()
+
+
+
+        time_dense_np = t_dense.cpu().numpy() * MAX_TIME
+
+        # Define boolean masks on CPU numpy arrays for indexing:
+        train_region = time_dense_np <= truncation * MAX_TIME
+        test_region = time_dense_np > truncation * MAX_TIME
+      
+
+        # Then plot
+        ax = axes[i // ncols][i % ncols]
+        
+        ax.fill_between(time_dense_np[train_region], perc10[train_region], perc90[train_region], color="blue", alpha=0.3, label="Pred 10–90% CI (Training)")
+        ax.fill_between(time_dense_np[test_region], perc10[test_region], perc90[test_region], color="red", alpha=0.3, label="Pred 10–90% CI (Test)")
+        
+        ax.plot(time_dense_np[train_region], median[train_region], color="blue", label="Pred median (Training)")
+        ax.plot(time_dense_np[test_region], median[test_region], color="red", label="Pred median (Test)")
+        
+        # Similarly for scatter actual points, separate by truncation
+        train_points_mask = (t_norm.cpu().numpy() * MAX_TIME) <= (truncation * MAX_TIME)
+        test_points_mask = (t_norm.cpu().numpy() * MAX_TIME) > (truncation * MAX_TIME)
+        
+        t_scaled = (t_norm.cpu().numpy()) * MAX_TIME
+        x_scaled = (x_std.cpu().numpy())
+        
+        ax.scatter(t_scaled[train_points_mask], x_scaled[train_points_mask], color='blue', label='Training data')
+        ax.scatter(t_scaled[test_points_mask], x_scaled[test_points_mask], color='red', label='Test data')
+        
+        ax.set_title(f"ID {subject_id} | Dose {dose * MAX_DOSE:.1f}")
+
+        ax.set_title(f"ID {subject_id} | Dose {dose * MAX_DOSE:.1f}")
+        ax.set_xlabel("Time (hours)")
+        ax.set_ylabel("Concentration")
+        ax.grid(True)
+       # ax.set_xlim(0, MAX_TIME)
+      #  ax.set_ylim(0, 20)
+        ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
  
         
-def simulate_and_plot_by_dose_vae(
-    dataset, dim_parameters, initial_encoder, func, reducer, noise, ODEWrapper,
-    t_dense, conc_mean, conc_std, MAX_TIME, MAX_DOSE,compartment, num_simulated_total=500,
+def vpc(
+        df, dataset, latent_dim,
+      dim_parameters, initial_encoder, func, reducer, noise, ODEWrapper,
+    t_dense,compartment, num_simulated_total=500,
     add_noise_to_prediction: bool = False  # 🔧 NEW ARGUMENT
 ):
+    
+    
     device = next(func.parameters()).device
+    t_dense=t_dense.to(device)
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    dose_times_tensor = torch.from_numpy(unique_times_np).float().to(t_dense.device) / MAX_TIME
+    t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
+
+    
+    t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
+    
     unique_doses = sorted(set(entry[2].item() for entry in dataset))
     num_doses = len(unique_doses)
     num_simulated_per_dose = max(1, num_simulated_total // num_doses)
@@ -254,7 +415,9 @@ def simulate_and_plot_by_dose_vae(
             sample_shape = torch.Size([dim_parameters])
             new_sample = torch.randn(sample_shape)
             z_samples.append(new_sample)
+        
             
+        dose_times=dose_times.to(device)
         t_dense2 = torch.unique(torch.cat([t_dense2, dose_times]))
         doses_tensor = torch.stack(doses).to(device)
         dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
@@ -262,7 +425,9 @@ def simulate_and_plot_by_dose_vae(
         z_tensor = torch.stack(z_samples).to(device)
 
         x0_list = []
+        x_trues=x_trues
         for x in x_trues:
+            x=x.to(device)
             out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
             if out.dim() == 1:
                 out = out.unsqueeze(0)  # convert [4] -> [1, 4]
@@ -273,9 +438,10 @@ def simulate_and_plot_by_dose_vae(
 
         ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
         x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
+        x0=x0.to(device)
         pred = odeint(ode_func, x0, t_dense.to(device), method='dopri5')  # [time, batch, latent_dim+1]
         
-        x_pred = reducer(pred[:, :, :4])  # [time, batch, state_dim]
+        x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean,conc_std)  # [time, batch, state_dim]
 
         # ✅ Optionally add noise
         if add_noise_to_prediction:
@@ -287,9 +453,10 @@ def simulate_and_plot_by_dose_vae(
         perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1)
 
         interp_all = [
-            torch_linear_interpolate2(t_real, x_true, t_dense2)
+            torch_linear_interpolate2(t_real.to(t_dense2.device), x_true.to(t_dense2.device), t_dense2)
             for t_real, x_true in zip(t_reals, x_trues)
         ]
+
         data_matrix = torch.stack(interp_all)
 
         perc10_data = torch.quantile(data_matrix, 0.10, dim=0)
@@ -297,9 +464,9 @@ def simulate_and_plot_by_dose_vae(
         perc90_data = torch.quantile(data_matrix, 0.90, dim=0)
 
         # De-standardize
-        perc10_sim_real = destandardize_concentration(perc10_sim, conc_mean, conc_std)
-        median_sim_real = destandardize_concentration(median_sim, conc_mean, conc_std)
-        perc90_sim_real = destandardize_concentration(perc90_sim, conc_mean, conc_std)
+        perc10_sim_real = perc10_sim
+        median_sim_real = median_sim
+        perc90_sim_real = perc90_sim
 
         perc10_data_real = destandardize_concentration(perc10_data, conc_mean, conc_std)
         median_data_real = destandardize_concentration(median_data, conc_mean, conc_std)
@@ -326,19 +493,31 @@ def simulate_and_plot_by_dose_vae(
         plt.tight_layout()
         plt.show()
 
-def simulate_and_plot_by_dose_vae_refiner(
-    dataset, global_latent, initial_encoder, refiner1, refiner2,func, reducer, noise, ODEWrapper,
-    t_dense, conc_mean, conc_std, MAX_TIME, MAX_DOSE,compartment, num_simulated_total=500,
+def vpc_refiner(nf,
+        df, dataset, latent_dim,
+      dim_parameters, initial_encoder,refiner1,refiner2, func, reducer, noise, ODEWrapper,
+    t_dense,compartment, num_simulated_total=500,
     add_noise_to_prediction: bool = False  # 🔧 NEW ARGUMENT
 ):
     device = next(func.parameters()).device
+    
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    dose_times_tensor = torch.from_numpy(unique_times_np).float().to(t_dense.device) / MAX_TIME
+    t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
+    
+   
     unique_doses = sorted(set(entry[2].item() for entry in dataset))
     num_doses = len(unique_doses)
     num_simulated_per_dose = max(1, num_simulated_total // num_doses)
-    
+
     for dose_value in unique_doses:
-    
-            
         dose_filtered_dataset = [entry for entry in dataset if entry[2].item() == dose_value]
         if len(dose_filtered_dataset) == 0:
             print(f"⚠️ No data found for dose {dose_value}. Skipping plot.")
@@ -348,7 +527,7 @@ def simulate_and_plot_by_dose_vae_refiner(
         batch_entries = [dose_filtered_dataset[i] for i in indices]
         t_dense2 = torch.linspace(0, 1, steps=120).to(device)
 
-        t_reals, x_trues, doses, dose_times_list, z_samples = [], [], [], [], []
+        t_reals, x_trues, doses, dose_times_list = [], [], [], []
 
         for entry in batch_entries:
             t_real, x_true, dose, dose_times = entry[:4]
@@ -356,29 +535,64 @@ def simulate_and_plot_by_dose_vae_refiner(
             x_trues.append(x_true)
             doses.append(dose)
             dose_times_list.append(dose_times)
-        t_dense2 = torch.unique(torch.cat([t_dense2, dose_times]))
-        t_real_padded = torch.nn.utils.rnn.pad_sequence(t_reals, batch_first=True).to(device)  # [batch, max_len_t]
-        x_true_padded = torch.nn.utils.rnn.pad_sequence(x_trues, batch_first=True).to(device)  # [batch, max_len_t, features]
-        mu_q, logvar = refiner1(t_real_padded, x_true_padded)
-        std_q = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std_q)
-        z_refined = mu_q + eps * std_q
-        
             
-        
+        dose_times=dose_times.to(device)
+        t_dense2 = torch.unique(torch.cat([t_dense2, dose_times]))    
+      
         doses_tensor = torch.stack(doses).to(device)
         dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
         dose_mask = (dose_times_padded != 0).to(device)
-        z_tensor = z_refined.to(device)
 
-        x0_init = torch.stack([x[0] for x in x_trues]).to(device)
-        x0_latent = initial_encoder(torch.cat([x0_init.unsqueeze(1)] * 2, dim=1))
-        x0 = torch.cat([x0_latent, doses_tensor.unsqueeze(-1),z_tensor], dim=-1)
+        t_real_padded = torch.nn.utils.rnn.pad_sequence(t_reals, batch_first=True).to(device)
+        x_true_padded = torch.nn.utils.rnn.pad_sequence(x_trues, batch_first=True).to(device)
 
-        ode_func = ODEWrapper(func, dose_times_padded, dose_mask, z_tensor)
+        # 🧠 Use refiner to get posterior latent sample
+        # 🧠 Choose refiner based on dose
+        dose_value_float = float(dose_value)
+        
+        if nf:
+            if dose_value_float == 0.5:
+               _, mu_q, logvar_q,_ = refiner1(t_real_padded, x_true_padded)
+            elif dose_value_float == 1.0:
+               _, mu_q, logvar_q,_ = refiner2(t_real_padded, x_true_padded)
+           
+                
+        else:
+            
+            if dose_value_float == 0.5:
+               mu_q, logvar_q= refiner1(t_real_padded, x_true_padded)
+            elif dose_value_float == 1.0:
+               mu_q, logvar_q = refiner2(t_real_padded, x_true_padded)
+           
+           
+            
+            
+            raise ValueError(f"Unsupported dose value: {dose_value_float}. Expected 0.5 or 1.0.")
+        
+        
+       # print("mu mean:", mu_q, "logvar mean:", logvar_q)
+        std_q = torch.exp(0.5 * logvar_q)
+        eps = torch.randn_like(std_q)
+        z_tensor = mu_q + eps * std_q
+
+        x0_list = []
+        for x in x_trues:
+            x=x.to(device)
+            out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
+            if out.dim() == 1:
+                out = out.unsqueeze(0)  # convert [4] -> [1, 4]
+            x0_list.append(out)
+        x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
+
+        doses_tensor = doses_tensor.unsqueeze(1)  # Now shape [5, 1]
+
+        ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
+        x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
+        x0=x0.to(device)
         pred = odeint(ode_func, x0, t_dense.to(device), method='dopri5')  # [time, batch, latent_dim+1]
+        
 
-        x_pred = reducer(pred[:, :, :x0_latent.shape[-1]])  # [time, batch, state_dim]
+        x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean, conc_std)  # Only reduce latent part
 
         # ✅ Optionally add noise
         if add_noise_to_prediction:
@@ -390,9 +604,10 @@ def simulate_and_plot_by_dose_vae_refiner(
         perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1)
 
         interp_all = [
-            torch_linear_interpolate2(t_real, x_true, t_dense2)
-            for t_real, x_true in zip(t_reals, x_trues)
-        ]
+              torch_linear_interpolate2(t_real.to(t_dense2.device), x_true.to(t_dense2.device), t_dense2)
+              for t_real, x_true in zip(t_reals, x_trues)
+          ]
+
         data_matrix = torch.stack(interp_all)
 
         perc10_data = torch.quantile(data_matrix, 0.10, dim=0)
@@ -400,9 +615,9 @@ def simulate_and_plot_by_dose_vae_refiner(
         perc90_data = torch.quantile(data_matrix, 0.90, dim=0)
 
         # De-standardize
-        perc10_sim_real = destandardize_concentration(perc10_sim, conc_mean, conc_std)
-        median_sim_real = destandardize_concentration(median_sim, conc_mean, conc_std)
-        perc90_sim_real = destandardize_concentration(perc90_sim, conc_mean, conc_std)
+        perc10_sim_real = perc10_sim
+        median_sim_real = median_sim
+        perc90_sim_real = perc90_sim
 
         perc10_data_real = destandardize_concentration(perc10_data, conc_mean, conc_std)
         median_data_real = destandardize_concentration(median_data, conc_mean, conc_std)
@@ -415,11 +630,10 @@ def simulate_and_plot_by_dose_vae_refiner(
         plt.plot(time_hours, perc10_sim_real.detach().cpu().numpy(), label="Simulated 10th percentile", color="blue", linestyle="--")
         plt.plot(time_hours, median_sim_real.detach().cpu().numpy(), label="Simulated median", color="blue", marker="o")
         plt.plot(time_hours, perc90_sim_real.detach().cpu().numpy(), label="Simulated 90th percentile", color="blue", linestyle="--")
-        
+
         plt.plot(time_hours, perc10_data_real.detach().cpu().numpy(), label="Raw 10th percentile", color="orange", linestyle="--")
         plt.plot(time_hours, median_data_real.detach().cpu().numpy(), label="Raw median", color="orange")
         plt.plot(time_hours, perc90_data_real.detach().cpu().numpy(), label="Raw 90th percentile", color="orange", linestyle="--")
-
 
         plt.title(f"Dose {dose_value * MAX_DOSE:.0f} (Simulated vs Raw)")
         plt.xlabel("Time (hours)")
@@ -428,6 +642,7 @@ def simulate_and_plot_by_dose_vae_refiner(
         plt.legend()
         plt.tight_layout()
         plt.show()
+
 
 
 

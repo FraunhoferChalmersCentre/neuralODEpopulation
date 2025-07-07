@@ -1,16 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sun Jun 29 14:54:39 2025
+Created on Wed Jul  2 17:44:37 2025
 
 @author: Baaz
 """
 
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Jun 27 10:09:11 2025
 
-@author: Baaz
-"""
 import ast
 import numpy as np
 import pandas as pd
@@ -21,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from torchdiffeq import odeint_adjoint as odeint
+from torchdiffeq import odeint as odeint
 
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
@@ -33,274 +28,14 @@ import os
 # ---- Settings ----
 compartment = 'C2'
 
-
-
-
-def plot_from_training_records(latent_dim,
-    records,
-    func,
-    reducer,
-    initial_encoder,
-    ODEWrapper,
-    t_dense,
-    conc_mean,
-    conc_std,
-    max_plots=6,
-    MAX_TIME=1.0,
-    MAX_DOSE=1.0,
-    compartment="central",
-    nr_row=2,
-    nr_col=3,
-):
-
-    device = next(func.parameters()).device  # get device from model (usually cuda)
-    n = min(len(records), max_plots)
-
-    # Prepare batch data containers
-    subject_ids = []
-    ts = []
-    xs = []
-    doses = []
-    dose_times_list = []
-    z_refined_list = []
-    
-
-    
-    for i in range(n):
-        subject_id, t_real, x_real, dose, dose_times, z_refined = records[i]
-        subject_ids.append(subject_id)
-        ts.append(t_real)
-        xs.append(x_real)
-        doses.append(dose)
-        dose_times_list.append(dose_times if isinstance(dose_times, torch.Tensor) else torch.tensor(dose_times))
-        z_refined_list.append(z_refined if isinstance(z_refined, torch.Tensor) else torch.tensor(z_refined))
-    
-    doses = [d.unsqueeze(0) if d.dim() == 0 else d for d in doses]
-    doses = torch.stack(doses)  # Now shape: [batch_size, 1]
-    
-
-    dose_times = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True)  # [batch_size, max_len]
-    dose_mask = (dose_times != 0)        # boolean mask where dose times exist
-    z_refined = torch.stack(z_refined_list)  # [batch_size, latent_dim]
- 
-
-
-    x0_list = []
-    for x in xs:
-        out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
-        if out.dim() == 1:
-            out = out.unsqueeze(0)  # convert [4] -> [1, 4]
-        x0_list.append(out)
-    x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
-
-  
-
-    x0 = torch.cat([x0_tensor, z_refined], dim=1)  # shape [batch_size, 6]
-    #x0 = torch.cat(x0_list, dim=0)  # shape: [batch_size, features]
- 
-    # Concatenate dose scalar to latent initial condition (expand dose to 2D)
-   # x0 = torch.cat([x0_latent, doses.unsqueeze(-1), z_refined], dim=-1)  # [batch_size, latent_dim+1]
-   # doses = torch.stack(doses).unsqueeze(1)
-
-    # Instantiate batched ODEWrapper
-    doses = doses.to(device)
-    dose_times = dose_times.to(device)
-    dose_mask = dose_mask.to(device)
-    z_refined = z_refined.to(device)
-    x0 = x0.to(device)
-    t_dense = t_dense.to(device)
-    # After moving tensors to device
-
-    
-    ode_func = ODEWrapper(func, dose_times, doses, dose_mask)
-    
-  
-    pred = odeint(ode_func, x0, t_dense, method='dopri5')
-
-
-    # Apply reducer on latent dims only (exclude dose dim)
-    x_pred = reducer(pred[:, :, :latent_dim])  # [time_steps, batch_size, 1]
-
-    # Plot
-    fig, axs = plt.subplots(nr_row, nr_col, figsize=(nr_col * 6, nr_row * 5), sharex=True)
-    axs = axs.flatten()
-
-    for i in range(n):
-        ax = axs[i]
-
-        # Interpolate actual x onto t_dense for smooth plot
-        x_interp = torch.tensor(
-            np.interp(
-                t_dense.cpu().numpy(),
-                ts[i].cpu().numpy(),
-                xs[i].cpu().numpy()
-            ),
-            dtype=torch.float32,
-            device=ts[i].device,
-        )
-
-        ax.plot(ts[i].cpu().numpy() * MAX_TIME, (xs[i].cpu().numpy() * conc_std) + conc_mean, 'o-', label='Actual')
-        ax.plot(t_dense.cpu().numpy() * MAX_TIME, (x_pred[:, i].detach().cpu().numpy() * conc_std) + conc_mean, '-', label='Predicted')
-        ax.set_title(f"Individual {subject_ids[i]} - Dose: {doses[i].item() * MAX_DOSE:.0f} mg")
-        ax.set_ylabel(f"Concentration ({compartment})")
-        ax.set_xlim(0, 24)
-        ax.set_ylim(0, 20)
-        ax.grid(True)
-        ax.legend()
-
-    axs[-1].set_xlabel("Time (hours)")
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-
-
-
-
-def train_model_vae(dim_parameter_encoder, latent_dim,
-    dataloader, func, reducer, initial_encoder,
-    refiner1, refiner2, noise,
-    optimizer, scheduler, device, t_dense,
-    kl_weight, alpha, n_epochs, warmup_epochs,
-    smoothing_start_epoch, print_epoch, plot_epoch,
-    ODEWrapper, conc_std, conc_mean,
-    MAX_TIME, MAX_DOSE
-):
-    for epoch in range(n_epochs):
-    
-        total_loss = 0.0
-        z_individual_list = []
-        trajectory_records = []
-
-        # === Enable or disable noise learning ===
-        for param in noise.parameters():
-            param.requires_grad = epoch >= warmup_epochs
-
-        for id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list in dataloader:
-            t_padded, x_padded, mask = t_padded.to(device), x_padded.to(device), mask.to(device)
-            dose_tensor = dose_tensor.to(device)
-            dose_times_list = [dt.to(device) for dt in dose_times_list]
-            batch_size = t_padded.size(0)
-
-            dose_times_padded, dose_times_mask = pad_dose_times(dose_times_list)
-
-            # === Create dose masks ===
-            mask_low = dose_tensor == 0.5
-            mask_high = dose_tensor == 1.0
-
-            # === Prepare data for each group ===
-            t_low, x_low = t_padded[mask_low], x_padded[mask_low]
-            t_high, x_high = t_padded[mask_high], x_padded[mask_high]
-
-            # === Refine latents for each group ===
-            mu_q_low, logvar_q_low = refiner1(t_low, x_low)
-            mu_q_high, logvar_q_high = refiner2(t_high, x_high)
-
-            # === Merge low and high dose latent representations ===
-            #latent_dim = mu_q_low.shape[1]
-            mu_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
-            logvar_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
-            mu_q[mask_low] = mu_q_low
-            mu_q[mask_high] = mu_q_high
-            logvar_q[mask_low] = logvar_q_low
-            logvar_q[mask_high] = logvar_q_high
-
-            std_q = torch.exp(0.5 * logvar_q)
-            eps = torch.randn_like(std_q)
-            z_refined = mu_q + eps * std_q
-          #  print(mu_q)
-          #  mask_z = (torch.rand(batch_size) < alpha).to(device)
-          #  z_input = torch.where(mask_z.unsqueeze(-1), z_refined, global_latent.mu.detach().unsqueeze(0).expand(batch_size, -1))
-           
-            # === ODE Prediction ===
-            x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
-            #x0 = torch.cat([x0_latent, dose_tensor.unsqueeze(-1),z_refined], dim=-1)
-
-            x0 = torch.cat([x0_1, z_refined], dim=1)
-            
-           
-            ode_func = ODEWrapper(func, dose_times_padded,dose_tensor.unsqueeze(-1), dose_times_mask)
-            pred = odeint(ode_func, x0, t_dense, method='dopri5')
-            
-            pred_batch = pred.permute(1, 0, 2)  # [batch, time, features]
-
-            # === Interpolate and Calculate Loss ===
-            t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
-            test = reducer(pred_batch[:, :, :latent_dim])
-            pred_interp = batch_linear_interpolate_1d(test, t_dense_exp, t_padded)
-            recon_loss_noise = noise.nll(x_padded, pred_interp, mask)
-            # Create standard Gaussian targets for low-level latents
-            mu_std_low = torch.zeros_like(mu_q_low)
-            logvar_std_low = torch.zeros_like(logvar_q_low)
-            
-            # Create standard Gaussian targets for high-level latents
-            mu_std_high = torch.zeros_like(mu_q_high)
-            logvar_std_high = torch.zeros_like(logvar_q_high)
-            
-            # Compute KL divergence against standard normal for both levels
-            KL_loss = kl_divergence_gaussians(mu_q_low, logvar_q_low, mu_std_low, logvar_std_low) + \
-                      kl_divergence_gaussians(mu_q_high, logvar_q_high, mu_std_high, logvar_std_high)
-            loss = recon_loss_noise + kl_weight * KL_loss
-
-            # === Backprop ===
-
-            optimizer.zero_grad()
-
-            loss.backward()
-   
-            optimizer.step()
-  
-
-            residual = x_padded - pred_interp
-    
-            # === Store for analysis ===
-            z_individual_list.append(z_refined.detach())
-            for i in range(batch_size):
-                trajectory_records.append((
-                    id_list[i],
-                    t_padded[i, mask[i]],
-                    x_padded[i, mask[i]],
-                    dose_tensor[i],
-                    dose_times_list[i],
-                    z_refined[i].detach()
-                ))
-
-        # === Global latent and EMA updates ===
-        z_all = torch.cat(z_individual_list, dim=0)
-        with torch.no_grad():
-            if epoch > smoothing_start_epoch:
-                func.update_ema(alpha=0.1)
-                reducer.update_ema(alpha=0.1)
-                initial_encoder.update_ema(alpha=0.1)
-                refiner1.update_ema(alpha=0.1)
-                refiner2.update_ema(alpha=0.1)
-             
-
-        scheduler.step()
-
-        # === Logging ===
-        if epoch % print_epoch == 0:
-            with torch.no_grad():
-                print(
-                    f"Epoch {epoch}, "
-                    f"-LL: {recon_loss_noise.item():.4f}, "
-                    f"KL loss: {KL_loss.item():.4f}, "
-                    f"Add. error: {(conc_std * torch.exp(noise.log_sigma_add)).item():.4f}, "
-                    f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, ")
-
-        if epoch % plot_epoch == 0:
-            plot_from_training_records(latent_dim=latent_dim, records=trajectory_records, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=t_dense, conc_mean=conc_mean, conc_std=conc_std, max_plots=6, MAX_TIME=MAX_TIME, MAX_DOSE=MAX_DOSE) if epoch % plot_epoch == 0 else None
-
+from lib.models.NNmodels_parallel import *
 
 
 def approx_dirac_delta_vectorized(t, dose_times, dt, scaling=0.02,normalize=1):
     epsilon = scaling
     return np.sum(np.exp(-((t - dose_times) / epsilon)**2) / (epsilon * np.sqrt(np.pi)))/normalize
 
-#def approx_dirac_delta_vectorized(t, dose_times, epsilon=0.01):
-    # make sure t and dose_times are NumPy arrays
- #   t = np.asarray(t)
- #   dose_times = np.asarray(dose_times)
- #   return np.sum(np.exp(-((t - dose_times) / epsilon)**2) / (epsilon * np.sqrt(np.pi)))
+
 
 
 def pk_2cpt_step(y, ka, cl, v, dose_amount, dose_times, t, dt):
@@ -518,7 +253,6 @@ def torch_linear_interpolate2(x_dense, y_dense, x_target):
 
 
 
-
 def estimate_max_dose(df, dose_col='Dose', max_allowed=100.0):
     """Estimate max dose from dataframe but limit to max_allowed."""
     max_dose = df[dose_col].max()
@@ -529,10 +263,573 @@ def estimate_max_time(df, time_col='Time', max_allowed=24.0):
     max_time = df[time_col].max()
     return min(max_time, max_allowed)
 
+def truncate_time_series2(t_batch, x_batch, max_points):
+    truncated_t, truncated_x = [], []
+    for t_i, x_i in zip(t_batch, x_batch):
+        num_points = min(max_points, t_i.size(0))
+        truncated_t.append(t_i[:num_points])
+        truncated_x.append(x_i[:num_points])
+    return truncated_t, truncated_x
+
+def truncate_time_series(t_batch, x_batch, truncation_time):
+    truncated_t, truncated_x = [], []
+    for t_i, x_i in zip(t_batch, x_batch):
+        mask = t_i <= truncation_time
+        truncated_t.append(t_i[mask])
+        truncated_x.append(x_i[mask])
+    return truncated_t, truncated_x
 
 
 def standardize_concentration(conc, mean, std): return (conc - mean) / std
 def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
+
+
+
+    
+def plot_from_training_records(batch_size,device,df,dataset,latent_dim,
+    records,
+    func,
+    reducer,
+    initial_encoder,
+    ODEWrapper,
+    t_dense,
+    max_plots=6, 
+    nr_row=2,
+    nr_col=3,
+    compartment="central",
+    
+):
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    unique_times = torch.from_numpy(unique_times_np).to(dtype=torch.float32, device=device)
+    dose_times_tensor = unique_times / MAX_TIME
+    
+    t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
+
+
+
+    t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
+    
+    device = next(func.parameters()).device  # get device from model (usually cuda)
+    n = min(len(records), max_plots)
+
+    # Prepare batch data containers
+    subject_ids = []
+    ts = []
+    xs = []
+    doses = []
+    dose_times_list = []
+    z_refined_list = []
+    
+
+    
+    for i in range(n):
+        subject_id, t_real, x_real, dose, dose_times, z_refined = records[i]
+        subject_ids.append(subject_id)
+        ts.append(t_real)
+        xs.append(x_real)
+        doses.append(dose)
+        dose_times_list.append(dose_times if isinstance(dose_times, torch.Tensor) else torch.tensor(dose_times))
+        z_refined_list.append(z_refined if isinstance(z_refined, torch.Tensor) else torch.tensor(z_refined))
+    
+    doses = [d.unsqueeze(0) if d.dim() == 0 else d for d in doses]
+    doses = torch.stack(doses)  # Now shape: [batch_size, 1]
+    
+
+    dose_times = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True)  # [batch_size, max_len]
+    dose_mask = (dose_times != 0)        # boolean mask where dose times exist
+    z_refined = torch.stack(z_refined_list)  # [batch_size, latent_dim]
+ 
+
+
+    x0_list = []
+    for x in xs:
+        out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
+        if out.dim() == 1:
+            out = out.unsqueeze(0)  # convert [4] -> [1, 4]
+        x0_list.append(out)
+    x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
+
+  
+
+    x0 = torch.cat([x0_tensor, z_refined], dim=1)  # shape [batch_size, 6]
+    #x0 = torch.cat(x0_list, dim=0)  # shape: [batch_size, features]
+ 
+    # Concatenate dose scalar to latent initial condition (expand dose to 2D)
+   # x0 = torch.cat([x0_latent, doses.unsqueeze(-1), z_refined], dim=-1)  # [batch_size, latent_dim+1]
+   # doses = torch.stack(doses).unsqueeze(1)
+
+    # Instantiate batched ODEWrapper
+    doses = doses.to(device)
+    dose_times = dose_times.to(device)
+    dose_mask = dose_mask.to(device)
+    z_refined = z_refined.to(device)
+    x0 = x0.to(device)
+    t_dense = t_dense.to(device)
+    # After moving tensors to device
+
+    
+    ode_func = ODEWrapper(func, dose_times, doses, dose_mask)
+    
+  
+    pred = odeint(ode_func, x0, t_dense, method='dopri5')
+
+
+    # Apply reducer on latent dims only (exclude dose dim)
+    x_pred = reducer(pred[:, :, :latent_dim])  # [time_steps, batch_size, 1]
+
+    # Plot
+    fig, axs = plt.subplots(nr_row, nr_col, figsize=(nr_col * 6, nr_row * 5), sharex=True)
+    axs = axs.flatten()
+
+    for i in range(n):
+        ax = axs[i]
+
+        # Interpolate actual x onto t_dense for smooth plot
+        x_interp = torch.tensor(
+            np.interp(
+                t_dense.cpu().numpy(),
+                ts[i].cpu().numpy(),
+                xs[i].cpu().numpy()
+            ),
+            dtype=torch.float32,
+            device=ts[i].device,
+        )
+
+        ax.plot(ts[i].cpu().numpy() * MAX_TIME, (xs[i].cpu().numpy() * conc_std) + conc_mean, 'o-', label='Actual')
+        ax.plot(t_dense.cpu().numpy() * MAX_TIME, (x_pred[:, i].detach().cpu().numpy() * conc_std) + conc_mean, '-', label='Predicted')
+        ax.set_title(f"Individual {subject_ids[i]} - Dose: {doses[i].item() * MAX_DOSE:.0f} mg")
+        ax.set_ylabel(f"Concentration ({compartment})")
+       # ax.set_xlim(0, 24)
+      #  ax.set_ylim(0, 20)
+        ax.grid(True)
+        ax.legend()
+
+    axs[-1].set_xlabel("Time (hours)")
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+
+def save_models(models: dict, save_dir: str, model_name: str):
+    """
+    Save multiple models to a given directory.
+
+    Args:
+        models (dict): Dictionary with model names as keys and model instances as values.
+        save_dir (str): Directory to save the models.
+        model_name (str): Base name to prepend to each saved model file.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    for key, model in models.items():
+        path = os.path.join(save_dir, f"{model_name}_{key}.pt")
+        torch.save(model.state_dict(), path)
+    print(f"Saved {len(models)} models to {save_dir}")
+
+def load_models(models: dict, load_dir: str, model_name: str, device=torch.device("cpu")):
+    """
+    Load model states into existing model instances from a directory.
+
+    Args:
+        models (dict): Dictionary with model names as keys and initialized model instances as values.
+        load_dir (str): Directory where models are saved.
+        model_name (str): Base name prepended to each saved model file.
+        device (torch.device): Device to map the loaded model parameters.
+
+    Returns:
+        dict: Dictionary with loaded model instances.
+    """
+    for key, model in models.items():
+        path = os.path.join(load_dir, f"{model_name}_{key}.pt")
+        if os.path.isfile(path):
+            model.load_state_dict(torch.load(path, map_location=device))
+            model.to(device)
+            print(f"Loaded {key} from {path}")
+        else:
+            print(f"Warning: Model file {path} not found. Skipping load for {key}.")
+    
+   # models=models.to(device)
+    return models    
+
+
+
+
+def train_model(dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
+    refiner1, refiner2, noise, device, t_dense,
+     n_epochs, warmup_epochs_noise,warmup_epochs_iiv,
+    smoothing_start_epoch,
+    ae,nf, free_bits,batch_size,df, dataset, max_points_visible, lr, print_epoch=1,
+    plot_epoch=1,
+    max_plots=4,
+    nr_col=1,
+    nr_row=5):
+    
+   
+    
+    models = {
+    "func": func,
+    "refiner1": refiner1,
+    "refiner2": refiner2,
+    "reducer": reducer,
+    "initial_encoder": initial_encoder,
+    "noise": noise,
+    # add any other models...
+    }   
+    t_dense = t_dense.to(device)
+    base_lr = lr  # your existing lr, e.g., 1e-3
+    
+    if nf:
+        flow_lr = base_lr * 1  # reduce flow LR by 10x, for example
+        
+        # Extract flow parameters from both refiners
+        flow_params = list(refiner1.flow.parameters()) + list(refiner2.flow.parameters())
+        
+        # Extract all refiner parameters combined
+        all_refiner_params = list(refiner1.parameters()) + list(refiner2.parameters())
+        
+        # Non-flow refiner parameters = all refiner params - flow params
+        non_flow_refiner_params = [p for p in all_refiner_params if id(p) not in {id(fp) for fp in flow_params}]
+    
+        
+        main_params = [
+            {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) + non_flow_refiner_params, "lr": base_lr},
+            {"params": flow_params, "lr": flow_lr},  # lower LR for flow params
+            {"params": list(noise.parameters()), "lr": base_lr},
+        ]
+    else:
+         main_params = [
+             {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(refiner1.parameters()) + list(refiner2.parameters()) , "lr": base_lr},
+             {"params": list(noise.parameters()), "lr": base_lr},
+         ]
+         
+
+
+    optimizer = torch.optim.Adam(main_params, lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=250, gamma=0.1)
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    unique_times = torch.from_numpy(unique_times_np).to(dtype=torch.float32, device=device)
+    dose_times_tensor = unique_times / MAX_TIME
+    
+    t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
+
+
+
+
+
+    t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
+    if nf:
+        print(f"{'---- NF training initialized ----' if nf else '---- AE training initialized ----'}")
+    else:
+        print(f"{'---- AE training initialized ----' if ae else '---- VAE training initialized ----'}")
+
+    print(f"Total epochs: {n_epochs}")
+    print(f"Warmup epochs (noise): {warmup_epochs_noise}")
+    print(f"Warmup epochs (IIV): {warmup_epochs_iiv}")
+    print(f"Smoothing (EMA) starts after epoch: {smoothing_start_epoch}")
+    print("========================================")
+
+
+    
+    for epoch in range(n_epochs):
+        first_batch = True
+
+        # Log when key stages start
+        if epoch == warmup_epochs_noise:
+            print(f"[Epoch {epoch}] ➤ Noise training activated.")
+        
+        if epoch == warmup_epochs_iiv:
+            print(f"[Epoch {epoch}] ➤ Full KL regularization activated.")
+        
+        if epoch == smoothing_start_epoch:
+            print(f"[Epoch {epoch}] ➤ EMA smoothing activated.")
+            
+       
+                        
+
+        total_loss = 0.0
+        total_kl = 0.0
+        total_recon = 0.0
+        z_individual_list = []
+        logvar_q_list = []
+        mu_q_list = []
+
+        trajectory_records = []
+
+        # === Enable or disable noise learning ===
+        for param in noise.parameters():
+            param.requires_grad = epoch >= warmup_epochs_noise
+
+        for id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list in dataloader:
+            t_padded, x_padded, mask = t_padded.to(device), x_padded.to(device), mask.to(device)
+            dose_tensor = dose_tensor.to(device)
+            dose_times_list = [dt.to(device) for dt in dose_times_list]
+            batch_size = t_padded.size(0)
+
+            dose_times_padded, dose_times_mask = pad_dose_times(dose_times_list)
+
+            # === Create dose masks ===
+            mask_low = dose_tensor == 0.5
+            mask_high = dose_tensor == 1.0
+
+            # === Prepare data for each group ===
+            t_low, x_low = t_padded[mask_low], x_padded[mask_low]
+            t_high, x_high = t_padded[mask_high], x_padded[mask_high]
+            
+            if max_points_visible > 0 :
+                
+                t_low_list, x_low_list = truncate_time_series(t_low, x_low, max_points_visible)
+                t_high_list, x_high_list = truncate_time_series(t_high, x_high, max_points_visible)
+                
+                # Pad them again to batch format
+                t_low = pad_sequence(t_low_list, batch_first=True).to(device)
+                x_low = pad_sequence(x_low_list, batch_first=True).to(device)
+               
+                t_high = pad_sequence(t_high_list, batch_first=True).to(device)
+                x_high = pad_sequence(x_high_list, batch_first=True).to(device)
+            
+         
+                
+            if nf:
+                z_low, mu_q_low, logvar_q_low, log_det_low = refiner1(t_low, x_low)
+                z_high, mu_q_high, logvar_q_high, log_det_high = refiner2(t_high, x_high)
+            else:
+                mu_q_low, logvar_q_low = refiner1(t_low, x_low)
+                mu_q_high, logvar_q_high = refiner2(t_high, x_high)
+
+            # === Refine latents for each group ===
+           
+
+            # === Merge low and high dose latent representations ===
+            #latent_dim = mu_q_low.shape[1]
+            mu_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
+            logvar_q = torch.zeros(batch_size, dim_parameter_encoder, device=device)
+            mu_q[mask_low] = mu_q_low
+            mu_q[mask_high] = mu_q_high
+            logvar_q[mask_low] = logvar_q_low
+            logvar_q[mask_high] = logvar_q_high
+
+            std_q = torch.exp(0.5 * logvar_q)
+            #z_refined = mu_q + eps * std_q if vae else mu_q
+            z_refined = torch.zeros_like(mu_q)
+            
+            if ae:
+                z_refined[mask_low]= mu_q_low
+                z_refined[mask_high] = mu_q_high
+            else:
+                if nf:
+                    z_refined[mask_low] = z_low
+                    z_refined[mask_high] = z_high
+                else:
+                    z_refined[mask_low]= mu_q_low + std_q[mask_low] * torch.zeros_like(mu_q_low)
+                    z_refined[mask_high] = mu_q_high + + std_q[mask_high] * torch.zeros_like(mu_q_high)
+
+                
+          #  print(mu_q)
+          #  mask_z = (torch.rand(batch_size) < alpha).to(device)
+          #  z_input = torch.where(mask_z.unsqueeze(-1), z_refined, global_latent.mu.detach().unsqueeze(0).expand(batch_size, -1))
+           
+            # === ODE Prediction ===
+            x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
+            #x0 = torch.cat([x0_latent, dose_tensor.unsqueeze(-1),z_refined], dim=-1)
+
+            x0 = torch.cat([x0_1, z_refined], dim=1)
+            
+            x0 = x0 + torch.randn_like(x0) * 0.01
+
+           
+            ode_func = ODEWrapper(func, dose_times_padded,dose_tensor.unsqueeze(-1), dose_times_mask)
+            if epoch == 0 and first_batch:
+                print(f" ODE Solving starting")
+            pred = odeint(ode_func, x0, t_dense, method='dopri5')
+            if epoch == 0 and first_batch:
+                print(f" ODE Solving finished")
+            pred_batch = pred.permute(1, 0, 2)  # [batch, time, features]
+
+            # === Interpolate and Calculate Loss ===
+            t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
+            test = reducer(pred_batch[:, :, :latent_dim])
+            pred_interp = batch_linear_interpolate_1d(test, t_dense_exp, t_padded)
+            recon_loss_noise = noise.nll(x_padded, pred_interp, mask)
+            # Create standard Gaussian targets for low-level latents
+            mu_std_low = torch.zeros_like(mu_q_low)
+            logvar_std_low = torch.zeros_like(logvar_q_low)
+            
+            # Create standard Gaussian targets for high-level latents
+            mu_std_high = torch.zeros_like(mu_q_high)
+            logvar_std_high = torch.zeros_like(logvar_q_high)
+            
+            # Compute KL divergence against standard normal for both levels
+        
+            if ae:
+                kl_weight = 0
+                free_bits_on = 0  # optional: safe default if KL isn't used
+               
+            else:
+                free_bits_on = 0 if epoch+1 >= warmup_epochs_iiv else free_bits* (1 - min(1.0, epoch / warmup_epochs_iiv))
+                kl_weight = 1 if epoch+1 >= warmup_epochs_iiv else min(1.0, 0.1 + epoch / warmup_epochs_iiv)
+
+           
+            
+            
+           
+            
+            if ae:
+                loss = recon_loss_noise
+                KL_loss=0
+            else:
+                if nf:
+                
+                    KL_loss_low = kl_divergence_NF(epoch,warmup_epochs_iiv,
+                        mu_q_low, logvar_q_low,
+                        mu_std_low, logvar_std_low,
+                        log_det=log_det_low,
+                        free_bits=free_bits_on
+                    )
+                    
+                    KL_loss_high = kl_divergence_NF(epoch,warmup_epochs_iiv,
+                        mu_q_high, logvar_q_high,
+                        mu_std_high, logvar_std_high,
+                        log_det=log_det_high,
+                        free_bits=free_bits_on
+                    )
+                    
+         
+                    KL_loss = KL_loss_low + KL_loss_high
+                    
+                else:
+                    KL_loss = kl_divergence_gaussians(mu_q_low, logvar_q_low, mu_std_low, logvar_std_low, free_bits_on) + \
+                              kl_divergence_gaussians(mu_q_high, logvar_q_high, mu_std_high, logvar_std_high, free_bits_on)
+                              
+                loss = recon_loss_noise + kl_weight * KL_loss
+
+            
+
+            # === Backprop ===
+            total_loss +=  loss
+            
+            if not ae:
+                total_kl += KL_loss
+
+            
+            
+            
+            total_recon +=  recon_loss_noise
+            optimizer.zero_grad()
+            if epoch == 0 and first_batch:
+                print(f"Backprop")
+            loss.backward()
+            # === Gradient check ===
+            if epoch == 0 and first_batch:
+                for name, model in models.items():
+                    for param_name, param in model.named_parameters():
+                        if param.requires_grad:
+                            if param.grad is None:
+                                print(f"[WARNING] No gradient for {name}.{param_name}")
+            
+        
+
+            if epoch == 0 and first_batch:
+              print(f"Optimization")
+            optimizer.step()
+            first_batch = False
+
+
+            residual = x_padded - pred_interp
+    
+            # === Store for analysis ===
+            z_individual_list.append(z_refined.detach())
+            mu_q_list.append(mu_q.detach())
+            logvar_q_list.append(logvar_q.detach())
+
+            for i in range(batch_size):
+                trajectory_records.append((
+                    id_list[i],
+                    t_padded[i, mask[i]],
+                    x_padded[i, mask[i]],
+                    dose_tensor[i],
+                    dose_times_list[i],
+                    mu_q[i].detach()
+                ))
+
+        # === Global latent and EMA updates ===
+        z_all = torch.cat(z_individual_list, dim=0)
+        mu_all = torch.cat(mu_q_list, dim=0)
+        logvar_all = torch.cat(logvar_q_list, dim=0)
+
+        if epoch % 10 == 0:
+            with torch.no_grad():
+                mu_all = torch.cat(z_individual_list, dim=0)               # [N, D]
+                logvar_all = torch.cat(logvar_q_list, dim=0)               # [N, D]
+                std_all = torch.exp(0.5 * logvar_all)                      # [N, D]
+            
+                mu_mean = mu_all.mean(dim=0).mean().item()
+                mu_std = mu_all.std(dim=0).mean().item()
+                std_mean = std_all.mean(dim=0).mean().item()
+                std_std = std_all.std(dim=0).mean().item()
+            
+                print(f"[Epoch {epoch}] μ mean: {mu_mean:.4f}, μ std: {mu_std:.4f}, "
+                      f"σ mean: {std_mean:.4f}, σ std: {std_std:.4f}")
+
+
+        with torch.no_grad():
+            if epoch > smoothing_start_epoch:
+                func.update_ema(alpha=0.1)
+                reducer.update_ema(alpha=0.1)
+                initial_encoder.update_ema(alpha=0.1)
+                refiner1.update_ema(alpha=0.1)
+                refiner2.update_ema(alpha=0.1)
+             
+
+        scheduler.step()
+
+        # === Logging ===
+        if epoch % print_epoch == 0:
+            with torch.no_grad():
+                # Assuming main_params[0] corresponds to the main parameters with base_lr
+                main_lr = optimizer.param_groups[0]['lr']
+          
+                if ae:
+                    print(
+                        f"Epoch {epoch}, "
+                        f"-LL: {total_recon.item():.4f}, "
+                        f"Add. error: {(torch.exp(noise.log_sigma_add)).item():.4f}, "
+                        f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, "
+                        f"lr: {main_lr:.6f}")
+                    
+                    
+                else:    
+                    print(
+                        f"Epoch {epoch}, "
+                        f"loss: {total_loss.item():.4f}, "
+                        f"-LL: {total_recon.item():.4f}, "
+                        f"KL loss: {total_kl.item():.4f}, "
+                        f"Add. error: {(torch.exp(noise.log_sigma_add)).item():.4f}, "
+                        f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, "
+                        f"lr: {main_lr:.6f}")
+
+        if epoch % plot_epoch == 0:
+            plot_from_training_records(batch_size,device, df=df, dataset=dataset, latent_dim=latent_dim,
+                records=trajectory_records,
+                func=func,
+                reducer=reducer,
+                initial_encoder=initial_encoder,
+                ODEWrapper=ODEWrapper,
+                t_dense=t_dense,
+                max_plots=max_plots,
+                nr_row=nr_row,
+                nr_col=nr_col,)
 
 
 
@@ -600,7 +897,6 @@ class TrajectoryDataset(Dataset):
 
 
 
-# ---- Collate ----
 def collate_fn(batch):
     t_list, x_list, dose_list, dose_times_list, id_list = zip(*batch)
 
@@ -621,16 +917,70 @@ def collate_fn(batch):
 
 
 
+def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
+    """
+    KL[q||p] between two diagonal Gaussians with free bits.
+    
+    Args:
+        mu_q, logvar_q: tensors of shape [batch_size, latent_dim] for approximate posterior
+        mu_p, logvar_p: tensors of shape [batch_size, latent_dim] for prior
+        free_bits: float, minimum KL per dimension to avoid collapse
+        
+    Returns:
+        scalar tensor: mean KL divergence with free bits applied
+    """
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+    
+    # KL per dimension, shape: [batch_size, latent_dim]
+    kl_per_dim = 0.5 * (
+        (var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q
+    )
+    
+    # Apply free bits: enforce minimum KL per dimension
+    if free_bits > 0:
+        kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)
+    
+    # Average over batch and latent dims
+    output = torch.mean(torch.sum(kl_per_dim, dim=1))
+    return output
+
+def kl_divergence_NF(epoch, warmup_epochs_iiv, mu_q, logvar_q, mu_p, logvar_p, log_det=None, free_bits=0.0):
+    """
+    KL[q||p] between two diagonal Gaussians with free bits and optional flow correction.
+
+    Args:
+        mu_q, logvar_q: [B, D] posterior (before flow)
+        mu_p, logvar_p: [B, D] prior
+        log_det: [B] flow log-determinant from q(z0) → q(zK)
+        free_bits: float, minimum KL per batch element (total, not per dim)
+
+    Returns:
+        scalar: mean KL with flow correction and free bits
+    """
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+
+    # KL per dim, shape: [B, D]
+    kl_per_dim = 0.5 * (
+        (var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q
+    )
+
+    # sum over dimensions to get KL per batch element
+    kl = torch.sum(kl_per_dim, dim=1)
+    # subtract flow log-determinant if provided
+    if log_det is not None:
+        flow_weight = 1 if epoch+1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
+
+        kl =  kl- flow_weight * log_det
 
 
+    # apply free bits to total KL per batch element (not per dim)
+    if free_bits > 0:
+        kl = torch.clamp(kl, min=free_bits)
 
+    # optionally clamp at zero to avoid negative KL
+    kl = torch.clamp(kl, min=0.0)
 
-def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p):
-   """KL[q||p] between two diagonal Gaussians"""
-   var_q = torch.exp(logvar_q)
-   var_p = torch.exp(logvar_p)
-   
-   return 0.5 * torch.sum(
-       (var_q + (mu_q - mu_p)**2) / var_p - 1 + logvar_p - logvar_q
-   )
+    return kl.mean()
 
