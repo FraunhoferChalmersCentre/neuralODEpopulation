@@ -232,7 +232,7 @@ def plotIndividualFits_MCMC(
 
     
 
-def plotIndividualFits_test(ae,
+def plotIndividualFits_test(ae,nf,
     test_dataset, df, latent_dim,
     refiner1, refiner2,
     func, reducer, initial_encoder, ODEWrapper, t_dense,
@@ -306,14 +306,15 @@ def plotIndividualFits_test(ae,
             z= mu.repeat(n_samples, 1)
         else:
             std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            z = mu + eps * std
+            eps = torch.randn(n_samples, *std.shape)
 
+            z = mu + eps * std
+            z=z.squeeze(dim=1)
+            
         x0_latent = initial_encoder(x_trunc[:, 0].unsqueeze(1))
         x0_latent = x0_latent.repeat(n_samples, 1)  # shape: [1000, d]
-
+        
         x0 = torch.cat([x0_latent,z], dim=1)
-        print(x0)
 
         #x0 = torch.cat([x0_1, z], dim=1)
 
@@ -583,7 +584,7 @@ def vpc_refiner(nf,
            
             
             
-            raise ValueError(f"Unsupported dose value: {dose_value_float}. Expected 0.5 or 1.0.")
+          #  raise ValueError(f"Unsupported dose value: {dose_value_float}. Expected 0.5 or 1.0.")
         
         
        # print("mu mean:", mu_q, "logvar mean:", logvar_q)

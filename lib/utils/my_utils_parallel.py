@@ -459,7 +459,7 @@ def load_models(models: dict, load_dir: str, model_name: str, device=torch.devic
 
 
 
-def train_model(optimizer,scheduler,dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
+def train_model(models, optimizer,scheduler,dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
     refiner1, refiner2, noise, device, t_dense,
      n_epochs, warmup_epochs_noise,warmup_epochs_iiv,
     smoothing_start_epoch,
@@ -471,15 +471,7 @@ def train_model(optimizer,scheduler,dim_parameter_encoder, latent_dim, func, red
     
    
     
-    models = {
-    "func": func,
-    "refiner1": refiner1,
-    "refiner2": refiner2,
-    "reducer": reducer,
-    "initial_encoder": initial_encoder,
-    "noise": noise,
-    # add any other models...
-    }   
+      
     t_dense = t_dense.to(device)
     base_lr = lr  # your existing lr, e.g., 1e-3
     
@@ -631,8 +623,9 @@ def train_model(optimizer,scheduler,dim_parameter_encoder, latent_dim, func, red
                     z_refined[mask_low] = z_low
                     z_refined[mask_high] = z_high
                 else:
-                    z_refined[mask_low]= mu_q_low + std_q[mask_low] * torch.zeros_like(mu_q_low)
-                    z_refined[mask_high] = mu_q_high + + std_q[mask_high] * torch.zeros_like(mu_q_high)
+                    z_refined[mask_low]= mu_q_low + std_q[mask_low] * torch.randn_like(mu_q_low)
+                    z_refined[mask_high] = mu_q_high + + std_q[mask_high] * torch.randn_like(mu_q_high)
+
 
                 
           #  print(mu_q)

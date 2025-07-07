@@ -79,7 +79,7 @@ if __name__ == "__main__":
     df_test=pd.read_csv(args.data_test_path)
     load_dir = args.load_dir
     save_dir = args.save_dir
-    modelname = "MultipleDoseAddError_vae"
+    modelname = "MultipleDoseAddError_AE"
 
     
 
@@ -103,12 +103,28 @@ if __name__ == "__main__":
     reducer = SimpleDecoder(latent_dim, hidden_dim=128).to(device)
     initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=32).to(device)
     noise = TrainableNoise(dataset).to(device)
+    
+    models = {
+    "func": func,
+    "refiner1": refiner1,
+    "refiner2": refiner2,
+    "reducer": reducer,
+    "initial_encoder": initial_encoder,
+    "noise": noise,
+    # add any other models...
+    } 
+   
+    lr=0.001
+   # load_models(models, save_dir, modelname,device)
+    main_params = [
+        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(refiner1.parameters()) + list(refiner2.parameters()) , "lr": lr},
+        {"params": list(noise.parameters()), "lr": lr},
+    ]
+    
     optimizer = torch.optim.Adam(main_params, lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=250, gamma=0.1)
-
-   # load_models(models, save_dir, modelname,device)
     
-    train_model(optimizer,scheduler, dim_parameter_encoder, latent_dim, func,
+    train_model(models, optimizer,scheduler, dim_parameter_encoder, latent_dim, func,
     reducer,
     initial_encoder,
     refiner1,
@@ -118,16 +134,16 @@ if __name__ == "__main__":
     t_dense=torch.linspace(0, 1, steps=480),
     n_epochs=400,
     warmup_epochs_noise=0,
-    warmup_epochs_iiv=50,
-    smoothing_start_epoch=300,
-    ae=True,
+    warmup_epochs_iiv=100,
+    smoothing_start_epoch=0,
+    ae=False,
     nf=False,                  
     free_bits=1,                       
     batch_size=20,                        
     df=df,
     dataset=dataset,
     max_points_visible=0,  
-    lr=0.001,
+    lr=lr,
     print_epoch=1,
     plot_epoch=10,
     max_plots=25,
@@ -135,10 +151,10 @@ if __name__ == "__main__":
     nr_row=5)  
 
 
-    save_models(models, save_dir, modelname)
+    #save_models(models, save_dir, modelname)
 
 
-    
+    #load_models(models, save_dir, modelname)
             
 
 
@@ -154,10 +170,10 @@ if __name__ == "__main__":
 #
 
 ### Predictions without encoder
-vpc(df, dataset, latent_dim,  dim_parameter_encoder, initial_encoder, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=False)
-vpc_refiner(True,df, dataset, latent_dim, dim_parameter_encoder, initial_encoder, refiner1, refiner2, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=False)
+vpc(df, dataset, latent_dim,  dim_parameter_encoder, initial_encoder, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=True)
+vpc_refiner(False,df, dataset, latent_dim, dim_parameter_encoder, initial_encoder, refiner1, refiner2, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=True)
 
-plotIndividualFits_test(ae=True,test_dataset=dataset, df=df, latent_dim=latent_dim, refiner1=refiner1, refiner2=refiner2, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=torch.linspace(0, 1, steps=100), max_individuals=6, n_samples=1000, device=device, truncation=1)
+plotIndividualFits_test(ae=False,nf=False, test_dataset=dataset_test, df=df_test, latent_dim=latent_dim, refiner1=refiner1, refiner2=refiner2, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=torch.linspace(0, 1, steps=120), max_individuals=6, n_samples=100, device=device, truncation=1)
 
 
 
