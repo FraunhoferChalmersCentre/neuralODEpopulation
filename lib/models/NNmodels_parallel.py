@@ -77,11 +77,11 @@ class ODEFunc(nn.Module):
             nn.Linear(hid_dim, latent_dim),
         )
         
-    #    self.encodes = nn.Sequential(
-     #       nn.Linear(dim_parameter_encoder , hid_dim),
-     #       nn.SELU(),
-    #        nn.Linear(hid_dim, latent_dim),
-     #   )
+        self.encodes = nn.Sequential(
+            nn.Linear(dim_parameter_encoder , hid_dim),
+           nn.SELU(),
+            nn.Linear(hid_dim, latent_dim),
+        )
         
         self.ema_decay = 0.999
         self._ema_initialized = False
@@ -155,11 +155,11 @@ class ODEFunc(nn.Module):
       #  if self.training:
         #inp = self.dropout(inp)
 
-       # dxdt_params=self.encodes(x[:,self.dim_latent:])
+        dxdt_params=self.encodes(x[:,self.dim_latent:])
         dxdt = self.net(inp)  # shape: [batch_size, latent_dim-1]
         dxdt_skip = self.skipnet(inp)
         zero = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
-        dxdt_concat = torch.cat([dxdt+dxdt_skip, zero], dim=1)  # shape: [batch_size, latent_dim]
+        dxdt_concat = torch.cat([dxdt+dxdt_skip+dxdt_params, zero], dim=1)  # shape: [batch_size, latent_dim]
      
         return dxdt_concat
 
@@ -172,7 +172,7 @@ class ODEFunc(nn.Module):
     
     
 class TrainableNoise(nn.Module):
-    def __init__(self, dataset, size=1, init_add_std=1, init_prop_std=0.001):
+    def __init__(self, dataset, size=1, init_add_std=2, init_prop_std=0.001):
         super().__init__()
         init_log_sigma_add = torch.log(torch.tensor(init_add_std))
         init_log_sigma_prop = torch.log(torch.tensor(init_prop_std))
@@ -194,8 +194,8 @@ class TrainableNoise(nn.Module):
         # If size>1, broadcast sigma params to match x_pred shape (assume last dims)
         sigma_add = sigma_add.view(*([1] * (x_pred.dim() - sigma_add.dim())), *sigma_add.shape)
         #sigma_prop = sigma_prop.view(*([1] * (x_pred.dim() - sigma_prop.dim())), *sigma_prop.shape)
-        
-        sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop * x_pred)**2)
+        #+ (sigma_prop * x_pred)**2
+        sigma_total = torch.sqrt(sigma_add**2 )
     
         nll_elementwise = (
             0.5 * ((x_true - x_pred) / sigma_total) ** 2
@@ -555,6 +555,7 @@ class Encoder_Transformer_VAE(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
+    
         self.fc_mu2 = nn.Linear(hidden_dim, latent_dim)
 
         self.fc_logvar1 = nn.Linear(model_dim, hidden_dim)

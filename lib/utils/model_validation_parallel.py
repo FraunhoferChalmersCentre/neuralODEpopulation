@@ -29,7 +29,6 @@ from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import r2_score
 
 from lib.utils.my_utils_parallel import *
-from lib.utils.my_utils_parallel import destandardize_concentration
 
 
 
@@ -233,7 +232,7 @@ def plotIndividualFits_MCMC(
 
     
 
-def plotIndividualFits_test(
+def plotIndividualFits_test(ae,
     test_dataset, df, latent_dim,
     refiner1, refiner2,
     func, reducer, initial_encoder, ODEWrapper, t_dense,
@@ -287,19 +286,36 @@ def plotIndividualFits_test(
 
 
         refiner = refiner1 if abs(dose - 0.5) < 1e-3 else refiner2
-        _, mu, logvar,_ = refiner(t_trunc, x_trunc)
-        print("mu mean:", mu.mean().item(), "logvar mean:", logvar.mean().item())
+        
+        if ae: 
+            mu, _= refiner(t_trunc, x_trunc)
+        else:
+            if nf:
+                _, mu, logvar,_ = refiner(t_trunc, x_trunc)
+            else:
+                mu, logvar = refiner(t_trunc, x_trunc)
+     
  
 
         t_rep = t_trunc.repeat(n_samples, 1)
         x_rep = x_trunc.repeat(n_samples, 1)
 
-        _,mu, logvar,_ = refiner(t_rep, x_rep)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
+      #  _,mu, logvar,_ = refiner(t_rep, x_rep)
+        
+        if ae:
+            z= mu.repeat(n_samples, 1)
+        else:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            z = mu + eps * std
 
-        x0 = torch.cat([initial_encoder(x_trunc[:, 0].unsqueeze(1)).repeat(n_samples, 1), z], dim=1)
+        x0_latent = initial_encoder(x_trunc[:, 0].unsqueeze(1))
+        x0_latent = x0_latent.repeat(n_samples, 1)  # shape: [1000, d]
+
+        x0 = torch.cat([x0_latent,z], dim=1)
+        print(x0)
+
+        #x0 = torch.cat([x0_1, z], dim=1)
 
         dose_times_padded = torch.nn.utils.rnn.pad_sequence([dose_times_tensor], batch_first=True).to(device)
         dose_mask = (dose_times_padded != 0).to(device)

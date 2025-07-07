@@ -459,7 +459,7 @@ def load_models(models: dict, load_dir: str, model_name: str, device=torch.devic
 
 
 
-def train_model(dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
+def train_model(optimizer,scheduler,dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
     refiner1, refiner2, noise, device, t_dense,
      n_epochs, warmup_epochs_noise,warmup_epochs_iiv,
     smoothing_start_epoch,
@@ -509,8 +509,7 @@ def train_model(dim_parameter_encoder, latent_dim, func, reducer, initial_encode
          
 
 
-    optimizer = torch.optim.Adam(main_params, lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=250, gamma=0.1)
+    
     MAX_TIME = estimate_max_time(df)
     MAX_DOSE = estimate_max_dose(df)
     conc_mean, conc_std = dataset.conc_mean, dataset.conc_std

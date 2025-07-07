@@ -84,7 +84,7 @@ if __name__ == "__main__":
     
 
     latent_dim=4
-    dim_parameter_encoder=2
+    dim_parameter_encoder=3
     hid_dim=128
  
  
@@ -103,15 +103,16 @@ if __name__ == "__main__":
     reducer = SimpleDecoder(latent_dim, hidden_dim=128).to(device)
     initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=32).to(device)
     noise = TrainableNoise(dataset).to(device)
-
+    optimizer = torch.optim.Adam(main_params, lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=250, gamma=0.1)
 
    # load_models(models, save_dir, modelname,device)
     
-    train_model(dim_parameter_encoder, latent_dim, func,
+    train_model(optimizer,scheduler, dim_parameter_encoder, latent_dim, func,
     reducer,
     initial_encoder,
     refiner1,
-    refiner1,
+    refiner2,
     noise,
     device,
     t_dense=torch.linspace(0, 1, steps=480),
@@ -122,7 +123,7 @@ if __name__ == "__main__":
     ae=True,
     nf=False,                  
     free_bits=1,                       
-    batch_size=10,                        
+    batch_size=20,                        
     df=df,
     dataset=dataset,
     max_points_visible=0,  
@@ -156,7 +157,7 @@ if __name__ == "__main__":
 vpc(df, dataset, latent_dim,  dim_parameter_encoder, initial_encoder, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=False)
 vpc_refiner(True,df, dataset, latent_dim, dim_parameter_encoder, initial_encoder, refiner1, refiner2, func, reducer, noise, ODEWrapper, torch.linspace(0, 1, steps=120), compartment="C2",num_simulated_total=1000,add_noise_to_prediction=False)
 
-plotIndividualFits_test(test_dataset=dataset, df=df, latent_dim=latent_dim, refiner1=refiner1, refiner2=refiner2, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=torch.linspace(0, 1, steps=100), max_individuals=6, n_samples=1000, device=device, truncation=1)
+plotIndividualFits_test(ae=True,test_dataset=dataset, df=df, latent_dim=latent_dim, refiner1=refiner1, refiner2=refiner2, func=func, reducer=reducer, initial_encoder=initial_encoder, ODEWrapper=ODEWrapper, t_dense=torch.linspace(0, 1, steps=100), max_individuals=6, n_samples=1000, device=device, truncation=1)
 
 
 
