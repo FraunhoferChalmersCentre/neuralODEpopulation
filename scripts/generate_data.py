@@ -40,7 +40,7 @@ def main():
         n_individuals=50,
         add_e=2,
         prop_e=0.001,
-        dose_amounts=[50,100],
+        dose_amounts=[50,200],
         dose_times=[1, 5, 9, 13],
         save_path=args.save_path,
         plot=True,

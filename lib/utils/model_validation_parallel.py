@@ -36,7 +36,7 @@ from lib.utils.my_utils_parallel import *
 def plotIndividualFits_MCMC(
     df, dataset, latent_dim,
     individual_data,  # (id, t_real, x_real, dose, dose_times)
-    refiner1, refiner2,
+    decoder1, decoder2,
     func, reducer, initial_encoder, ODEWrapper,t_dense,
     n_samples=100,
     n_mcmc_samples=1000,
@@ -147,12 +147,12 @@ def plotIndividualFits_MCMC(
 
     # === Latent ODE prediction ===
    
-    refiner = refiner1 if dose == 0.5 else refiner2
+    decoder = decoder1 if dose == 0.5 else decoder2
 
     t_real_rep = t_real.unsqueeze(0).repeat(n_samples, 1)
     x_real_rep = x_real.unsqueeze(0).repeat(n_samples, 1)
 
-    mu, logvar = refiner(t_real_rep, x_real_rep)
+    mu, logvar = decoder(t_real_rep, x_real_rep)
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
     z_samples = mu + eps * std
@@ -233,11 +233,11 @@ def plotIndividualFits_MCMC(
     
 
 def plotIndividualFits_test(ae,nf,
-    test_dataset, df, latent_dim,
-    refiner1, refiner2,
+    test_dataset, df, latent_dim,noise,
+    decoder1, decoder2,
     func, reducer, initial_encoder, ODEWrapper, t_dense,
     max_individuals=6, n_samples=50, device="cpu",
-    truncation=0.5  # <-- NEW ARGUMENT: normalized time (0-1)
+    truncation=0.5, add_noise=False  # <-- NEW ARGUMENT: normalized time (0-1)
 ):
     import math
 
@@ -253,7 +253,7 @@ def plotIndividualFits_test(ae,nf,
     for idx in range(len(test_dataset)):
         t, x, dose_tensor, dose_times_tensor, subject_id = test_dataset[idx]
         dose_val = dose_tensor.item()
-        if abs(dose_val - 0.5) < 1e-3:
+        if abs(dose_val - 0.25) < 1e-3:
             dose_05_indices.append(idx)
         elif abs(dose_val - 1.0) < 1e-3:
             dose_10_indices.append(idx)
@@ -285,35 +285,41 @@ def plotIndividualFits_test(ae,nf,
         x_trunc = x_full[train_mask].unsqueeze(0)
 
 
-        refiner = refiner1 if abs(dose - 0.5) < 1e-3 else refiner2
+        decoder = decoder1 if abs(dose - 0.25) < 1e-3 else decoder2
         
         if ae: 
-            mu, _= refiner(t_trunc, x_trunc)
+           # mu, _= decoder(t_trunc, x_trunc)
+            z, mu, logvar,_ = decoder(t_trunc, x_trunc)
+            z= mu.repeat(n_samples, 1)
+            z= z + + torch.randn_like(z) * 0.01
         else:
             if nf:
-                _, mu, logvar,_ = refiner(t_trunc, x_trunc)
+                z_samples=[]
+                for _ in range(n_samples):
+                    zi, mu, logvar,_ = decoder(t_trunc, x_trunc)
+                    z_samples.append(zi)
+                    
+                z = torch.stack(z_samples, dim=1).transpose(0,1)  # [B, n_samples, latent_dim]
+
             else:
-                mu, logvar = refiner(t_trunc, x_trunc)
-     
+                mu, logvar = decoder(t_trunc, x_trunc)
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn(n_samples, *std.shape)
+
+                z = mu + eps * std
+                z=z.squeeze(dim=1)
  
 
         t_rep = t_trunc.repeat(n_samples, 1)
         x_rep = x_trunc.repeat(n_samples, 1)
 
-      #  _,mu, logvar,_ = refiner(t_rep, x_rep)
-        
-        if ae:
-            z= mu.repeat(n_samples, 1)
-        else:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn(n_samples, *std.shape)
-
-            z = mu + eps * std
-            z=z.squeeze(dim=1)
+     
             
+        z = z.squeeze(1)  # If shape is [n_samples, 1, latent_dim]
+
         x0_latent = initial_encoder(x_trunc[:, 0].unsqueeze(1))
         x0_latent = x0_latent.repeat(n_samples, 1)  # shape: [1000, d]
-        
+      
         x0 = torch.cat([x0_latent,z], dim=1)
 
         #x0 = torch.cat([x0_1, z], dim=1)
@@ -328,7 +334,9 @@ def plotIndividualFits_test(ae,nf,
         pred = odeint(ode_func, x0, t_dense, method='dopri5')
         pred = reducer(pred[:, :, :latent_dim])
         pred = destandardize_concentration(pred, conc_mean, conc_std)
-
+        if add_noise:
+            pred = noise.sample(pred, n_samples=1).squeeze(0)
+            
         perc10 = torch.quantile(pred, 0.10, dim=1)
         perc90 = torch.quantile(pred, 0.90, dim=1)
         median = torch.median(pred, dim=1).values
@@ -381,7 +389,7 @@ def plotIndividualFits_test(ae,nf,
 
  
         
-def vpc(
+def vpc(onlymedian,
         df, dataset, latent_dim,
       dim_parameters, initial_encoder, func, reducer, noise, ODEWrapper,
     t_dense,compartment, num_simulated_total=500,
@@ -440,7 +448,9 @@ def vpc(
         dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
         dose_mask = (dose_times_padded != 0).to(device)
         z_tensor = torch.stack(z_samples).to(device)
-
+        if onlymedian:
+            z_tensor=torch.zeros_like(z_tensor)
+            
         x0_list = []
         x_trues=x_trues
         for x in x_trues:
@@ -451,8 +461,13 @@ def vpc(
             x0_list.append(out)
         x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
 
-        doses_tensor = doses_tensor.unsqueeze(1)  # Now shape [5, 1]
+                # Expand doses_tensor to match the shape of dose_times_padded
+        # dose_times_padded: [B, max_doses], so we want doses_tensor: [B, max_doses]
+        if doses_tensor.dim() == 1:
+            doses_tensor = doses_tensor.unsqueeze(1)  # [B] -> [B, 1]
+        doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))  # [B, max_doses]
 
+        print(doses_tensor.size())
         ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
         x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
         x0=x0.to(device)
@@ -501,18 +516,21 @@ def vpc(
         plt.plot(time_hours, median_data_real.detach().cpu().numpy(), label="Raw median", color="orange")
         plt.plot(time_hours, perc90_data_real.detach().cpu().numpy(), label="Raw 90th percentile", color="orange", linestyle="--")
 
+        plt.xlim(0, 24)
+        plt.ylim(0, 120)
 
         plt.title(f"Dose {dose_value * MAX_DOSE:.0f} (Simulated vs Raw)")
         plt.xlabel("Time (hours)")
         plt.ylabel(f"Concentration ({compartment})")
         plt.grid(True)
+        
         plt.legend()
         plt.tight_layout()
         plt.show()
 
-def vpc_refiner(nf,
+def vpc_decoder(ae,nf,
         df, dataset, latent_dim,
-      dim_parameters, initial_encoder,refiner1,refiner2, func, reducer, noise, ODEWrapper,
+      dim_parameters, initial_encoder,decoder1,decoder2, func, reducer, noise, ODEWrapper,
     t_dense,compartment, num_simulated_total=500,
     add_noise_to_prediction: bool = False  # 🔧 NEW ARGUMENT
 ):
@@ -520,6 +538,8 @@ def vpc_refiner(nf,
     
     MAX_TIME = estimate_max_time(df)
     MAX_DOSE = estimate_max_dose(df)
+   # print(MAX_DOSE)
+    
     conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
     dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
     dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
@@ -545,7 +565,7 @@ def vpc_refiner(nf,
         t_dense2 = torch.linspace(0, 1, steps=120).to(device)
 
         t_reals, x_trues, doses, dose_times_list = [], [], [], []
-
+      #  print(dose_value)
         for entry in batch_entries:
             t_real, x_true, dose, dose_times = entry[:4]
             t_reals.append(t_real)
@@ -563,23 +583,29 @@ def vpc_refiner(nf,
         t_real_padded = torch.nn.utils.rnn.pad_sequence(t_reals, batch_first=True).to(device)
         x_true_padded = torch.nn.utils.rnn.pad_sequence(x_trues, batch_first=True).to(device)
 
-        # 🧠 Use refiner to get posterior latent sample
-        # 🧠 Choose refiner based on dose
+        # 🧠 Use decoder to get posterior latent sample
+        # 🧠 Choose decoder based on dose
         dose_value_float = float(dose_value)
         
         if nf:
-            if dose_value_float == 0.5:
-               _, mu_q, logvar_q,_ = refiner1(t_real_padded, x_true_padded)
+            if dose_value_float == 0.25:
+               z_tensor, mu_q, logvar_q,_ = decoder1(t_real_padded, x_true_padded)
             elif dose_value_float == 1.0:
-               _, mu_q, logvar_q,_ = refiner2(t_real_padded, x_true_padded)
+               z_tensor, mu_q, logvar_q,_ = decoder2(t_real_padded, x_true_padded)
            
                 
         else:
             
-            if dose_value_float == 0.5:
-               mu_q, logvar_q= refiner1(t_real_padded, x_true_padded)
+            if dose_value_float == 0.25:
+               mu_q, logvar_q= decoder1(t_real_padded, x_true_padded)
+               std_q = torch.exp(0.5 * logvar_q)
+               eps = torch.randn_like(std_q)
+               z_tensor = mu_q + eps * std_q
             elif dose_value_float == 1.0:
-               mu_q, logvar_q = refiner2(t_real_padded, x_true_padded)
+               mu_q, logvar_q = decoder2(t_real_padded, x_true_padded)
+               std_q = torch.exp(0.5 * logvar_q)
+               eps = torch.randn_like(std_q)
+               z_tensor = mu_q + eps * std_q
            
            
             
@@ -588,9 +614,9 @@ def vpc_refiner(nf,
         
         
        # print("mu mean:", mu_q, "logvar mean:", logvar_q)
-        std_q = torch.exp(0.5 * logvar_q)
-        eps = torch.randn_like(std_q)
-        z_tensor = mu_q + eps * std_q
+       # std_q = torch.exp(0.5 * logvar_q)
+       # eps = torch.randn_like(std_q)
+       # z_tensor = mu_q + eps * std_q
 
         x0_list = []
         for x in x_trues:
@@ -601,8 +627,15 @@ def vpc_refiner(nf,
             x0_list.append(out)
         x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
 
-        doses_tensor = doses_tensor.unsqueeze(1)  # Now shape [5, 1]
-
+        if doses_tensor.dim() == 1:
+             doses_tensor = doses_tensor.unsqueeze(1)  # [B] -> [B, 1]
+             
+        doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))  # [B, max_doses]
+        if ae:
+            z_tensor=mu_q
+    
+       # print(dose_times_padded)
+       # print(doses_tensor)
         ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
         x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
         x0=x0.to(device)
@@ -651,6 +684,10 @@ def vpc_refiner(nf,
         plt.plot(time_hours, perc10_data_real.detach().cpu().numpy(), label="Raw 10th percentile", color="orange", linestyle="--")
         plt.plot(time_hours, median_data_real.detach().cpu().numpy(), label="Raw median", color="orange")
         plt.plot(time_hours, perc90_data_real.detach().cpu().numpy(), label="Raw 90th percentile", color="orange", linestyle="--")
+        #plt.yscale('log')
+
+       # plt.xlim(0, 24)
+      #  plt.ylim(1, 120)
 
         plt.title(f"Dose {dose_value * MAX_DOSE:.0f} (Simulated vs Raw)")
         plt.xlabel("Time (hours)")
