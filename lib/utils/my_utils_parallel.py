@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 #from torchdiffeq import odeint as odeint
-from torchdiffeq import odeint_adjoint as odeint
+from torchdiffeq import odeint as odeint
 
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
@@ -495,10 +495,7 @@ def dropout_rows(z, p,device):
     output=z * keep_mask
     output=output.to(device)
     return output, keep_mask
-def count_params(optimizer):
-    for i, group in enumerate(optimizer.param_groups):
-        total_params = sum(p.numel() for p in group['params'])
-        print(f"Optimizer param group {i}: {total_params} parameters")
+
 
 def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder, latent_dim, func, reducer, initial_encoder,
     encoder1, noise, device, t_dense,
@@ -573,7 +570,9 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
     for epoch in range(n_epochs):
         first_batch = True
         start_time = time.time()
-      
+
+
+        # Log when key stages start
         if epoch == warmup_epochs_noise:
             print(f"[Epoch {epoch}] ➤ Noise training activated.")
         
@@ -735,76 +734,76 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
             total_recon +=  recon_loss_noise.item()
             
             optimizer.zero_grad()
-         #   if epoch == 0 and first_batch:
-          #      print(f"Backprop")
+            if epoch == 0 and first_batch:
+                print(f"Backprop")
             loss.backward()
-      #      for param_group in main_params:
-      #          torch.nn.utils.clip_grad_norm_(param_group["params"], max_norm=1.0)
+            for param_group in main_params:
+                torch.nn.utils.clip_grad_norm_(param_group["params"], max_norm=1)
                 
             # === Gradient check ===
-      #      if epoch == 0 and first_batch:
-      #          for name, model in models.items():
-       #             for param_name, param in model.named_parameters():
-         #               if param.requires_grad:
-         #                   if param.grad is None:
-            #                    print(f"[WARNING] No gradient for {name}.{param_name}")
+            if epoch == 0 and first_batch:
+                for name, model in models.items():
+                    for param_name, param in model.named_parameters():
+                        if param.requires_grad:
+                            if param.grad is None:
+                                print(f"[WARNING] No gradient for {name}.{param_name}")
             
         
 
-           # if epoch == 0 and first_batch:
+            if epoch == 0 and first_batch:
                 
                 
                 
-         #     print(f"Optimization")
+              print(f"Optimization")
             optimizer.step()
-         #   first_batch = False
+            first_batch = False
 
              
 
-          #  residual = x_padded - pred_interp
+            residual = x_padded - pred_interp
     
             # === Store for analysis ===
-         #   z_individual_list.append(z_refined.detach())
-         #   mu_q_list.append(mu_q_low.detach())
-#            logvar_q_list.append(logvar_q_low.detach())
+            z_individual_list.append(z_refined.detach())
+            mu_q_list.append(mu_q_low.detach())
+            logvar_q_list.append(logvar_q_low.detach())
 
-          #  for i in range(batch_size):
-           #     trajectory_records.append((
-           #         id_list[i],
-           #         t_padded[i, mask[i]],
-          #          x_padded[i, mask[i]],
-           #         dose_tensor[i],
-           #         dose_times_list[i],
-            #        z_refined[i].detach()
-            #    ))
+            for i in range(batch_size):
+                trajectory_records.append((
+                    id_list[i],
+                    t_padded[i, mask[i]],
+                    x_padded[i, mask[i]],
+                    dose_tensor[i],
+                    dose_times_list[i],
+                    z_refined[i].detach()
+                ))
 
         # === Global latent and EMA updates ===
-      #  z_all = torch.cat(z_individual_list, dim=0)
-      #  mu_all = torch.cat(mu_q_list, dim=0)
-      #  logvar_all = torch.cat(logvar_q_list, dim=0)
+        z_all = torch.cat(z_individual_list, dim=0)
+        mu_all = torch.cat(mu_q_list, dim=0)
+        logvar_all = torch.cat(logvar_q_list, dim=0)
   
-       # if epoch % 10 == 0:
-          #  with torch.no_grad():
-            #    mu_all = torch.cat(z_individual_list, dim=0)               # [N, D]
-            #    logvar_all = torch.cat(logvar_q_list, dim=0)               # [N, D]
-             #   std_all = torch.exp(0.5 * logvar_all)                      # [N, D]
+        if epoch % 10 == 0:
+            with torch.no_grad():
+                mu_all = torch.cat(z_individual_list, dim=0)               # [N, D]
+                logvar_all = torch.cat(logvar_q_list, dim=0)               # [N, D]
+                std_all = torch.exp(0.5 * logvar_all)                      # [N, D]
             
-           #     mu_mean = mu_all.mean(dim=0).mean().item()
-           #     mu_std = mu_all.std(dim=0).mean().item()
-           #     std_mean = std_all.mean(dim=0).mean().item()
-           #     std_std = std_all.std(dim=0).mean().item()
+                mu_mean = mu_all.mean(dim=0).mean().item()
+                mu_std = mu_all.std(dim=0).mean().item()
+                std_mean = std_all.mean(dim=0).mean().item()
+                std_std = std_all.std(dim=0).mean().item()
             
-           #     print(f"[Epoch {epoch}] μ mean: {mu_mean:.4f}, μ std: {mu_std:.4f}, "
-           #           f"σ mean: {std_mean:.4f}, σ std: {std_std:.4f}")
+                print(f"[Epoch {epoch}] μ mean: {mu_mean:.4f}, μ std: {mu_std:.4f}, "
+                      f"σ mean: {std_mean:.4f}, σ std: {std_std:.4f}")
 
                
-      #  with torch.no_grad():
-#       #     if epoch > smoothing_start_epoch:
-       #         func.update_ema(alpha=0.1)
-       #         reducer.update_ema(alpha=0.1)
-       #         initial_encoder.update_ema(alpha=0.1)
-        #        encoder1.update_ema(alpha=0.1)
-         #       encoder1.update_ema(alpha=0.1)
+        with torch.no_grad():
+            if epoch > smoothing_start_epoch:
+                func.update_ema(alpha=0.1)
+                reducer.update_ema(alpha=0.1)
+                initial_encoder.update_ema(alpha=0.1)
+                encoder1.update_ema(alpha=0.1)
+                encoder1.update_ema(alpha=0.1)
              
 
         scheduler.step(total_loss)
