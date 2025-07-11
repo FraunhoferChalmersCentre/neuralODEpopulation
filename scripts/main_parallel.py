@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from torchdiffeq import odeint_adjoint as odeint
 import torch.nn.functional as F
 
 from sklearn.decomposition import PCA
@@ -33,6 +32,9 @@ from sklearn.metrics import r2_score
 
 import argparse
 import sys
+import torch.optim as optim
+
+# = optim.SGD(model.parameters(), lr=0.001)  # simple SGD, no momentum, no weight decay
 
 
 
@@ -85,7 +87,7 @@ if __name__ == "__main__":
 
     
 
-    latent_dim=4
+    latent_dim=2
     dim_parameter_encoder=3
     hid_dim=128
  
@@ -99,9 +101,9 @@ if __name__ == "__main__":
  
 
     func = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
-    reducer = SimpleDecoder(latent_dim, hidden_dim=128).to(device)
-    initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=32).to(device)
-    noise = TrainableNoise(dataset, size=1, init_add_std=0.3, init_prop_std=0.01).to(device)
+    reducer = SimpleDecoder(latent_dim, hidden_dim=8).to(device)
+    initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
+    noise = TrainableNoise(dataset, size=1, init_add_std=1, init_prop_std=0).to(device)
     
     models = {
     "func": func,
@@ -120,6 +122,8 @@ if __name__ == "__main__":
     ]
     
     optimizer = torch.optim.Adam(main_params, lr=lr)
+   # optimizer = optim.SGD(main_params, lr=0.001)  # simple SGD, no momentum, no weight decay
+
    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=130, gamma=0.5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, verbose=True)
 
@@ -127,7 +131,7 @@ if __name__ == "__main__":
           model.to(device)
           print(f"{name} is on {next(model.parameters()).device}")
 
-    dataloader = DataLoader(dataset, batch_size=5, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
 
     train_model(dataloader,0.9,models, optimizer,scheduler, dim_parameter_encoder, latent_dim, func,
     reducer,
@@ -141,18 +145,18 @@ if __name__ == "__main__":
     warmup_epochs_iiv=100,
     smoothing_start_epoch=4000,
     remove_encoder=False,
-    ae=False,
+    ae=True,
     nf=True,
     onlymedian=False, 
-plot_from_training_records_enable=False,              
+    plot_from_training_records_enable=True,              
     free_bits=0.1,                       
-    batch_size=5,                        
+    batch_size=20,                        
     df=df,
     dataset=dataset,
     max_points_visible=0,  
     lr=lr,
     print_epoch=1,
-    plot_epoch=10,
+    plot_epoch=1,
     max_plots=9,
     nr_col=3,
     nr_row=3)  
@@ -195,21 +199,23 @@ vpc(
     num_simulated_total=1000,
     add_noise_to_prediction=False
 )
+
+
 vpc_decoder(
-    ae=False,
+    ae=True,
     nf=True,
     df=df,
     dataset=dataset,
     latent_dim=latent_dim,
-    dim_parameter_encoder=dim_parameter_encoder,
+    dim_parameters=dim_parameter_encoder,
     initial_encoder=initial_encoder,
-    encoder1=encoder1,
-    encoder2=encoder1,
+    decoder1=encoder1,
+    decoder2=encoder1,
     func=func,
     reducer=reducer,
     noise=noise,
     ODEWrapper=ODEWrapper,
-    time_points=torch.linspace(0, 1, steps=120),
+    t_dense=torch.linspace(0, 1, steps=120),
     compartment="C2",
     num_simulated_total=1000,
     add_noise_to_prediction=False

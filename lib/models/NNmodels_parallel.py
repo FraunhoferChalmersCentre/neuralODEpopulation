@@ -42,37 +42,20 @@ from lib.utils.my_utils_parallel import *
 
 
 class ODEWrapper(nn.Module):
-    def __init__(self, func, dose_times, dose_amounts, dose_mask, param_encoding=None):
+    def __init__(self, func, dose_times, dose_amounts, dose_mask):
         super().__init__()
         self.func = func
         self.dose_times = dose_times          # [batch, max_len]
         self.dose_amounts = dose_amounts      # [batch, max_len]
         self.dose_mask = dose_mask            # [batch, max_len]
-        self.param_encoding = param_encoding  # Optional additional encoding
+  
 
     def forward(self, t, x):
         # Pass all dose info separately to ODEFunc
-        if self.param_encoding is None:
-            return self.func(t, x, self.dose_times, self.dose_amounts, self.dose_mask)
-        else:
-            return self.func(t, x, self.dose_times, self.dose_amounts, self.dose_mask, self.param_encoding)
+        
+        return self.func(t, x, self.dose_times, self.dose_amounts, self.dose_mask)
+   
 
-class ODEWrapper2(nn.Module):
-    def __init__(self, func, dose_times=None, dose_tensor=None, dose_mask=None):
-        super().__init__()
-        self.func = func
-        self.dose_times = dose_times
-        self.dose_tensor = dose_tensor
-        self.dose_mask = dose_mask
-
-    def update_params(self, dose_times, dose_tensor, dose_mask):
-        self.dose_times = dose_times
-        self.dose_tensor = dose_tensor
-        self.dose_mask = dose_mask
-
-    def forward(self, t, x):
-        # Use self.dose_times, self.dose_tensor, self.dose_mask inside func
-        return self.func(t, x, self.dose_times, self.dose_tensor, self.dose_mask)
 
 
 
@@ -83,31 +66,74 @@ class DoseAttention(nn.Module):
         self.key = nn.Linear(hidden_dim, hidden_dim)
         self.value = nn.Linear(hidden_dim, hidden_dim)
         self.scale = hidden_dim ** 0.5
+        
+        # Learned default output when no valid doses
+        self.default_output = nn.Parameter(torch.zeros(hidden_dim))
+        #self.time_bias_scale = nn.Parameter(torch.tensor(-7.0))  # initialized to -1.0
+        self.time_bias_net = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.SELU(),
+            nn.Linear(16, 1)
+        )
+        nn.init.constant_(self.time_bias_net[-1].bias, -7.0)
+        nn.init.zeros_(self.time_bias_net[-1].weight)  # optionally zero the weights
 
-    def forward(self, gru_outputs, mask):
+    def forward(self, gru_outputs, mask,T2_all, x):
         # gru_outputs: [batch, seq_len, hidden_dim]
         # mask: [batch, seq_len] bool tensor, True for valid dose times
 
+        batch_size, seq_len, hidden_dim = gru_outputs.size()
+        
         Q = self.query(gru_outputs)  # [B, T, H]
         K = self.key(gru_outputs)    # [B, T, H]
         V = self.value(gru_outputs)  # [B, T, H]
 
-        # Compute attention scores
         scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale  # [B, T, T]
 
-        # Mask out invalid positions (set large negative scores so softmax ~ 0)
-        mask = mask.unsqueeze(1).expand(-1, scores.size(1), -1)  # [B, T, T]
-        scores = scores.masked_fill(~mask, float('-inf'))
+        # Create mask for attention scores: expand dims
+        attn_mask = mask.unsqueeze(1).expand(-1, seq_len, -1)  # [B, T, T]
+        
+        # Identify batch elements with all False masks along last dim (no valid doses)
+        no_valid_mask = (~mask).all(dim=1)  # [B] True if all False
+        
+        # Mask invalid positions with -inf
+        scores = scores.masked_fill(~attn_mask, float('-inf'))
+        if T2_all is not None:
+            # x: [B, dim_parameter_encoder]
+            # expand to [B, T, dim_parameter_encoder]
+            x_expanded = x.unsqueeze(1).expand(-1, T2_all.size(1), -1)
+        
+            # Pass only x_expanded (no T_expanded)
+            time_bias = self.time_bias_net(x_expanded)  # [B, T, 1]
+        
+            # Transpose if needed for broadcasting in scores addition
+            time_bias = time_bias.transpose(1, 2)  # [B, 1, T]
+        
+            scores = scores + time_bias
 
-        attn_weights = F.softmax(scores, dim=-1)  # [B, T, T]
 
-        # Weighted sum of V using attention weights
+
+        
+        attn_weights = torch.zeros_like(scores)
+
+        # For batches with valid masks, compute softmax normally
+        valid_batches = ~no_valid_mask
+        if valid_batches.any():
+            attn_weights[valid_batches] = F.softmax(scores[valid_batches], dim=-1)
+        
+        # For batches with no valid doses, attention weights remain zeros
+        
         attn_output = torch.bmm(attn_weights, V)  # [B, T, H]
 
-        # Reduce sequence dim by averaging attended outputs
+        # Average over sequence dim for output
         output = attn_output.mean(dim=1)  # [B, H]
 
+        # Replace outputs for no_valid_mask batches with default learned embedding
+        if no_valid_mask.any():
+            output[no_valid_mask] = self.default_output.unsqueeze(0).expand(no_valid_mask.sum(), -1)
+        
         return output, attn_weights
+
 
 
     
@@ -118,14 +144,24 @@ class ODEFunc(nn.Module):
         self.dim_parameter_encoder = dim_parameter_encoder  
         self.dim_latent = latent_dim
         self.net = nn.Sequential(
-            nn.Linear(latent_dim +3+dim_parameter_encoder, hid_dim),
-           nn.SELU(),
-            nn.Linear(hid_dim, hid_dim),
+            nn.Linear((latent_dim+dim_parameter_encoder +3), hid_dim),
             nn.SELU(),
             nn.Linear(hid_dim, hid_dim),
             nn.SELU(),
-            nn.Linear(hid_dim, latent_dim ),
-        )
+            nn.Linear(hid_dim, hid_dim),
+            nn.SELU(),
+            nn.Linear(hid_dim, latent_dim ))
+        
+        self.skip = nn.Sequential(
+            nn.Linear((latent_dim+dim_parameter_encoder +3), hid_dim),
+            nn.SELU(),
+            nn.Linear(hid_dim, latent_dim ))
+        
+        self.dose = nn.Sequential(
+            nn.Linear(3, hid_dim),
+            nn.SELU(),
+            nn.Linear(hid_dim, latent_dim ))
+
         self.attention = DoseAttention(hidden_dim=2)
 
         self.gru_output_proj = nn.Sequential(
@@ -133,62 +169,37 @@ class ODEFunc(nn.Module):
               nn.SELU(),
               nn.Linear(4, 2),
                       )
-        self.gru = nn.GRU(input_size=2, hidden_size=8, batch_first=True)
+        self.gru = nn.GRU(input_size=1, hidden_size=8, batch_first=True)
  
         self.dose_proj = nn.Linear(8, 2)  # project to latent_dim
+    
 
         self.linear1 = nn.Sequential(nn.Linear(1, 4), nn.SELU(), nn.Linear(4, 1))
         self.linear2 = nn.Sequential(nn.Linear(1, 4), nn.SELU(), nn.Linear(4, 1))
-        self.ema_decay = 0.999
-        self._ema_initialized = False
-        self._ema_params = {
-        name: param.detach().clone()
-        for name, param in self.named_parameters()
-        if param.requires_grad
-    }
-  #  def compute_T_all(self, t, dose_times, dose_mask):
-   #     t_scalar = t.item()
+   
+
+   
+    def compute_T_all(self, t, dose_times, dose_mask):
+        t_scalar = t.item()
         
         # Squeeze last dim if it's singleton
-   #     if dose_times.dim() == 3 and dose_times.size(-1) == 1:
-   #         dose_times = dose_times.squeeze(-1)  # shape becomes [10,4]
+        if dose_times.dim() == 3 and dose_times.size(-1) == 1:
+            dose_times = dose_times.squeeze(-1)  # shape becomes [10,4]
         
-    #    delta_t = t_scalar - dose_times  # [10,4]
-   #     T_all = torch.where(dose_mask & (dose_times <= t_scalar), delta_t, torch.zeros_like(delta_t))
-    #    return T_all  # shape: [10,4]
-
-
-    def _initialize_ema(self):
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                self.register_buffer(f"{name.replace('.', '_')}_ema", param.detach().clone())
-        self._ema_initialized = True
-
-    def update_ema(self, alpha=None):
-        if alpha is None:
-            alpha = self.ema_decay
+        delta_t = t_scalar - dose_times  # [10,4]
+        T_all = torch.where(dose_mask & (dose_times <= t_scalar), delta_t, torch.zeros_like(delta_t))
+        return T_all  # shape: [10,4]
     
-        # If EMA params not registered, initialize them now
-        if self._ema_params is None:
-            self.register_ema()
-    
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                if param.requires_grad:
-                    ema_param = self._ema_params[name]
-                    if ema_param.device != param.device:
-                        ema_param = ema_param.to(param.device)
-                        self._ema_params[name] = ema_param
-                    ema_param.mul_(alpha).add_(param, alpha=1 - alpha)
+    def T(self, t, dose_times):
+        t_scalar = t.item()
+        relevant_doses = dose_times[dose_times <= t_scalar]
+        if len(relevant_doses) == 0:
+            return t_scalar
+        else:
+            return t_scalar - relevant_doses.max().item()
 
 
-
-    def apply_ema_weights(self):
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                if param.requires_grad:
-                    ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                    param.data.copy_(ema_param)
+  
 
     def forward(self, t, x, dose_times,dose_amounts, dose_mask):
         batch_size = x.size(0)
@@ -196,40 +207,55 @@ class ODEFunc(nn.Module):
     
         t_scalar = t.item()
      
-     #   T_all = self.compute_T_all(t, dose_times, dose_mask)  # time since each dose
-     #   print(T_all)
+        T_all = self.T(t, dose_times)  # time since each dose
+        
+        T2_all=self.compute_T_all(t, dose_times,dose_mask) 
+
+        new_dose_mask = (T2_all > 0)
+
+     
         dose_amounts_squeezed = dose_amounts.squeeze(-1)  # [10, 4]
-       # print(dose_amounts_squeezed)
-       # print(T_all)
-        #print(dose_amounts_squeezed)
-        gru_input = torch.stack([dose_times.squeeze(-1) , dose_amounts_squeezed], dim=-1)  # [10, 4, 2]
+     
+        gru_input = T2_all.unsqueeze(-1) # , dose_amounts_squeezed], dim=-1)  # [10, 4, 2]
 
         gru_output, _ = self.gru(gru_input)  # [B, T, H]
+ 
         projected = self.gru_output_proj(gru_output)  # [B, T, 2]
         
-        # Apply attention on projected outputs
-        attn_output, attn_weights = self.attention(projected, dose_mask)
+        x_param = x[:, self.dim_latent+2:]  # [B, dim_parameter_encoder]
+
+
+        attn_output, attn_weights = self.attention(projected, new_dose_mask,T2_all,x_param)
         
         agg = attn_output  # [B, 2], dose embedding weighted by attention
 
 
-        # Now reduce each of the 2 dims to 1 dim separately with two linear layers:
         out1 = self.linear1(agg[:, 0].unsqueeze(-1))  # [batch, 1]
         out2 = self.linear2(agg[:, 1].unsqueeze(-1))  # [batch, 1]
-       # 
-        final = torch.cat([out1, out2], dim=1)  # [batch, 2]
 
-      #  print(final)
+        final = torch.cat([out1, out2], dim=1)  # [batch, 2]
      
         t_tensor = torch.full((batch_size, 1), t.item(), device=x.device)
-      #  print(x)
-       # print(t_tensor)
-        inp = torch.cat([x, t_tensor, final], dim=1)
-     #   print(inp)
+
+        dose_single=dose_amounts_squeezed[:, 0]
+        
+        T_tensor = torch.full((batch_size, 1), T_all, device=x.device)
+        
+
+        inp = torch.cat([x,dose_single.unsqueeze(1),  final], dim=1)
+        inp2 = torch.cat([dose_single.unsqueeze(1),  final], dim=1)
+
         dxdt = self.net(inp)
+        dxdt_dose= self.dose(inp2)
+        dxdt_skip=self.skip(inp)
         zero = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
-        dxdt_concat = torch.cat([dxdt, zero], dim=1)  # shape: [batch_size, latent_dim]
-   
+        dxdt_concat = torch.cat([dxdt+dxdt_skip, zero], dim=1)  # shape: [batch_size, latent_dim]
+     #   print(t_scalar)
+     #   print(new_dose_mask)
+     
+     #   print(dose_single.unsqueeze(1))
+     #   print(attn_output)
+     #   print(attn_weights)
         return dxdt_concat
 
    
@@ -412,6 +438,7 @@ class NormalizingFlow(nn.Module):
             z, log_det = flow(z)
             log_det_sum += log_det
         return z, log_det_sum
+    
 class PlanarFlow(nn.Module):
     def __init__(self, latent_dim):
         super().__init__()
@@ -468,21 +495,6 @@ class Encoder_Transformer_NF(nn.Module):
 
         self.register_buffer("iteration", torch.tensor(1.0))
 
-    def update_ema(self, alpha=0.1):
-         with torch.no_grad():
-             for name, param in self.named_parameters():
-                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                 ema_param = ema_param.to(param.device)  # ensure same device
-                 ema_param.mul_(1 - alpha).add_(alpha * param.data)
-                 # Re-assign back the buffer (optional, since inplace)
-                 setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
-             self.iteration += 1.0
-
-    def apply_ema_weights(self):
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                param.data.copy_(ema_param)
 
     def forward(self, t, x, mask=None):
         """
@@ -525,14 +537,19 @@ class Encoder_Transformer_NF(nn.Module):
    
    
     
+    
 class SimpleDecoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim=128):
         super().__init__()
         self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.relu = nn.ReLU()        # instantiate ReLU module here
+        self.relu = nn.SELU()        # instantiate ReLU module here
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, 1)
         self.relu2 = nn.ReLU()        # instantiate ReLU module here
+       
+
+        nn.init.zeros_(self.fc3.weight)
+        nn.init.constant_(self.fc3.bias, -1)
 
         for name, param in self.named_parameters():
            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
@@ -569,7 +586,7 @@ class InitialConditionEncoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim):
         super().__init__()
         self.fc1 = nn.Linear(1, hidden_dim)
-        self.relu = nn.SELU()        # instantiate ReLU module here
+        self.SELU = nn.SELU()        # instantiate ReLU module here
         self.fc2 = nn.Linear(hidden_dim, latent_dim)
         
         for name, param in self.named_parameters():
@@ -578,7 +595,7 @@ class InitialConditionEncoder(nn.Module):
         self.register_buffer("iteration", torch.tensor(1.0))
 
     def forward(self, x):
-        h = self.relu(self.fc1(x))   # call the instance
+        h = self.SELU(self.fc1(x))   # call the instance
         z0 = self.fc2(h)
         return z0
     
@@ -602,6 +619,9 @@ class InitialConditionEncoder(nn.Module):
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
                 
+                
+    
+    
                 
 
     

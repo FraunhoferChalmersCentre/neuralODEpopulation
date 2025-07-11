@@ -22,7 +22,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import random
-from torchdiffeq import odeint_adjoint as odeint
+from torchdiffeq import odeint as odeint
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, cross_val_score, KFold

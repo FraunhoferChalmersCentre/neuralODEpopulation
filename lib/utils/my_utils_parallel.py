@@ -407,7 +407,7 @@ def plot_from_training_records(batch_size, device, df, dataset, latent_dim,
 
     # --- FIX END ---
 
-    pred = odeint(ode_func, x0, t_dense, method='dopri5')
+    pred = odeint(ode_func, x0, t_dense, method='rk4')
 
     # Apply reducer on latent dims only (exclude dose dims)
     x_pred = reducer(pred[:, :, :latent_dim])  # [time_steps, batch_size, output_dim]
@@ -642,12 +642,12 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
             else:
                     mu_q_low, logvar_q_low = encoder1(t_low, x_low)
                     std_q = torch.exp(0.5 * logvar_q)
-                    z_refined= mu_q_low + std_q[mask_low] * torch.randn_like(mu_q_low)
+                    z_refined= mu_q_low + std_q * torch.randn_like(mu_q_low)
           
 
             if ae:
                 z_refined=mu_q_low
-         
+           # print(z_refined)
             # === ODE Prediction ===
             x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
             mask_drop=None
@@ -662,8 +662,8 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
                 else:
                     x0 = torch.cat([x0_1, z_refined+ torch.randn_like(z_refined) * 0.01], dim=1)
 
-          
-
+          #  print(z_refined)
+        
             #print(dose_tensor.unsqueeze(-1))
         
             dose_mask_expanded = dose_times_expanded.unsqueeze(-1)  # shape [batch, max_len, 1]
@@ -672,7 +672,7 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
 
             if epoch == 0 and first_batch:
                 print(f" ODE Solving starting")
-            pred = odeint(ode_func, x0, t_dense, method='dopri5')
+            pred = odeint(ode_func, x0, t_dense, method='rk4')
             if epoch == 0 and first_batch:
             
                 print(f" ODE Solving finished")
@@ -682,7 +682,7 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
             t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
             test = reducer(pred_batch[:, :, :latent_dim])
             pred_interp = batch_linear_interpolate_1d(test, t_dense_exp, t_padded)
-            recon_loss_noise, mse = noise.nll(destandardize_concentration(x_padded,conc_mean,conc_std), destandardize_concentration(pred_interp,conc_mean,conc_std), mask)
+            recon_loss_noise, mse = noise.nll(destandardize_concentration(x_padded, conc_mean, conc_std), destandardize_concentration(pred_interp, conc_mean, conc_std), mask)
          
            
       
@@ -737,8 +737,8 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
             if epoch == 0 and first_batch:
                 print(f"Backprop")
             loss.backward()
-            for param_group in main_params:
-                torch.nn.utils.clip_grad_norm_(param_group["params"], max_norm=1)
+          #  for param_group in main_params:
+             #   torch.nn.utils.clip_grad_norm_(param_group["params"], max_norm=1)
                 
             # === Gradient check ===
             if epoch == 0 and first_batch:
@@ -820,9 +820,10 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
                     print(
                         f"Epoch {epoch}, "
                         f"MSE {0.01*batch_size * total_mse:.4f} "
-                        f"-LL: {total_recon:.4f}, "
-                        f"Add. error: {(torch.exp(noise.log_sigma_add)):.4f}, "
-                        f"Prop. error: {torch.exp(noise.log_sigma_prop):.4f}, "
+                        f"-LL: {0.01*batch_size * total_recon:.4f}, "
+                        f"Add. error: {torch.exp(noise.log_sigma_add).item():.4f}, "
+                            f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, "
+
                         f"lr: {main_lr:.6f}",
                         f"Epoch {epoch} took {end_time - start_time:.2f} seconds")
                    
@@ -834,9 +835,9 @@ def train_model(dataloader, p,models, optimizer,scheduler,dim_parameter_encoder,
                     print(
                         f"Epoch {epoch}, "
                         f"MSE {0.01*batch_size * total_mse:.4f} "
-                        f"loss: {total_loss:.4f}, "
-                        f"-LL: {total_recon:.4f}, "
-                        f"KL loss: {total_kl:.4f}, "
+                        f"loss: {0.01*batch_size * total_loss:.4f}, "
+                        f"-LL: {0.01*batch_size * total_recon:.4f}, "
+                        f"KL loss: {0.01*batch_size * total_kl:.4f}, "
                         f"Add. error: {(torch.exp(noise.log_sigma_add)).item():.4f}, "
                         f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, "
                         f"lr: {main_lr:.6f}",
