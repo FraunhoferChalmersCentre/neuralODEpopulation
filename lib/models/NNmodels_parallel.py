@@ -58,7 +58,6 @@ class ODEWrapper(nn.Module):
 
 
 
-
 class DoseAttention(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
@@ -75,10 +74,10 @@ class DoseAttention(nn.Module):
             nn.SELU(),
             nn.Linear(16, 1)
         )
-        nn.init.constant_(self.time_bias_net[-1].bias, -7.0)
-        nn.init.zeros_(self.time_bias_net[-1].weight)  # optionally zero the weights
+        nn.init.xavier_uniform_(self.time_bias_net[-1].weight)
+        nn.init.constant_(self.time_bias_net[-1].bias, 0.0)  # start bias neutral
 
-    def forward(self, gru_outputs, mask,T2_all, x):
+    def forward(self, gru_outputs, mask,T2_all):
         # gru_outputs: [batch, seq_len, hidden_dim]
         # mask: [batch, seq_len] bool tensor, True for valid dose times
 
@@ -101,30 +100,32 @@ class DoseAttention(nn.Module):
         if T2_all is not None:
             # x: [B, dim_parameter_encoder]
             # expand to [B, T, dim_parameter_encoder]
-            x_expanded = x.unsqueeze(1).expand(-1, T2_all.size(1), -1)
-        
-            # Pass only x_expanded (no T_expanded)
-            time_bias = self.time_bias_net(x_expanded)  # [B, T, 1]
+            time_diff = T2_all.unsqueeze(2) - T2_all.unsqueeze(1)  # [B, T, T]
+
+# For simplicity, take abs or clamp and reshape to feed a small network
+            time_diff_abs = torch.abs(time_diff).unsqueeze(-1)  # [B, T, T, 1]
         
             # Transpose if needed for broadcasting in scores addition
-            time_bias = time_bias.transpose(1, 2)  # [B, 1, T]
-        
-            scores = scores + time_bias
+          #  time_bias = time_bias.transpose(1, 2)  # [B, 1, T]
+            rel_time_bias = self.time_bias_net(time_diff_abs).squeeze(-1)  # [B, T, T]
+
+            scores = scores + 35*rel_time_bias
 
 
 
+      
         
         attn_weights = torch.zeros_like(scores)
-
+        
         # For batches with valid masks, compute softmax normally
         valid_batches = ~no_valid_mask
         if valid_batches.any():
             attn_weights[valid_batches] = F.softmax(scores[valid_batches], dim=-1)
-        
+       
         # For batches with no valid doses, attention weights remain zeros
-        
+      #  print(attn_weights)
         attn_output = torch.bmm(attn_weights, V)  # [B, T, H]
-
+   
         # Average over sequence dim for output
         output = attn_output.mean(dim=1)  # [B, H]
 
@@ -136,6 +137,7 @@ class DoseAttention(nn.Module):
 
 
 
+
     
 # ---- ODE ----
 class ODEFunc(nn.Module):
@@ -144,7 +146,7 @@ class ODEFunc(nn.Module):
         self.dim_parameter_encoder = dim_parameter_encoder  
         self.dim_latent = latent_dim
         self.net = nn.Sequential(
-            nn.Linear((latent_dim+dim_parameter_encoder +3), hid_dim),
+            nn.Linear((latent_dim+dim_parameter_encoder), hid_dim),
             nn.SELU(),
             nn.Linear(hid_dim, hid_dim),
             nn.SELU(),
@@ -153,32 +155,39 @@ class ODEFunc(nn.Module):
             nn.Linear(hid_dim, latent_dim ))
         
         self.skip = nn.Sequential(
-            nn.Linear((latent_dim+dim_parameter_encoder +3), hid_dim),
+            nn.Linear((latent_dim+dim_parameter_encoder), latent_dim))
+        
+        self.beta = nn.Sequential(
+            nn.Linear(1, hid_dim),
             nn.SELU(),
             nn.Linear(hid_dim, latent_dim ))
         
-        self.dose = nn.Sequential(
-            nn.Linear(3, hid_dim),
+        self.gamma = nn.Sequential(
+            nn.Linear(latent_dim, hid_dim),
             nn.SELU(),
-            nn.Linear(hid_dim, latent_dim ))
+            nn.Linear(hid_dim, latent_dim))
 
-        self.attention = DoseAttention(hidden_dim=2)
 
-        self.gru_output_proj = nn.Sequential(
-                    nn.Linear(8, 4),
-              nn.SELU(),
-              nn.Linear(4, 2),
-                      )
-        self.gru = nn.GRU(input_size=1, hidden_size=8, batch_first=True)
- 
-        self.dose_proj = nn.Linear(8, 2)  # project to latent_dim
-    
 
-        self.linear1 = nn.Sequential(nn.Linear(1, 4), nn.SELU(), nn.Linear(4, 1))
-        self.linear2 = nn.Sequential(nn.Linear(1, 4), nn.SELU(), nn.Linear(4, 1))
-   
+        self.log_sigma = nn.Parameter(torch.log(torch.tensor(0.01)))
 
-   
+        for name, param in self.named_parameters():
+            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
+        self.register_buffer("iteration", torch.tensor(1.0))
+        
+    def update_ema(self, alpha=0.1):
+            with torch.no_grad():
+                for name, param in self.named_parameters():
+                    ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                    ema_param.mul_(1 - alpha).add_(alpha * param.data)
+                self.iteration += 1.0
+
+    def apply_ema_weights(self):
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                param.data.copy_(ema_param)
+
     def compute_T_all(self, t, dose_times, dose_mask):
         t_scalar = t.item()
         
@@ -197,7 +206,16 @@ class ODEFunc(nn.Module):
             return t_scalar
         else:
             return t_scalar - relevant_doses.max().item()
-
+    def get_sigma(self):
+        # Ensure positivity with exp()
+        return torch.exp(self.log_sigma)  
+    def dirac_pulse(self, t, dose_times, dose_amounts):
+        sigma = self.get_sigma()
+        diff = t - dose_times
+        gauss = torch.exp(-0.5 * (diff / sigma)**2) / (sigma * (2 * 3.1415)**0.5)
+        weighted = gauss * dose_amounts
+        dose_signal = weighted.sum(dim=1, keepdim=True)
+        return dose_signal
 
   
 
@@ -208,54 +226,34 @@ class ODEFunc(nn.Module):
         t_scalar = t.item()
      
         T_all = self.T(t, dose_times)  # time since each dose
-        
-        T2_all=self.compute_T_all(t, dose_times,dose_mask) 
-
-        new_dose_mask = (T2_all > 0)
-
+        T = T_all * torch.ones(batch_size, 1, device=x.device)  # (batch_size,1)
+ 
      
         dose_amounts_squeezed = dose_amounts.squeeze(-1)  # [10, 4]
      
-        gru_input = T2_all.unsqueeze(-1) # , dose_amounts_squeezed], dim=-1)  # [10, 4, 2]
-
-        gru_output, _ = self.gru(gru_input)  # [B, T, H]
  
-        projected = self.gru_output_proj(gru_output)  # [B, T, 2]
+        dose_exp = dose_amounts_squeezed[ :,0].unsqueeze(1)  # shape [4, 1]
         
-        x_param = x[:, self.dim_latent+2:]  # [B, dim_parameter_encoder]
+        dose_input = self.dirac_pulse(t, dose_times, dose_amounts)  # [batch_size, 1]
 
+      #  print(x)
+      #  print(dose_input.squeeze(-1))
+      #  inp = torch.cat([x, dose_input.squeeze(-1) ], dim=1)
 
-        attn_output, attn_weights = self.attention(projected, new_dose_mask,T2_all,x_param)
+        #inp =  torch.cat([x,  dose_exp], dim=1)
+        beta=self.beta(dose_input.squeeze(-1)) 
+      #  gamma= self.gamma(dose_input.squeeze(-1)) 
+           
+        dxdt_deep = self.net(x)
         
-        agg = attn_output  # [B, 2], dose embedding weighted by attention
-
-
-        out1 = self.linear1(agg[:, 0].unsqueeze(-1))  # [batch, 1]
-        out2 = self.linear2(agg[:, 1].unsqueeze(-1))  # [batch, 1]
-
-        final = torch.cat([out1, out2], dim=1)  # [batch, 2]
-     
-        t_tensor = torch.full((batch_size, 1), t.item(), device=x.device)
-
-        dose_single=dose_amounts_squeezed[:, 0]
+        dxdt_skip=self.skip(x)
         
-        T_tensor = torch.full((batch_size, 1), T_all, device=x.device)
+        dxdt=self.gamma(dxdt_deep + dxdt_skip + beta)+dxdt_deep + dxdt_skip + beta
         
-
-        inp = torch.cat([x,dose_single.unsqueeze(1),  final], dim=1)
-        inp2 = torch.cat([dose_single.unsqueeze(1),  final], dim=1)
-
-        dxdt = self.net(inp)
-        dxdt_dose= self.dose(inp2)
-        dxdt_skip=self.skip(inp)
         zero = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
-        dxdt_concat = torch.cat([dxdt+dxdt_skip, zero], dim=1)  # shape: [batch_size, latent_dim]
-     #   print(t_scalar)
-     #   print(new_dose_mask)
-     
-     #   print(dose_single.unsqueeze(1))
-     #   print(attn_output)
-     #   print(attn_weights)
+        dxdt_concat = torch.cat([dxdt, zero], dim=1)  # shape: [batch_size, latent_dim]
+
+       
         return dxdt_concat
 
    
@@ -281,30 +279,41 @@ class TrainableNoise(nn.Module):
         return self.sample(x_pred, n_samples=1).squeeze(0)
 
     def nll(self, x_true, x_pred, mask=None):
-        sigma_add = torch.exp(self.log_sigma_add)
-        sigma_prop = torch.exp(self.log_sigma_prop)
+     # Compute max per individual over time dim (assume dim=1)
+  #   max_true, _ = x_true.abs().max(dim=1, keepdim=True)  # shape: (batch_size, 1, ...)
+   #  print(max_true)
+   #  max_pred, _ = x_pred.abs().max(dim=1, keepdim=True)
+    # print(max_pred)
+   
+     # Normalize residuals by individual's max scale
+     
+     
+   #  x_true_norm = x_true / max_true
+   #  x_pred_norm = x_pred / max_pred
     
-        sigma_add = sigma_add.view(*([1] * (x_pred.dim() - sigma_add.dim())), *sigma_add.shape)
-        sigma_prop = sigma_prop.view(*([1] * (x_pred.dim() - sigma_prop.dim())), *sigma_prop.shape)
+     sigma_add = torch.exp(self.log_sigma_add)
+     sigma_add = sigma_add.view(*([1] * (x_pred.dim() - sigma_add.dim())), *sigma_add.shape)
     
-        sigma_total = torch.sqrt(sigma_add ** 2 + (sigma_prop * x_pred) ** 2 + 1e-6)
+     sigma_total = sigma_add + 1e-6  # additive noise only
     
-        nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
-        mse_elementwise = (x_true - x_pred) ** 2
+     nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
+     mse_elementwise = (x_true - x_pred) ** 2
     
-        if mask is not None:
-            if nll_elementwise.dim() > mask.dim():
-                mask = mask.unsqueeze(-1)
-            nll_elementwise = nll_elementwise * mask
-            mse_elementwise = mse_elementwise * mask
-            total_valid = mask.sum().clamp(min=1)
-            nll_value = nll_elementwise.sum() / total_valid
-            mse_value = mse_elementwise.sum() / total_valid
-        else:
-            nll_value = nll_elementwise.mean()
-            mse_value = mse_elementwise.mean()
+     if mask is not None:
+         if nll_elementwise.dim() > mask.dim():
+             mask = mask.unsqueeze(-1)
+         nll_elementwise = nll_elementwise * mask
+         mse_elementwise = mse_elementwise * mask
+         total_valid = mask.sum().clamp(min=1)
+         nll_value = nll_elementwise.sum() / total_valid
+         mse_value = mse_elementwise.sum() / total_valid
+     else:
+         nll_value = nll_elementwise.mean()
+         mse_value = mse_elementwise.mean()
     
-        return nll_value, mse_value
+     return nll_value, mse_value
+
+
 
 
     
@@ -333,54 +342,71 @@ class TrainableNoise(nn.Module):
         return x_pred.unsqueeze(0) + sigma_total.unsqueeze(0) * eps
 
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=500):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)  # [max_len, d_model]
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)  # [max_len, 1]
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
+        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
+
+        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: [batch_size, seq_len, d_model]
+        x = x + self.pe[:, :x.size(1), :]
+        return x
+                
+
+
 class ConditionalPlanarFlow(nn.Module):
     def __init__(self, latent_dim, cond_dim, hidden_dim):
         super().__init__()
         self.latent_dim = latent_dim
-        
-        # Network to output flow params from conditioning vector c
-        # It outputs u, w, b concatenated, so output dim = 2*latent_dim + 1
-        self.param_net = nn.Sequential(
+
+        # Global (shared) w and b
+        self.w = nn.Parameter(torch.randn(latent_dim) * 0.01)
+        self.b = nn.Parameter(torch.zeros(1))
+
+        # Condition u on c
+        self.u_net = nn.Sequential(
             nn.Linear(cond_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * latent_dim + 1)
+            nn.Linear(hidden_dim, latent_dim)
         )
-    # Enforce invertibility constraint on u
+
     def u_hat(self, u, w):
-        wT_u = (w * u).sum(dim=1, keepdim=True)
-        m = -1 + torch.nn.functional.softplus(wT_u)
-        return u + (m - wT_u) * w / (w.norm(p=2, dim=1, keepdim=True)**2 + 1e-8)
+        # Enforce invertibility
+        wT_u = (w * u).sum(dim=1, keepdim=True)  # [B, 1]
+        m = -1 + F.softplus(wT_u)
+        w_norm_sq = (w ** 2).sum() + 1e-8  # Scalar
+        return u + (m - wT_u) * w / w_norm_sq  # [B, D]
 
     def forward(self, z, c):
         """
-        z: [B, latent_dim] latent variable
-        c: [B, cond_dim] conditioning vector (e.g., individual data summary)
+        z: [B, latent_dim]
+        c: [B, cond_dim]
         """
-        params = self.param_net(c)  # [B, 2*latent_dim + 1]
-        
-        u = params[:, :self.latent_dim]          # [B, latent_dim]
-        w = params[:, self.latent_dim:2*self.latent_dim]  # [B, latent_dim]
-        b = params[:, -1].unsqueeze(-1)          # [B, 1]
-        u = self.u_hat(u,w)
-        linear = (z * w).sum(dim=1) + b.squeeze(-1)
+        u = self.u_net(c)  # [B, latent_dim]
+        w = self.w  # [latent_dim], broadcasted
+        u_hat = self.u_hat(u, w)  # [B, latent_dim]
 
-        h = torch.tanh(linear)  # [B]
-    
+        linear = (z * w).sum(dim=1, keepdim=True) + self.b  # [B, 1]
+        h = torch.tanh(linear)  # [B, 1]
 
-        # Flow transform: z_new = z + u * h
-        z_new = z + u * h.unsqueeze(-1)  # broadcasting h
-      
+        z_new = z + u_hat * h  # [B, latent_dim]
 
-        # Compute psi = h'(linear) * w
-        psi = (1 - torch.tanh(linear)**2).unsqueeze(-1) * w  # [B, latent_dim]
-     
-        # det Jacobian: |1 + u^T psi| per batch element
-        det_jacobian = torch.abs(1 + (psi * u).sum(dim=1))
-
-
-        log_det = torch.log(det_jacobian + 1e-8)
+        psi = (1 - h ** 2) * w  # [B, latent_dim]
+        det_jacobian = 1 + (psi * u_hat).sum(dim=1)  # [B]
+        log_det = torch.log(torch.abs(det_jacobian) + 1e-8)  # [B]
 
         return z_new, log_det
+
+
     
 
 
@@ -401,25 +427,130 @@ class ConditionalNormalizingFlow(nn.Module):
     
     
 
+        
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=500):
+
+class Encoder_Transformer_NF(nn.Module):
+    def __init__(self, latent_dim, input_dim=2, model_dim=64,hidden_dim=64, hidden_flow_dim=32, num_heads=4, num_layers=2, num_flow_layers=2, dropout=0.1):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)  # [max_len, d_model]
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)  # [max_len, 1]
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        self.input_proj1 = nn.Linear(input_dim, hidden_dim)
+        self.input_proj2 = nn.Linear(hidden_dim, model_dim)
+        self.selu = nn.SELU()        # instantiate ReLU module here
+        self.flow = NormalizingFlow(latent_dim, num_flows=num_flow_layers)
+      #  self.flow = ConditionalNormalizingFlow(latent_dim,cond_dim=2*model_dim,hidden_flow_dim=32, num_flows=num_flow_layers)
 
-        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
+        self.pos_encoder = PositionalEncoding(model_dim)
+        self.raw_encoder = nn.Linear(input_dim,model_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=model_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
-        self.register_buffer('pe', pe)
+        self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
+        self.fc_mu2 = nn.Linear(hidden_dim, latent_dim)
 
-    def forward(self, x):
-        # x: [batch_size, seq_len, d_model]
-        x = x + self.pe[:, :x.size(1), :]
-        return x
+        self.fc_logvar1 = nn.Linear(model_dim, hidden_dim)
+        self.fc_logvar2 = nn.Linear(hidden_dim, latent_dim)
+        # Register EMA buffers
+        for name, param in self.named_parameters():
+            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
+        
+        self.register_buffer("iteration", torch.tensor(1.0))
+
+
+     
+    def update_ema(self, alpha=0.1):
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                ema_param.mul_(1 - alpha).add_(alpha * param.data)
+            self.iteration += 1.0
+
+    def apply_ema_weights(self):
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                param.data.copy_(ema_param)
                 
+    def sample(self, mu_q, logvar_q, num_samples=10):
+        """
+        Sample multiple latent vectors from q(z|x), transform with flow.
+    
+        Args:
+            mu_q: [B, latent_dim] posterior mean
+            logvar_q: [B, latent_dim] posterior log variance
+            num_samples: number of samples per batch element
+    
+        Returns:
+            z_k_samples: [B, num_samples, latent_dim] transformed latent samples
+            log_det_samples: [B, num_samples] flow log determinants for each sample
+        """
+        B, D = mu_q.shape
+    
+        mu_exp = mu_q.unsqueeze(1).expand(B, num_samples, D)
+        logvar_exp = logvar_q.unsqueeze(1).expand(B, num_samples, D)
+        std_exp = torch.exp(0.5 * logvar_exp)
+    
+        eps = torch.randn_like(std_exp)
+        z0_samples = mu_exp + std_exp * eps  # [B, num_samples, D]
+    
+        # Flatten batch and samples dims for flow input
+        z0_flat = z0_samples.view(B * num_samples, D)
+    
+        # Apply flow to all samples
+        z_k_flat, log_det_flat = self.flow(z0_flat)  # assume flow returns log_det per sample
+    
+        z_k_samples = z_k_flat.view(B, num_samples, D)
+        log_det_samples = log_det_flat.view(B, num_samples)
+    
+        return z_k_samples, log_det_samples
+
+
+
+    def forward(self, t, x, mask=None):
+        """
+        t: [B, T]
+        x: [B, T]
+        mask: optional [B, T] bool mask for valid positions
+        """
+        inp = torch.cat([t.unsqueeze(-1), x.unsqueeze(-1)], dim=-1)  # [B, T, 2]
+        h = self.selu(self.input_proj1(inp))                         # [B, T, hidden_dim]
+        h = self.input_proj2(h)                                      # [B, T, model_dim]
+        h = self.pos_encoder(h)
+    
+        h_enc = self.transformer_encoder(
+            h, src_key_padding_mask=~mask if mask is not None else None
+        )  # [B, T, model_dim]
+    
+        pooled = h_enc.mean(dim=1)  # [B, model_dim]
+        skip_data=self.raw_encoder(inp)
+        skip_data_pooled = skip_data.mean(dim=1)  # [B, model_dim]
+        cond_vec = torch.cat([pooled, skip_data_pooled], dim=-1)  # [B, model_dim + raw_feat_dim]
+
+        mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
+    #    mu_q=torch.zeros_like(mu_q)
+        logvar_q = self.fc_logvar2(self.selu(self.fc_logvar1(pooled)))
+        
+        std = torch.exp(0.5 * logvar_q)
+        eps = torch.randn_like(std)
+        z0 = mu_q + eps * std
+    
+        if self.training:
+               # z_k, log_det = self.flow(z0, cond_vec)  # pass both z0 and pooled conditioning vector
+                z_k, log_det = self.flow(z0)  # pass both z0 and pooled conditioning vector
+
+        else:
+                z_k = mu_q
+                log_det = torch.zeros(z_k.size(0), device=z_k.device)
+
+    
+        return z_k, mu_q, logvar_q, log_det
+
+   
 class NormalizingFlow(nn.Module):
     def __init__(self, latent_dim, num_flows=2):
         super().__init__()
@@ -443,98 +574,36 @@ class PlanarFlow(nn.Module):
     def __init__(self, latent_dim):
         super().__init__()
         self.latent_dim = latent_dim
-        self.u = nn.Parameter(torch.randn(1, latent_dim))
-        self.w = nn.Parameter(torch.randn(1, latent_dim))
+        
+        # Small weights, close to zero => small transformation
+        epsilon = 1e-20
+        self.u = nn.Parameter(epsilon * torch.randn(1, latent_dim))
+        self.w =nn.Parameter(epsilon * torch.randn(1, latent_dim))
         self.b = nn.Parameter(torch.zeros(1))
 
+        
+
     def forward(self, z):
-        # Compute flow transformation
-        linear = torch.matmul(z, self.w.t()) + self.b
-        h = torch.tanh(linear)
-        z_new = z + self.u * h
-
-        # Compute log-determinant of Jacobian for loss
-        psi = (1 - torch.tanh(linear) ** 2) * self.w  # [B, D]
-        
-        det_jacobian = torch.abs(1 + torch.matmul(psi, self.u.t()))
-        log_det = torch.log(det_jacobian + 1e-8).squeeze(-1)
-
+        w = self.w  # shape [1, D]
+        u = self.u
+        b = self.b
+    
+        # 1. Enforce invertibility: u_hat
+        wu = torch.matmul(w, u.t())  # shape [1, 1]
+        m = -1 + F.softplus(wu)
+        u_hat = u + (m - wu) * w / (torch.norm(w, p=2) ** 2 + 1e-8)
+    
+        # 2. Flow transform
+        linear = torch.matmul(z, w.t()) + b  # shape [B, 1]
+        h = torch.tanh(linear)               # shape [B, 1]
+        z_new = z + u_hat * h                # shape [B, D]
+    
+        # 3. Compute log-det-Jacobian
+        psi = (1 - h ** 2) * w               # [B, D]
+        det_jacobian = 1 + torch.matmul(psi, u_hat.t())  # [B, 1]
+        log_det = torch.log(torch.abs(det_jacobian) + 1e-8).squeeze(-1)  # [B]
+    
         return z_new, log_det
-        
-
-
-class Encoder_Transformer_NF(nn.Module):
-    def __init__(self, latent_dim, input_dim=2, model_dim=64,hidden_dim=64, hidden_flow_dim=32, num_heads=4, num_layers=2, num_flow_layers=2, dropout=0.1):
-        super().__init__()
-        self.input_proj1 = nn.Linear(input_dim, hidden_dim)
-        self.input_proj2 = nn.Linear(hidden_dim, model_dim)
-        self.selu = nn.SELU()        # instantiate ReLU module here
-        self.flow = NormalizingFlow(latent_dim, num_flows=2)
-        #self.flow = ConditionalNormalizingFlow(latent_dim,cond_dim=2*model_dim,hidden_flow_dim=32, num_flows=num_flow_layers)
-
-        self.pos_encoder = PositionalEncoding(model_dim)
-        self.raw_encoder = nn.Linear(input_dim,model_dim)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=model_dim,
-            nhead=num_heads,
-            dim_feedforward=model_dim * 4,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_mu2 = nn.Linear(hidden_dim, latent_dim)
-
-        self.fc_logvar1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_logvar2 = nn.Linear(hidden_dim, latent_dim)
-
-
-        for name, param in self.named_parameters():
-            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
-
-        self.register_buffer("iteration", torch.tensor(1.0))
-
-
-    def forward(self, t, x, mask=None):
-        """
-        t: [B, T]
-        x: [B, T]
-        mask: optional [B, T] bool mask for valid positions
-        """
-        inp = torch.cat([t.unsqueeze(-1), x.unsqueeze(-1)], dim=-1)  # [B, T, 2]
-        h = self.selu(self.input_proj1(inp))                         # [B, T, hidden_dim]
-        h = self.input_proj2(h)                                      # [B, T, model_dim]
-        h = self.pos_encoder(h)
-    
-        h_enc = self.transformer_encoder(
-            h, src_key_padding_mask=~mask if mask is not None else None
-        )  # [B, T, model_dim]
-    
-        pooled = h_enc.mean(dim=1)  # [B, model_dim]
-       # skip_data=self.raw_encoder(inp)
-        #skip_data_pooled = skip_data.mean(dim=1)  # [B, model_dim]
-       # cond_vec = torch.cat([pooled, skip_data_pooled], dim=-1)  # [B, model_dim + raw_feat_dim]
-
-        mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
-        logvar_q = self.fc_logvar2(self.selu(self.fc_logvar1(pooled)))
-        
-        std = torch.exp(0.5 * logvar_q)
-        eps = torch.randn_like(std)
-        z0 = mu_q + eps * std
-    
-        if self.training:
-               # z_k, log_det = self.flow(z0, cond_vec)  # pass both z0 and pooled conditioning vector
-                z_k, log_det = self.flow(z0)  # pass both z0 and pooled conditioning vector
-
-        else:
-                z_k = mu_q
-                log_det = torch.zeros(z_k.size(0), device=z_k.device)
-
-    
-        return z_k, mu_q, logvar_q, log_det
-
-   
    
     
     
@@ -672,7 +741,7 @@ class Encoder_Transformer_VAE(nn.Module):
             for name, param in self.named_parameters():
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
-
+                
     def forward(self, t, x, mask=None):
         """
         t: [B, T]

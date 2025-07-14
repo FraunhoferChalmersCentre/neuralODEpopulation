@@ -36,8 +36,9 @@ import torch.optim as optim
 
 # = optim.SGD(model.parameters(), lr=0.001)  # simple SGD, no momentum, no weight decay
 
-
-
+from lib.utils.my_utils_parallel import *
+from lib.models.NNmodels_parallel import *
+from lib.utils.model_validation_parallel import *
 # ---- Training ---- 
 if __name__ == "__main__":
         
@@ -46,8 +47,9 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-                '--data_test_path', 'lib/data/simulated_test_data1.csv', 
-                '--data_path', 'lib/data/simulated_data1.csv',
+                '--data_validation_path', 'lib/data/simulated_validation_data2.csv', 
+                '--data_test_path', 'lib/data/simulated_test_data2.csv', 
+                '--data_path', 'lib/data/simulated_training_data2.csv',
                 '--save_dir', 'models',
                 '--load_dir', 'models/old']
     
@@ -56,7 +58,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
     parser.add_argument("--data_path", type=str, required=True, help="Path to training CSV file")
     parser.add_argument("--data_test_path", type=str, required=True, help="Path to test CSV file")
-    
+    parser.add_argument("--data_validation_path", type=str, required=True, help="Path to test CSV file")
+
     parser.add_argument("--load_dir", type=str, default=None, help="Path to folder with saved models (optional)")
     parser.add_argument("--save_dir", type=str, required=True, help="Directory where trained models will be saved")
     
@@ -68,10 +71,7 @@ if __name__ == "__main__":
     
     print("Using device:", device)
     
-    from lib.utils.my_utils_parallel import *
-    from lib.models.NNmodels_parallel import *
-    from lib.utils.model_validation_parallel import *
-    
+
     
     
     
@@ -79,35 +79,39 @@ if __name__ == "__main__":
     df = pd.read_csv(args.data_path)
     dataset = TrajectoryDataset(args.data_path)
     
+    dataset_validation=TrajectoryDataset(args.data_validation_path)
+    df_validation=pd.read_csv(args.data_validation_path)
+    
     dataset_test=TrajectoryDataset(args.data_test_path)
     df_test=pd.read_csv(args.data_test_path)
+    
+    
+    
+    
     load_dir = args.load_dir
     save_dir = args.save_dir
     modelname = "MultipleDoseAddError_AE_NF2"
 
     
 
-    latent_dim=2
+    latent_dim=4
     dim_parameter_encoder=3
     hid_dim=128
  
  
 
-   ###### Normalizing Flow
-    encoder1 = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=32, num_heads=4, num_layers=2,num_flow_layers=2, dropout=0.1).to(device)
+    encoder = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=16, num_heads=4, num_layers=2,num_flow_layers=3, dropout=0.1).to(device)
    
-   ###### VAE / AE
-  # encoder1 = Encoder_Transformer_VAE(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64, num_heads=4, num_layers=2, dropout=0.1)
- 
 
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
     func = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
     reducer = SimpleDecoder(latent_dim, hidden_dim=8).to(device)
     initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
-    noise = TrainableNoise(dataset, size=1, init_add_std=1, init_prop_std=0).to(device)
+    noise = TrainableNoise(dataset, size=1, init_add_std=1.5, init_prop_std=0).to(device)
     
     models = {
     "func": func,
-    "encoder1": encoder1,
+    "encoder": encoder,
     "reducer": reducer,
     "initial_encoder": initial_encoder,
     "noise": noise,
@@ -115,57 +119,74 @@ if __name__ == "__main__":
     } 
    
     lr=0.001
-   # load_models(models, save_dir, modelname,device)
+
     main_params = [
-        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder1.parameters()) , "lr": lr},
-        {"params": list(noise.parameters()), "lr": 1000*lr},
+        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder.parameters())},
+        {"params": list(noise.parameters())},
     ]
     
     optimizer = torch.optim.Adam(main_params, lr=lr)
-   # optimizer = optim.SGD(main_params, lr=0.001)  # simple SGD, no momentum, no weight decay
-
-   # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=130, gamma=0.5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=30, verbose=True,min_lr=1e-4)  # Set your desired minimum LR here)
 
     for name, model in models.items():
           model.to(device)
           print(f"{name} is on {next(model.parameters()).device}")
 
-    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
+   
 
-    train_model(dataloader,0.9,models, optimizer,scheduler, dim_parameter_encoder, latent_dim, func,
+
+
+    dataloader = DataLoader(dataset, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+    
+    dataloader_validation=DataLoader(dataset_validation, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+   
+    
+   
+    train_model(
+    dataloader_validation,
+    dataloader,
+    models, 
+    optimizer,
+    scheduler, 
+    func,
     reducer,
     initial_encoder,
-    encoder1,
+    encoder,
     noise,
-    device,
     t_dense=torch.linspace(0, 1, steps=100),
     n_epochs=1000,
-    warmup_epochs_noise=44400,
-    warmup_epochs_iiv=100,
-    smoothing_start_epoch=4000,
-    remove_encoder=False,
-    ae=True,
-    nf=True,
-    onlymedian=False, 
+    warmup_epochs_noise=10000,
+    warmup_epochs_iiv=0,
+    smoothing_start_epoch=1000,
+    traing_against_validation=False,
+    enable_ae_training=True,
+    enable_nf_training=False,
+    enable_onlymedian_training=False, 
     plot_from_training_records_enable=True,              
-    free_bits=0.1,                       
+    free_bits=0,                       
     batch_size=20,                        
     df=df,
+    df_val=df_test,
     dataset=dataset,
-    max_points_visible=0,  
+    dataset_val=dataset_test,
+    max_points_visible=0.25,   
     lr=lr,
     print_epoch=1,
-    plot_epoch=1,
+    plot_epoch=100,
     max_plots=9,
     nr_col=3,
     nr_row=3)  
 
 
-    #save_models(models, save_dir, "MultipleDoseAddError_NF_AE")
+    dataloader_validation=DataLoader(dataset_test, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+    
+    t_dense=torch.linspace(0, 1, steps=50)
+    predict_and_evaluate_mse(False,True, noise,df_test,models, dataloader_validation, dataset_test, t_dense, device, latent_dim, conc_mean, conc_std, remove_encoder=False, max_points_visible=0.5)
 
+  # save_models(models, save_dir, "MultipleDoseAddError_NF5")
 
-    #load_models(models, save_dir, "MultipleDoseAddError_NF_AE")
+   # MSE 15.
+  #  load_models(models, save_dir, "MultipleDoseAddError_NF2")
             
     #decoder = Encoder_Transformer_NF(...)  # same args as decoder1
  
@@ -184,33 +205,32 @@ if __name__ == "__main__":
 
 ### Predictions without encoder
 vpc(
-    onlymedian=True,
+    onlymedian=False,
     df=df,
     dataset=dataset,
     latent_dim=latent_dim,
-    dim_parameter_encoder=dim_parameter_encoder,
+    dim_parameters=dim_parameter_encoder,
     initial_encoder=initial_encoder,
     func=func,
     reducer=reducer,
     noise=noise,
     ODEWrapper=ODEWrapper,
-    time_points=torch.linspace(0, 1, steps=120),
+    t_dense=torch.linspace(0, 1, steps=120),
     compartment="C2",
     num_simulated_total=1000,
-    add_noise_to_prediction=False
+    add_noise_to_prediction=True
 )
 
 
 vpc_decoder(
-    ae=True,
+    ae=False,
     nf=True,
     df=df,
     dataset=dataset,
     latent_dim=latent_dim,
     dim_parameters=dim_parameter_encoder,
     initial_encoder=initial_encoder,
-    decoder1=encoder1,
-    decoder2=encoder1,
+    encoder=encoder,
     func=func,
     reducer=reducer,
     noise=noise,
@@ -218,27 +238,26 @@ vpc_decoder(
     t_dense=torch.linspace(0, 1, steps=120),
     compartment="C2",
     num_simulated_total=1000,
-    add_noise_to_prediction=False
+    add_noise_to_prediction=True
 )
 
 plotIndividualFits_test(
-    ae=True,
+    ae=False,
     nf=True,
     test_dataset=dataset_test,
     df=df_test,
     latent_dim=latent_dim,
     noise=noise,
-    decoder1=decoder1,
-    decoder2=decoder2,
+    encoder=encoder,
     func=func,
     reducer=reducer,
     initial_encoder=initial_encoder,
     ODEWrapper=ODEWrapper,
-    t_dense=torch.linspace(0, 1, steps=120),
-    max_individuals=10,
-    n_samples=2,
+    t_dense=torch.linspace(0, 1, steps=100),
+    max_individuals=12,
+    n_samples=100,
     device=device,
-    truncation=0,
+    truncation=0.25,
     add_noise=False
 )
 

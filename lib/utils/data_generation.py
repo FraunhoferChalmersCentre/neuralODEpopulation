@@ -74,7 +74,7 @@ def simulate_2cpt_and_save_vectorized(n_individuals, add_e, prop_e, dose_amounts
         
     t_eval = np.unique(np.concatenate([np.linspace(t_interval[0], t_interval[1], 120), dose_times, extra_points]))
     
-    t_sample = np.arange(t_interval[0], t_interval[1] + 0.25, 0.25)
+    t_sample = np.arange(t_interval[0], t_interval[1] + 1, 1)
 
     sampled_data = []
     all_results = []

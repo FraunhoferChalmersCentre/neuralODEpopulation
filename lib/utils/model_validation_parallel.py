@@ -232,34 +232,27 @@ def plotIndividualFits_MCMC(
 
     
 
-def plotIndividualFits_test(ae,nf,
-    test_dataset, df, latent_dim,noise,
-    decoder1, decoder2,
+def plotIndividualFits_test(ae, nf, test_dataset, df, latent_dim, noise,
+    encoder,
     func, reducer, initial_encoder, ODEWrapper, t_dense,
     max_individuals=6, n_samples=50, device="cpu",
-    truncation=0.5, add_noise=False  # <-- NEW ARGUMENT: normalized time (0-1)
-):
-    import math
+    truncation=0.5, add_noise=False):
 
-    t_dense = t_dense.to(device)
+  
     MAX_TIME = test_dataset.max_time
     MAX_DOSE = test_dataset.max_dose
     conc_mean, conc_std = test_dataset.conc_mean, test_dataset.conc_std
+    t_dense = t_dense.to(device)
 
-    # Separate indices by dose group
-    dose_05_indices = []
-    dose_10_indices = []
+    # Identify all unique doses in the test set
+    all_doses = sorted(set(entry[2].item() for entry in test_dataset))
+    individuals_per_dose = max_individuals // len(all_doses)
+    selected_indices = []
 
-    for idx in range(len(test_dataset)):
-        t, x, dose_tensor, dose_times_tensor, subject_id = test_dataset[idx]
-        dose_val = dose_tensor.item()
-        if abs(dose_val - 0.25) < 1e-3:
-            dose_05_indices.append(idx)
-        elif abs(dose_val - 1.0) < 1e-3:
-            dose_10_indices.append(idx)
-
-    n_each = max_individuals // 2
-    selected_indices = dose_05_indices[:n_each] + dose_10_indices[:n_each]
+    # Select representative subjects per dose
+    for dose_val in all_doses:
+        dose_indices = [i for i, entry in enumerate(test_dataset) if abs(entry[2].item() - dose_val) < 1e-3]
+        selected_indices.extend(dose_indices[:individuals_per_dose])
 
     ncols = 3
     nrows = math.ceil(max_individuals / ncols)
@@ -267,125 +260,86 @@ def plotIndividualFits_test(ae,nf,
 
     for i, idx in enumerate(selected_indices):
         t, x, dose_tensor, dose_times_tensor, subject_id = test_dataset[idx]
-
         t, x = t.to(device), x.to(device)
         dose_tensor = dose_tensor.to(device).unsqueeze(0)
-        dose = dose_tensor.item()
+        dose_val = dose_tensor.item()
         dose_times_tensor = dose_times_tensor.to(device)
 
-        # Normalize and truncate input for encoding
-        t_full = t
-        x_full = x
-        t_norm = t_full
-        x_std = x_full * conc_std + conc_mean
+        t_norm = t
+        x_std = x * conc_std + conc_mean
 
-        # Mask for time <= truncation
         train_mask = t_norm <= truncation
         t_trunc = t_norm[train_mask].unsqueeze(0)
-        x_trunc = x_full[train_mask].unsqueeze(0)
+        x_trunc = x[train_mask].unsqueeze(0)
 
+        # Get latent samples z
+        if enable_ae_training:
+            z, mu, logvar, _ = encoder(t_trunc, x_trunc)
+            z = mu.repeat(n_samples, 1) + torch.randn_like(mu.repeat(n_samples, 1)) * 0.01
+        elif enable_nf_training:
+           
+            _, mu, logvar, _ = encoder(t_trunc, x_trunc)
+            z, _ = encoder.sample(mu, logvar, num_samples=n_samples)
 
-        decoder = decoder1 if abs(dose - 0.25) < 1e-3 else decoder2
-        
-        if ae: 
-           # mu, _= decoder(t_trunc, x_trunc)
-            z, mu, logvar,_ = decoder(t_trunc, x_trunc)
-            z= mu.repeat(n_samples, 1)
-            z= z + + torch.randn_like(z) * 0.01
+         
         else:
-            if nf:
-                z_samples=[]
-                for _ in range(n_samples):
-                    zi, mu, logvar,_ = decoder(t_trunc, x_trunc)
-                    z_samples.append(zi)
-                    
-                z = torch.stack(z_samples, dim=1).transpose(0,1)  # [B, n_samples, latent_dim]
-
-            else:
-                mu, logvar = decoder(t_trunc, x_trunc)
-                std = torch.exp(0.5 * logvar)
-                eps = torch.randn(n_samples, *std.shape)
-
-                z = mu + eps * std
-                z=z.squeeze(dim=1)
+            _,mu, logvar,_ = encoder(t_trunc, x_trunc)
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn(n_samples, *std.shape).to(device)
+            z = mu + eps * std
+            z = z.squeeze(1)
  
+        x0_latent = initial_encoder(x_trunc[:, 0].unsqueeze(1)).repeat(n_samples, 1)
+        
+        x0 = torch.cat([x0_latent,  z.squeeze(0)], dim=1)
 
-        t_rep = t_trunc.repeat(n_samples, 1)
-        x_rep = x_trunc.repeat(n_samples, 1)
-
-     
-            
-        z = z.squeeze(1)  # If shape is [n_samples, 1, latent_dim]
-
-        x0_latent = initial_encoder(x_trunc[:, 0].unsqueeze(1))
-        x0_latent = x0_latent.repeat(n_samples, 1)  # shape: [1000, d]
-      
-        x0 = torch.cat([x0_latent,z], dim=1)
-
-        #x0 = torch.cat([x0_1, z], dim=1)
-
+        # Pad dose times and prepare inputs for ODE
         dose_times_padded = torch.nn.utils.rnn.pad_sequence([dose_times_tensor], batch_first=True).to(device)
         dose_mask = (dose_times_padded != 0).to(device)
         dose_times_padded = dose_times_padded.repeat(n_samples, 1)
         dose_mask = dose_mask.repeat(n_samples, 1)
         dose_rep = dose_tensor.repeat(n_samples, 1)
 
-        ode_func = ODEWrapper(func, dose_times_padded, dose_rep, dose_mask)
-        pred = odeint(ode_func, x0, t_dense, method='dopri5')
+        ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1), dose_rep.unsqueeze(-1), dose_mask)
+        pred = odeint(ode_func, x0, t_dense, method='rk4')
         pred = reducer(pred[:, :, :latent_dim])
         pred = destandardize_concentration(pred, conc_mean, conc_std)
+
         if add_noise:
             pred = noise.sample(pred, n_samples=1).squeeze(0)
-            
-        perc10 = torch.quantile(pred, 0.10, dim=1)
-        perc90 = torch.quantile(pred, 0.90, dim=1)
-        median = torch.median(pred, dim=1).values
-        
-        # Convert to numpy on CPU
-        perc10 = perc10.detach().cpu().numpy()
-        perc90 = perc90.detach().cpu().numpy()
-        median = median.detach().cpu().numpy()
 
+        # Compute percentiles
+        perc10 = torch.quantile(pred, 0.10, dim=1).detach().cpu().numpy()
+        perc90 = torch.quantile(pred, 0.90, dim=1).detach().cpu().numpy()
+        median = torch.median(pred, dim=1).values.detach().cpu().numpy()
 
 
         time_dense_np = t_dense.cpu().numpy() * MAX_TIME
-
-        # Define boolean masks on CPU numpy arrays for indexing:
         train_region = time_dense_np <= truncation * MAX_TIME
         test_region = time_dense_np > truncation * MAX_TIME
-      
 
-        # Then plot
+        # Plot
         ax = axes[i // ncols][i % ncols]
-        
-        ax.fill_between(time_dense_np[train_region], perc10[train_region], perc90[train_region], color="blue", alpha=0.3, label="Pred 10–90% CI (Training)")
-        ax.fill_between(time_dense_np[test_region], perc10[test_region], perc90[test_region], color="red", alpha=0.3, label="Pred 10–90% CI (Test)")
-        
-        ax.plot(time_dense_np[train_region], median[train_region], color="blue", label="Pred median (Training)")
-        ax.plot(time_dense_np[test_region], median[test_region], color="red", label="Pred median (Test)")
-        
-        # Similarly for scatter actual points, separate by truncation
-        train_points_mask = (t_norm.cpu().numpy() * MAX_TIME) <= (truncation * MAX_TIME)
-        test_points_mask = (t_norm.cpu().numpy() * MAX_TIME) > (truncation * MAX_TIME)
-        
-        t_scaled = (t_norm.cpu().numpy()) * MAX_TIME
-        x_scaled = (x_std.cpu().numpy())
-        
-        ax.scatter(t_scaled[train_points_mask], x_scaled[train_points_mask], color='blue', label='Training data')
-        ax.scatter(t_scaled[test_points_mask], x_scaled[test_points_mask], color='red', label='Test data')
-        
-        ax.set_title(f"ID {subject_id} | Dose {dose * MAX_DOSE:.1f}")
+        ax.fill_between(time_dense_np[train_region], perc10[train_region], perc90[train_region], color="blue", alpha=0.3)
+        ax.fill_between(time_dense_np[test_region], perc10[test_region], perc90[test_region], color="red", alpha=0.3)
+        ax.plot(time_dense_np[train_region], median[train_region], color="blue")
+        ax.plot(time_dense_np[test_region], median[test_region], color="red")
 
-        ax.set_title(f"ID {subject_id} | Dose {dose * MAX_DOSE:.1f}")
+        # Ground truth points
+        t_scaled = (t.cpu().numpy()) * MAX_TIME
+        x_scaled = (x_std.cpu().numpy())
+        ax.scatter(t_scaled[t_scaled <= truncation * MAX_TIME], x_scaled[t_scaled <= truncation * MAX_TIME], color='blue', label='Train')
+        ax.scatter(t_scaled[t_scaled > truncation * MAX_TIME], x_scaled[t_scaled > truncation * MAX_TIME], color='red', label='Test')
+
+        ax.set_title(f"ID {subject_id} | Dose {dose_val * MAX_DOSE:.1f}")
         ax.set_xlabel("Time (hours)")
         ax.set_ylabel("Concentration")
         ax.grid(True)
-       # ax.set_xlim(0, MAX_TIME)
-      #  ax.set_ylim(0, 20)
         ax.legend()
 
     plt.tight_layout()
     plt.show()
+
 
  
         
@@ -467,11 +421,11 @@ def vpc(onlymedian,
             doses_tensor = doses_tensor.unsqueeze(1)  # [B] -> [B, 1]
         doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))  # [B, max_doses]
 
-        print(doses_tensor.size())
-        ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
+     
+        ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1),doses_tensor.unsqueeze(-1), dose_mask)
         x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
         x0=x0.to(device)
-        pred = odeint(ode_func, x0, t_dense.to(device), method='dopri5')  # [time, batch, latent_dim+1]
+        pred = odeint(ode_func, x0, t_dense.to(device), method='rk4')  # [time, batch, latent_dim+1]
         
         x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean,conc_std)  # [time, batch, state_dim]
 
@@ -530,7 +484,7 @@ def vpc(onlymedian,
 
 def vpc_decoder(ae,nf,
         df, dataset, latent_dim,
-      dim_parameters, initial_encoder,decoder1,decoder2, func, reducer, noise, ODEWrapper,
+      dim_parameters, initial_encoder,encoder, func, reducer, noise, ODEWrapper,
     t_dense,compartment, num_simulated_total=500,
     add_noise_to_prediction: bool = False  # 🔧 NEW ARGUMENT
 ):
@@ -587,25 +541,19 @@ def vpc_decoder(ae,nf,
         # 🧠 Choose decoder based on dose
         dose_value_float = float(dose_value)
         
-        if nf:
-            if dose_value_float == 0.25:
-               z_tensor, mu_q, logvar_q,_ = decoder1(t_real_padded, x_true_padded)
-            elif dose_value_float == 1.0:
-               z_tensor, mu_q, logvar_q,_ = decoder2(t_real_padded, x_true_padded)
-           
+        if enable_nf_training:
+     
+               z_tensor, mu_q, logvar_q,_ = encoder(t_real_padded, x_true_padded)
+          
                 
         else:
             
-            if dose_value_float == 0.25:
-               mu_q, logvar_q= decoder1(t_real_padded, x_true_padded)
+         
+               _,mu_q, logvar_q, _ = encoder(t_real_padded, x_true_padded)
                std_q = torch.exp(0.5 * logvar_q)
                eps = torch.randn_like(std_q)
                z_tensor = mu_q + eps * std_q
-            elif dose_value_float == 1.0:
-               mu_q, logvar_q = decoder2(t_real_padded, x_true_padded)
-               std_q = torch.exp(0.5 * logvar_q)
-               eps = torch.randn_like(std_q)
-               z_tensor = mu_q + eps * std_q
+      
            
            
             
@@ -631,15 +579,28 @@ def vpc_decoder(ae,nf,
              doses_tensor = doses_tensor.unsqueeze(1)  # [B] -> [B, 1]
              
         doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))  # [B, max_doses]
-        if ae:
+        if enable_ae_training:
             z_tensor=mu_q
     
        # print(dose_times_padded)
        # print(doses_tensor)
-        ode_func = ODEWrapper(func, dose_times_padded,doses_tensor, dose_mask)
+       
+       
+       
+        
+        #dose_tensor_expanded = dose_times_padded.unsqueeze(1).repeat(1, dose_times_padded.size(1))  # [10, 4]
+        #dose_tensor_expanded = dose_tensor_expanded.unsqueeze(-1)  # [10, 4, 1]
+        
+        # dose_times_padded: [10, 4]
+      #  dose_times_expanded = dose_times_padded.unsqueeze(-1)  # [10, 4, 1]
+        
+        
+        
+        ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1),doses_tensor.unsqueeze(-1), dose_mask)
         x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
         x0=x0.to(device)
-        pred = odeint(ode_func, x0, t_dense.to(device), method='dopri5')  # [time, batch, latent_dim+1]
+        
+        pred = odeint(ode_func, x0, t_dense.to(device), method='rk4')  # [time, batch, latent_dim+1]
         
 
         x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean, conc_std)  # Only reduce latent part
@@ -688,7 +649,8 @@ def vpc_decoder(ae,nf,
 
        # plt.xlim(0, 24)
       #  plt.ylim(1, 120)
-
+        plt.xlim(0, 24)
+        plt.ylim(0, 120)
         plt.title(f"Dose {dose_value * MAX_DOSE:.0f} (Simulated vs Raw)")
         plt.xlabel("Time (hours)")
         plt.ylabel(f"Concentration ({compartment})")
