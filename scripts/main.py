@@ -107,7 +107,7 @@ if __name__ == "__main__":
     func = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
     reducer = SimpleDecoder(latent_dim, hidden_dim=8).to(device)
     initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
-    noise = TrainableNoise(dataset, size=1, init_add_std=1.5, init_prop_std=0).to(device)
+    noise = TrainableNoise(dataset, size=1, init_add_std=1, init_prop_std=0).to(device)
     
     models = {
     "func": func,
@@ -121,8 +121,8 @@ if __name__ == "__main__":
     lr=0.001
 
     main_params = [
-        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder.parameters())},
-        {"params": list(noise.parameters())},
+        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder1.parameters()) , "lr": lr},
+        {"params": list(noise.parameters()), "lr": lr},
     ]
     
     optimizer = torch.optim.Adam(main_params, lr=lr)
@@ -133,12 +133,12 @@ if __name__ == "__main__":
           print(f"{name} is on {next(model.parameters()).device}")
 
    
+    batch_size=100
 
 
-
-    dataloader = DataLoader(dataset, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
     
-    dataloader_validation=DataLoader(dataset_validation, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dataloader_validation=DataLoader(dataset_validation, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
    
     
    
@@ -155,7 +155,7 @@ if __name__ == "__main__":
     noise,
     t_dense=torch.linspace(0, 1, steps=100),
     n_epochs=1000,
-    warmup_epochs_noise=10000,
+    warmup_epochs_noise=0,
     warmup_epochs_iiv=0,
     smoothing_start_epoch=1000,
     traing_against_validation=False,
@@ -163,14 +163,12 @@ if __name__ == "__main__":
     enable_nf_training=False,
     enable_onlymedian_training=False, 
     plot_from_training_records_enable=True,              
-    free_bits=0,                       
-    batch_size=20,                        
+    free_bits=0,                                            
     df=df,
     df_val=df_test,
     dataset=dataset,
     dataset_val=dataset_test,
-    max_points_visible=0.25,   
-    lr=lr,
+    max_points_visible=1,   
     print_epoch=1,
     plot_epoch=100,
     max_plots=9,
@@ -178,7 +176,7 @@ if __name__ == "__main__":
     nr_row=3)  
 
 
-    dataloader_validation=DataLoader(dataset_test, batch_size=10,shuffle=True, collate_fn=collate_fn, num_workers=0)
+    dataloader_validation=DataLoader(dataset_test, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
     
     t_dense=torch.linspace(0, 1, steps=50)
     predict_and_evaluate_mse(False,True, noise,df_test,models, dataloader_validation, dataset_test, t_dense, device, latent_dim, conc_mean, conc_std, remove_encoder=False, max_points_visible=0.5)
