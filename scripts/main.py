@@ -10,35 +10,22 @@ Created on Sun Jun 29 16:04:21 2025
 
 
 import os
-
-
-import ast
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import argparse
-
-import random
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
-import torch.nn.functional as F
-
-from sklearn.decomposition import PCA
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score
-
 import argparse
 import sys
 import torch.optim as optim
+import torch
+import pandas as pd
+import ast
 
-# = optim.SGD(model.parameters(), lr=0.001)  # simple SGD, no momentum, no weight decay
 
-from lib.utils.my_utils_parallel import *
-from lib.models.NNmodels_parallel import *
-from lib.utils.model_validation_parallel import *
+
+
+from torch.utils.data import Dataset, DataLoader
+
+
+ 
+
+
 # ---- Training ---- 
 if __name__ == "__main__":
         
@@ -53,6 +40,9 @@ if __name__ == "__main__":
                 '--save_dir', 'models',
                 '--load_dir', 'models/old']
     
+    from lib.utils.my_utils import train_model, TrajectoryDataset, collate_fn, ODEWrapper
+    from lib.models.NNmodels import Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
+    from lib.utils.model_validation import predict_and_evaluate_mse, vpc, vpc_with_encoder, plot_individual_fits
     
     # Define your parser
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
@@ -121,7 +111,7 @@ if __name__ == "__main__":
     lr=0.001
 
     main_params = [
-        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder1.parameters()) , "lr": lr},
+        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder.parameters()) , "lr": lr},
         {"params": list(noise.parameters()), "lr": lr},
     ]
     
@@ -133,13 +123,14 @@ if __name__ == "__main__":
           print(f"{name} is on {next(model.parameters()).device}")
 
    
-    batch_size=100
+    batch_size=10
 
 
     dataloader = DataLoader(dataset, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
     
     dataloader_validation=DataLoader(dataset_validation, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
-   
+    dataloader_test=DataLoader(dataset_test, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
+
     
    
     train_model(
@@ -154,11 +145,11 @@ if __name__ == "__main__":
     encoder,
     noise,
     t_dense=torch.linspace(0, 1, steps=100),
-    n_epochs=1000,
+    n_epochs=200,
     warmup_epochs_noise=0,
     warmup_epochs_iiv=0,
     smoothing_start_epoch=1000,
-    traing_against_validation=False,
+    traing_against_validation=True,
     enable_ae_training=True,
     enable_nf_training=False,
     enable_onlymedian_training=False, 
@@ -168,7 +159,7 @@ if __name__ == "__main__":
     df_val=df_test,
     dataset=dataset,
     dataset_val=dataset_test,
-    max_points_visible=1,   
+    max_points_visible=0.1,   
     print_epoch=1,
     plot_epoch=100,
     max_plots=9,
@@ -176,10 +167,21 @@ if __name__ == "__main__":
     nr_row=3)  
 
 
-    dataloader_validation=DataLoader(dataset_test, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
     
-    t_dense=torch.linspace(0, 1, steps=50)
-    predict_and_evaluate_mse(False,True, noise,df_test,models, dataloader_validation, dataset_test, t_dense, device, latent_dim, conc_mean, conc_std, remove_encoder=False, max_points_visible=0.5)
+
+    predict_and_evaluate_mse(
+    enable_ae_training=False,
+    enable_nf_training=True,
+    noise=noise,
+    df=df_test,
+    models=models,
+    dataloader=dataloader_test,
+    dataset=dataset_test,
+    t_dense=torch.linspace(0, 1, steps=50),
+    max_points_visible=0.1
+)
+
+
 
   # save_models(models, save_dir, "MultipleDoseAddError_NF5")
 
@@ -220,9 +222,9 @@ vpc(
 )
 
 
-vpc_decoder(
-    ae=False,
-    nf=True,
+vpc_with_encoder(
+    enable_ae_training=False,
+    enable_nf_training=True,
     df=df,
     dataset=dataset,
     latent_dim=latent_dim,
@@ -239,9 +241,9 @@ vpc_decoder(
     add_noise_to_prediction=True
 )
 
-plotIndividualFits_test(
-    ae=False,
-    nf=True,
+plot_individual_fits(
+    enable_ae_training=False,
+    enable_nf_training=True,
     test_dataset=dataset_test,
     df=df_test,
     latent_dim=latent_dim,
@@ -253,9 +255,9 @@ plotIndividualFits_test(
     ODEWrapper=ODEWrapper,
     t_dense=torch.linspace(0, 1, steps=100),
     max_individuals=12,
-    n_samples=100,
+    n_samples=10,
     device=device,
-    truncation=0.25,
+    truncation=0.1,
     add_noise=False
 )
 

@@ -14,23 +14,111 @@ Created on Fri Jun 27 10:21:33 2025
 
 import os
 import torch
-    
+import ast  
 import math
-from torch.utils.data import DataLoader
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import random
+
+from torch.utils.data import DataLoader
 from torchdiffeq import odeint as odeint
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split, cross_val_score, KFold
-from sklearn.metrics import r2_score
 
-from lib.utils.my_utils_parallel import *
+from lib.utils.my_utils import* # estimate_max_time, estimate_max_dose, pad_dose_times, truncate_time_series, pad_sequence
 
+def predict_and_evaluate_mse(enable_ae_training, enable_nf_training, noise, df, models, dataloader, dataset, t_dense, max_points_visible):
+    encoder = models["encoder"]
+    initial_encoder = models["initial_encoder"]
+    reducer = models["reducer"]
+    func = models["func"]
+    noise = models["noise"]
+    device = next(func.parameters()).device
+    dim_parameter_encoder = func.dim_parameter_encoder
+    latent_dim = func.dim_latent
 
+    encoder.eval()
+    initial_encoder.eval()
+    reducer.eval()
+    func.eval()
+    noise.eval()
+
+    total_mse = 0.0
+    total_count = 0
+    
+    MAX_TIME = estimate_max_time(df)
+    MAX_DOSE = estimate_max_dose(df)
+    conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+    all_times = np.concatenate(dose_times_lists)
+    
+    unique_times_np = np.unique(all_times)
+    unique_times = torch.from_numpy(unique_times_np).to(dtype=torch.float32, device=device)
+    dose_times_tensor = unique_times / MAX_TIME
+    
+    t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
+
+    for id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list in dataloader:
+        t_padded, x_padded, mask = t_padded.to(device), x_padded.to(device), mask.to(device)
+        dose_tensor = dose_tensor.to(device)
+        dose_times_list = [dt.to(device) for dt in dose_times_list]
+        batch_size = t_padded.size(0)
+
+        # Pad dose times
+        dose_times_padded, dose_times_mask = pad_dose_times(dose_times_list)
+
+        dose_tensor_exp = dose_tensor.unsqueeze(1).repeat(1, dose_times_padded.size(1)).unsqueeze(-1)
+        dose_times_exp = dose_times_padded.unsqueeze(-1)
+        dose_features = torch.cat([dose_times_exp, dose_tensor_exp], dim=-1)
+
+        if max_points_visible > 0:
+            t_low_list, x_low_list = truncate_time_series(t_padded, x_padded, max_points_visible)
+        
+            t_low = pad_sequence(t_low_list, batch_first=True).to(device)
+            x_low = pad_sequence(x_low_list, batch_first=True).to(device)
+        else:
+            t_low, x_low = t_padded, x_padded
+
+        
+        
+        if enable_nf_training: 
+            z_refined, mu_q, logvar_q, _ = encoder(t_low, x_low)
+        
+        
+        else: 
+            _, mu_q, logvar_q, _ = encoder(t_low, x_low)
+            std_q = torch.exp(0.5 * logvar_q)
+            z_refined = mu_q + std_q * torch.randn_like(mu_q)
+
+        if enable_ae_training:
+            z_refined=mu_q
+
+        # Initial state
+        x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
+        x0 = torch.cat([x0_1, z_refined], dim=1)
+
+        ode_func = ODEWrapper(func, dose_times_exp, dose_tensor_exp, dose_times_mask)
+        pred = odeint(ode_func, x0, t_dense, method='rk4')
+        pred_batch = pred.permute(1, 0, 2)
+
+        t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
+        test = reducer(pred_batch[:, :, :latent_dim])
+        pred_interp = batch_linear_interpolate_1d(test, t_dense_exp, t_padded)
+
+        # Denormalize
+        x_real = destandardize_concentration(x_padded, conc_mean, conc_std)
+        x_pred = destandardize_concentration(pred_interp, conc_mean, conc_std)
+
+        _, mse = noise.nll(x_real, x_pred, mask)
+
+        total_mse += mse.item()
+        
+
+    final_mse = total_mse / 10
+    print(f"Final MSE on dataset: {final_mse:.6f}")
+    return final_mse
 
 
 def plotIndividualFits_MCMC(
@@ -232,7 +320,7 @@ def plotIndividualFits_MCMC(
 
     
 
-def plotIndividualFits_test(ae, nf, test_dataset, df, latent_dim, noise,
+def plot_individual_fits(enable_ae_training, enable_nf_training, test_dataset, df, latent_dim, noise,
     encoder,
     func, reducer, initial_encoder, ODEWrapper, t_dense,
     max_individuals=6, n_samples=50, device="cpu",
@@ -482,7 +570,7 @@ def vpc(onlymedian,
         plt.tight_layout()
         plt.show()
 
-def vpc_decoder(ae,nf,
+def vpc_with_encoder(enable_ae_training,enable_nf_training,
         df, dataset, latent_dim,
       dim_parameters, initial_encoder,encoder, func, reducer, noise, ODEWrapper,
     t_dense,compartment, num_simulated_total=500,

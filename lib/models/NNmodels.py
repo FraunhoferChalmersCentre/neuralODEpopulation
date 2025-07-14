@@ -38,23 +38,8 @@ import math
 import os
 
 import torch.nn.functional as F
-from lib.utils.my_utils_parallel import *
+from lib.utils.my_utils import *
 
-
-class ODEWrapper(nn.Module):
-    def __init__(self, func, dose_times, dose_amounts, dose_mask):
-        super().__init__()
-        self.func = func
-        self.dose_times = dose_times          # [batch, max_len]
-        self.dose_amounts = dose_amounts      # [batch, max_len]
-        self.dose_mask = dose_mask            # [batch, max_len]
-  
-
-    def forward(self, t, x):
-        # Pass all dose info separately to ODEFunc
-        
-        return self.func(t, x, self.dose_times, self.dose_amounts, self.dose_mask)
-   
 
 
 

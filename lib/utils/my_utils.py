@@ -37,9 +37,21 @@ import os
 # ---- Settings ----
 compartment = 'C2'
 
-from lib.models.NNmodels_parallel import *
+#from lib.models.my_utils import*
 
+class ODEWrapper(nn.Module):
+    def __init__(self, func, dose_times, dose_amounts, dose_mask):
+        super().__init__()
+        self.func = func
+        self.dose_times = dose_times          # [batch, max_len]
+        self.dose_amounts = dose_amounts      # [batch, max_len]
+        self.dose_mask = dose_mask            # [batch, max_len]
+  
 
+    def forward(self, t, x):
+        # Pass all dose info separately to ODEFunc
+        
+        return self.func(t, x, self.dose_times, self.dose_amounts, self.dose_mask)
 def approx_dirac_delta_vectorized(t, dose_times, dt, scaling=0.02,normalize=1):
     epsilon = scaling
     return np.sum(np.exp(-((t - dose_times) / epsilon)**2) / (epsilon * np.sqrt(np.pi)))/normalize
@@ -497,7 +509,10 @@ def dropout_rows(z, p,device):
     return output, keep_mask
 
 @torch.no_grad()
-def evaluate_on_val(noise,dim_parameter_encoder, latent_dim,reducer,df_val, dataset_val,dataloader_val, batch_size,device, encoder,initial_encoder,func,remove_encoder,nf,ae,max_points_visible,t_dense):
+def evaluate_on_val(enable_nf_training,enable_ae_training,max_points_visible,func, noise,reducer,df_val, dataset_val, dataloader_val, batch_size,device, encoder,initial_encoder,t_dense):
+    device = next(func.parameters()).device
+    dim_parameter_encoder = func.dim_parameter_encoder
+    latent_dim = func.dim_latent
     
     MAX_TIME = estimate_max_time(df_val)
     MAX_DOSE = estimate_max_dose(df_val)
@@ -534,7 +549,7 @@ def evaluate_on_val(noise,dim_parameter_encoder, latent_dim,reducer,df_val, data
             x_low = pad_sequence(x_low_list, batch_first=True).to(device)
 
           
-        if nf:
+        if enable_nf_training:
                 z_refined, mu_q, logvar_q, log_det = encoder(t_low, x_low)
        
             
@@ -543,16 +558,14 @@ def evaluate_on_val(noise,dim_parameter_encoder, latent_dim,reducer,df_val, data
                 std_q = torch.exp(0.5 * logvar_q)
                 z_refined= mu_q + std_q * torch.randn_like(mu_q)
 
-        if ae:
+        if enable_ae_training:
             z_refined = mu_q
 
         x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
     
-        if remove_encoder:
-            z_refined, mask_drop = dropout_rows(z_refined, p, device)
-            x0 = torch.cat([x0_1, z_refined + torch.randn_like(z_refined) * 0.01], dim=1)
-        else:
-            x0 = torch.cat([x0_1, z_refined + torch.randn_like(z_refined) * 0.01], dim=1)
+       
+          
+        x0 = torch.cat([x0_1, z_refined + torch.randn_like(z_refined) * 0.01], dim=1)
 
         ode_func = ODEWrapper(func, dose_times_expanded, dose_tensor_expanded, dose_times_mask)
         pred = odeint(ode_func, x0, t_dense, method='rk4')
@@ -762,9 +775,9 @@ def train_model(dataloader_val, dataloader,models, optimizer,scheduler, func, re
                 if enable_nf_training:
                  
                     KL_loss, log_det_sum, kl_gauss,log_det_penalty = kl_divergence_NF(epoch,warmup_epochs_iiv,
-                                                                                      mu_q, logvar_q,mu_std_low, logvar_std_low,log_det,free_bits=free_bits_on, keep_mask=mask_drop,  log_det_penalty_lambda=1)
+                                                                                      mu_q, logvar_q,mu_std_low, logvar_std_low,log_det,free_bits=free_bits_on, keep_mask=mask,  log_det_penalty_lambda=1)
                 else:
-                    KL_loss = kl_divergence_gaussians(mu_q, logvar_q, mu_std_low, logvar_std_low, free_bits_on,mask_drop)
+                    KL_loss = kl_divergence_gaussians(mu_q, logvar_q, mu_std_low, logvar_std_low, free_bits_on,mask)
                     log_det_sum=torch.tensor(0)  
                     log_det_penalty=0
  
@@ -916,7 +929,7 @@ def train_model(dataloader_val, dataloader,models, optimizer,scheduler, func, re
             
         if traing_against_validation:
             
-             val_mse = evaluate_on_val(noise,dim_parameter_encoder, latent_dim,reducer,df_val, dataset_val, dataloader_val, batch_size,device, encoder,initial_encoder,func,remove_encoder,nf,ae,max_points_visible,t_dense)
+             val_mse = evaluate_on_val(enable_nf_training,enable_ae_training,max_points_visible,func, noise,reducer,df_val, dataset_val, dataloader_val, batch_size,device, encoder,initial_encoder,t_dense)
              
              if epoch % 10 == 0:
                 print(f"MSE on validation set: {val_mse}")
