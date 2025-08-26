@@ -14,7 +14,7 @@ def main():
 
     # Set default save directory and path
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "simulated_training_data2.csv")
+    default_save_path = os.path.join(default_save_dir, "simulated_training_data6.csv")
 
     parser = argparse.ArgumentParser(description="Simulate and save 2CPT PK data.")
     parser.add_argument(
@@ -38,10 +38,12 @@ def main():
     # Run simulation
     simulate_2cpt_and_save_vectorized(
         n_individuals=50,
-        add_e=2,
+        add_e=5,
         prop_e=0.001,
         dose_amounts=[100,200],
-        dose_times=[1, 5, 9, 13],
+       # dose_times=[3,6,10], #, 9, 14, 15],
+        dose_times=[3, 8, 13, 18],
+
         save_path=args.save_path,
         plot=True,
     )

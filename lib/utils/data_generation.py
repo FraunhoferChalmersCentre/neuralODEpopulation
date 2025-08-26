@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt     # for plotting
 import pandas as pd                 # for saving/loading data
 
 
-from lib.utils.my_utils_parallel import *
+from lib.utils.my_utils import *
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -56,13 +56,13 @@ def save_results(sampled_data, save_path):
 
 
 def simulate_2cpt_and_save_vectorized(n_individuals, add_e, prop_e, dose_amounts, dose_times, save_path, plot=False):
-    t_interval = (0, 24)
+    t_interval = (0, 36)
     ka_mean = 1.0
     cl_mean = 1.5
     v_mean = 5.0
 
     ka_sd = 0.5
-    cl_sd = 0.2
+    cl_sd = 0.5
 
     add_error = add_e
     prop_error = prop_e
@@ -95,9 +95,14 @@ def simulate_2cpt_and_save_vectorized(n_individuals, add_e, prop_e, dose_amounts
         #C2_simulated = solve_individual_vectorized(ka_samples, cl_samples, v, dose_amount, dose_times, t_eval)
 
         # Add noise
+        # Add noise only where C2_simulated > 0
         noise = np.random.normal(0, add_error, size=C2_simulated.shape)
         noise_prop = np.random.normal(0, prop_error, size=C2_simulated.shape)
-        C2_with_noise = C2_simulated * (1 + noise_prop) + noise
+        
+        C2_with_noise = C2_simulated.copy()  # Avoid modifying original
+        mask = C2_simulated > 0
+        C2_with_noise[mask] = C2_simulated[mask] * (1 + noise_prop[mask]) + noise[mask]
+        C2_with_noise[C2_with_noise < 0] = 0
 
         # Interpolate to sample times
         C2_sampled = np.array([np.interp(t_sample, t_eval, c2) for c2 in C2_with_noise])

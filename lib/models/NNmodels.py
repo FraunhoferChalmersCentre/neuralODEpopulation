@@ -43,88 +43,8 @@ from lib.utils.my_utils import *
 
 
 
-class DoseAttention(nn.Module):
-    def __init__(self, hidden_dim):
-        super().__init__()
-        self.query = nn.Linear(hidden_dim, hidden_dim)
-        self.key = nn.Linear(hidden_dim, hidden_dim)
-        self.value = nn.Linear(hidden_dim, hidden_dim)
-        self.scale = hidden_dim ** 0.5
-        
-        # Learned default output when no valid doses
-        self.default_output = nn.Parameter(torch.zeros(hidden_dim))
-        #self.time_bias_scale = nn.Parameter(torch.tensor(-7.0))  # initialized to -1.0
-        self.time_bias_net = nn.Sequential(
-            nn.Linear(1, 16),
-            nn.SELU(),
-            nn.Linear(16, 1)
-        )
-        nn.init.xavier_uniform_(self.time_bias_net[-1].weight)
-        nn.init.constant_(self.time_bias_net[-1].bias, 0.0)  # start bias neutral
-
-    def forward(self, gru_outputs, mask,T2_all):
-        # gru_outputs: [batch, seq_len, hidden_dim]
-        # mask: [batch, seq_len] bool tensor, True for valid dose times
-
-        batch_size, seq_len, hidden_dim = gru_outputs.size()
-        
-        Q = self.query(gru_outputs)  # [B, T, H]
-        K = self.key(gru_outputs)    # [B, T, H]
-        V = self.value(gru_outputs)  # [B, T, H]
-
-        scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale  # [B, T, T]
-
-        # Create mask for attention scores: expand dims
-        attn_mask = mask.unsqueeze(1).expand(-1, seq_len, -1)  # [B, T, T]
-        
-        # Identify batch elements with all False masks along last dim (no valid doses)
-        no_valid_mask = (~mask).all(dim=1)  # [B] True if all False
-        
-        # Mask invalid positions with -inf
-        scores = scores.masked_fill(~attn_mask, float('-inf'))
-        if T2_all is not None:
-            # x: [B, dim_parameter_encoder]
-            # expand to [B, T, dim_parameter_encoder]
-            time_diff = T2_all.unsqueeze(2) - T2_all.unsqueeze(1)  # [B, T, T]
-
-# For simplicity, take abs or clamp and reshape to feed a small network
-            time_diff_abs = torch.abs(time_diff).unsqueeze(-1)  # [B, T, T, 1]
-        
-            # Transpose if needed for broadcasting in scores addition
-          #  time_bias = time_bias.transpose(1, 2)  # [B, 1, T]
-            rel_time_bias = self.time_bias_net(time_diff_abs).squeeze(-1)  # [B, T, T]
-
-            scores = scores + 35*rel_time_bias
 
 
-
-      
-        
-        attn_weights = torch.zeros_like(scores)
-        
-        # For batches with valid masks, compute softmax normally
-        valid_batches = ~no_valid_mask
-        if valid_batches.any():
-            attn_weights[valid_batches] = F.softmax(scores[valid_batches], dim=-1)
-       
-        # For batches with no valid doses, attention weights remain zeros
-      #  print(attn_weights)
-        attn_output = torch.bmm(attn_weights, V)  # [B, T, H]
-   
-        # Average over sequence dim for output
-        output = attn_output.mean(dim=1)  # [B, H]
-
-        # Replace outputs for no_valid_mask batches with default learned embedding
-        if no_valid_mask.any():
-            output[no_valid_mask] = self.default_output.unsqueeze(0).expand(no_valid_mask.sum(), -1)
-        
-        return output, attn_weights
-
-
-
-
-    
-# ---- ODE ----
 class ODEFunc(nn.Module):
     def __init__(self, latent_dim, dim_parameter_encoder, hid_dim):
         super().__init__()
@@ -139,22 +59,26 @@ class ODEFunc(nn.Module):
             nn.SELU(),
             nn.Linear(hid_dim, latent_dim ))
         
+
+
         self.skip = nn.Sequential(
             nn.Linear((latent_dim+dim_parameter_encoder), latent_dim))
-        
+
+      #  self.gamma = nn.Sequential(
+      #  nn.Linear(latent_dim, hid_dim),
+      #  nn.SELU(),
+       # nn.Linear(hid_dim, latent_dim))
         self.beta = nn.Sequential(
-            nn.Linear(1, hid_dim),
-            nn.SELU(),
-            nn.Linear(hid_dim, latent_dim ))
-        
-        self.gamma = nn.Sequential(
-            nn.Linear(latent_dim, hid_dim),
-            nn.SELU(),
-            nn.Linear(hid_dim, latent_dim))
+        nn.Linear(1+dim_parameter_encoder, hid_dim),
+        nn.SELU(),
+   
+        nn.Linear(hid_dim, latent_dim))
+      
+   
+        self.dose_scale = nn.Parameter(torch.tensor(10.0))  # initialize scale > 1
+    
 
-
-
-        self.log_sigma = nn.Parameter(torch.log(torch.tensor(0.01)))
+        self.log_sigma = nn.Parameter(torch.log(torch.tensor(0.05)))
 
         for name, param in self.named_parameters():
             self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
@@ -173,158 +97,221 @@ class ODEFunc(nn.Module):
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
 
-    def compute_T_all(self, t, dose_times, dose_mask):
-        t_scalar = t.item()
-        
-        # Squeeze last dim if it's singleton
-        if dose_times.dim() == 3 and dose_times.size(-1) == 1:
-            dose_times = dose_times.squeeze(-1)  # shape becomes [10,4]
-        
-        delta_t = t_scalar - dose_times  # [10,4]
-        T_all = torch.where(dose_mask & (dose_times <= t_scalar), delta_t, torch.zeros_like(delta_t))
-        return T_all  # shape: [10,4]
-    
-    def T(self, t, dose_times):
-        t_scalar = t.item()
-        relevant_doses = dose_times[dose_times <= t_scalar]
-        if len(relevant_doses) == 0:
-            return t_scalar
-        else:
-            return t_scalar - relevant_doses.max().item()
+
     def get_sigma(self):
         # Ensure positivity with exp()
-        return torch.exp(self.log_sigma)  
-    def dirac_pulse(self, t, dose_times, dose_amounts):
+       return torch.exp(self.log_sigma)  
+     #  return torch.tensor(0.01)  # or any fixed positive value
+    def dirac_pulse(self, t, dose_times, dose_amounts, dose_mask):
         sigma = self.get_sigma()
-        diff = t - dose_times
-        gauss = torch.exp(-0.5 * (diff / sigma)**2) / (sigma * (2 * 3.1415)**0.5)
+        diff = t - dose_times  # [batch_size, num_doses]
+
+        dose_mask = dose_mask.unsqueeze(-1)  # [1920, 4, 1]
+
+        # Only consider doses in the past 
+        mask = (diff >= 0).float() * dose_mask.float()
+        
+        gauss = gauss = torch.exp(-0.5 * (diff / sigma) ** 2) #torch.exp(-0.5 * (diff / sigma) ** 2) / (sigma * (2 * 3.1415) ** 0.5)
+        gauss = gauss * mask
+
         weighted = gauss * dose_amounts
         dose_signal = weighted.sum(dim=1, keepdim=True)
+    
+            
+    
+
         return dose_signal
+
+
 
   
 
-    def forward(self, t, x, dose_times,dose_amounts, dose_mask):
+    def forward(self, t, x, dose_times,dose_amounts, dose_mask, keep_mask=None):
         batch_size = x.size(0)
         device = x.device
+        if keep_mask is None:
+            keep_mask = torch.ones(batch_size, 1, device=device)  # All rows are "kept"
     
-        t_scalar = t.item()
-     
-        T_all = self.T(t, dose_times)  # time since each dose
-        T = T_all * torch.ones(batch_size, 1, device=x.device)  # (batch_size,1)
+      
  
      
         dose_amounts_squeezed = dose_amounts.squeeze(-1)  # [10, 4]
-     
- 
         dose_exp = dose_amounts_squeezed[ :,0].unsqueeze(1)  # shape [4, 1]
-        
-        dose_input = self.dirac_pulse(t, dose_times, dose_amounts)  # [batch_size, 1]
+        dose_input = self.dirac_pulse(t, dose_times, dose_amounts, dose_mask)  # [batch_size, 1]
 
-      #  print(x)
-      #  print(dose_input.squeeze(-1))
-      #  inp = torch.cat([x, dose_input.squeeze(-1) ], dim=1)
 
-        #inp =  torch.cat([x,  dose_exp], dim=1)
-        beta=self.beta(dose_input.squeeze(-1)) 
-      #  gamma= self.gamma(dose_input.squeeze(-1)) 
-           
+        inp_dose= dose_input.squeeze(-1) # torch.cat([dose_exp, dose_input.squeeze(-1)],dim=1)
+        inp_dose2= torch.cat([x[:, -self.dim_parameter_encoder:], inp_dose* self.dose_scale],dim=1)
+       # inp_dose2= torch.cat([x, inp_dose* self.dose_scale,dose_exp],dim=1)
+
+
+        beta=self.beta(inp_dose2) 
         dxdt_deep = self.net(x)
-        
         dxdt_skip=self.skip(x)
+        dxdt=dxdt_deep  + dxdt_skip +beta
         
-        dxdt=self.gamma(dxdt_deep + dxdt_skip + beta)+dxdt_deep + dxdt_skip + beta
         
         zero = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
-        dxdt_concat = torch.cat([dxdt, zero], dim=1)  # shape: [batch_size, latent_dim]
-
-       
+        dxdt_concat = torch.cat([dxdt, zero], dim=1)
+    
+           
         return dxdt_concat
 
-   
 
-
-
-
-    
-    
-class TrainableNoise(nn.Module):
+class TrainableNoise2(nn.Module):
     def __init__(self, dataset, size=1, init_add_std=0.1, init_prop_std=0.001):
         super().__init__()
-        init_log_sigma_add = torch.log(torch.tensor(init_add_std))
-        init_log_sigma_prop = torch.log(torch.tensor(init_prop_std))
         self.conc_mean, self.conc_std = dataset.conc_mean, dataset.conc_std
-        
-        self.log_sigma_add = nn.Parameter(torch.full((size,), init_log_sigma_add))
-       # self.log_sigma_prop = nn.Parameter(torch.full((size,), init_log_sigma_prop))
-        self.register_buffer('log_sigma_prop', torch.full((size,), init_log_sigma_prop))  # Now non-trainable
+        self.register_buffer("sigma_add", torch.ones(size))  # non-trainable
+        self.ema_decay = 0.99
+        self.eps = 1e-6
+        self.initialized = False
 
-    def forward(self, x_pred):
-        # Return a single sample from the noise distribution
-        return self.sample(x_pred, n_samples=1).squeeze(0)
+    def update_from_residuals(self, x_true, x_pred, mask=None):
+        residuals = (x_true - x_pred) ** 2
+        if mask is not None:
+            if residuals.dim() > mask.dim():
+                mask = mask.unsqueeze(-1)
+            residuals = residuals * mask
+            total_valid = mask.sum().clamp(min=1)
+            mse_value = residuals.sum() / total_valid
+        else:
+            mse_value = residuals.mean()
+
+        sigma_new = torch.sqrt(mse_value + self.eps)
+
+        if not self.initialized:
+            self.sigma_add.fill_(sigma_new)
+            self.initialized = True
+        else:
+            self.sigma_add = (
+                self.ema_decay * self.sigma_add + (1 - self.ema_decay) * sigma_new
+            )
 
     def nll(self, x_true, x_pred, mask=None):
-     # Compute max per individual over time dim (assume dim=1)
-  #   max_true, _ = x_true.abs().max(dim=1, keepdim=True)  # shape: (batch_size, 1, ...)
-   #  print(max_true)
-   #  max_pred, _ = x_pred.abs().max(dim=1, keepdim=True)
-    # print(max_pred)
-   
-     # Normalize residuals by individual's max scale
-     
-     
-   #  x_true_norm = x_true / max_true
-   #  x_pred_norm = x_pred / max_pred
-    
-     sigma_add = torch.exp(self.log_sigma_add)
-     sigma_add = sigma_add.view(*([1] * (x_pred.dim() - sigma_add.dim())), *sigma_add.shape)
-    
-     sigma_total = sigma_add + 1e-6  # additive noise only
-    
-     nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
-     mse_elementwise = (x_true - x_pred) ** 2
-    
-     if mask is not None:
-         if nll_elementwise.dim() > mask.dim():
-             mask = mask.unsqueeze(-1)
-         nll_elementwise = nll_elementwise * mask
-         mse_elementwise = mse_elementwise * mask
-         total_valid = mask.sum().clamp(min=1)
-         nll_value = nll_elementwise.sum() / total_valid
-         mse_value = mse_elementwise.sum() / total_valid
-     else:
-         nll_value = nll_elementwise.mean()
-         mse_value = mse_elementwise.mean()
-    
-     return nll_value, mse_value
+        sigma_total = self.sigma_add + self.eps
+        nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
+        mse_elementwise = (x_true - x_pred) ** 2
 
+        if mask is not None:
+            if nll_elementwise.dim() > mask.dim():
+                mask = mask.unsqueeze(-1)
+            nll_elementwise = nll_elementwise * mask
+            mse_elementwise = mse_elementwise * mask
+            total_valid = mask.sum().clamp(min=1)
+            nll_value = nll_elementwise.sum() / total_valid
+            mse_value = mse_elementwise.sum() / total_valid
+        else:
+            nll_value = nll_elementwise.mean()
+            mse_value = mse_elementwise.mean()
 
+        return nll_value, mse_value
 
 
     
-            
+ 
+
+class TrainableNoise(nn.Module):
+    """
+    Estimates additive + optional proportional noise.
+    If init_prop_std=0, proportional noise is disabled (no parameter, no gradients).
+    """
+    def __init__(self, size=1, init_add_std=0.1, init_prop_std=0.0):
+        super().__init__()
+
+        # always have additive noise
+        self.log_sigma_add = nn.Parameter(
+            torch.full((size,), torch.log(torch.tensor(init_add_std)))
+        )
+
+        # optional proportional noise
+        if init_prop_std > 0:
+            self.use_prop = True
+            self.log_sigma_prop = nn.Parameter(
+                torch.full((size,), torch.log(torch.tensor(init_prop_std)))
+            )
+        else:
+            self.use_prop = False
+            self.log_sigma_prop = None
+
+    @property
+    def sigma_add(self):
+        return torch.exp(self.log_sigma_add)
+
+    @property
+    
+    def sigma_prop(self):
+        if self.log_sigma_prop is None:
+            return torch.zeros_like(self.log_sigma_add)  # -> tensor([0.])
+        return torch.exp(self.log_sigma_prop)
+
+
+    def forward(self, x_pred):
+        sigma_add = self.sigma_add
+
+        if self.use_prop:
+            sigma_prop_value = self.sigma_prop.view(
+                *([1] * (x_pred.dim() - self.sigma_prop.dim())), *self.sigma_prop.shape
+            )
+            sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop_value * x_pred)**2)
+        else:
+            sigma_total = sigma_add
+
+        eps = torch.randn_like(x_pred)
+        return x_pred + sigma_total * eps
+
+    def nll(self, x_true, x_pred, mask=None):
+        sigma_add = self.sigma_add
+
+        if self.use_prop:
+            sigma_prop_value = self.sigma_prop.view(
+                *([1] * (x_pred.dim() - self.sigma_prop.dim())), *self.sigma_prop.shape
+            )
+            sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop_value * x_pred)**2)
+        else:
+            sigma_total = sigma_add
+
+        sigma_total = torch.clamp(sigma_total, min=1e-6)  # avoid div by zero
+
+        nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
+        mse_elementwise = (x_true - x_pred) ** 2
+
+        if mask is not None:
+            if nll_elementwise.dim() > mask.dim():
+                mask = mask.unsqueeze(-1)
+            nll_elementwise = nll_elementwise * mask
+            mse_elementwise = mse_elementwise * mask
+            total_valid = mask.sum().clamp(min=1)
+            nll_value = nll_elementwise.sum() / total_valid
+            mse_value = mse_elementwise.sum() / total_valid
+        else:
+            nll_value = nll_elementwise.mean()
+            mse_value = mse_elementwise.mean()
+
+        return nll_value, mse_value
 
     def sample(self, x_pred, n_samples=1):
-        """
-        Samples from N(x_pred, sigma_total^2)
+        sigma_add = self.sigma_add
+    
+        if self.use_prop:
+            sigma_prop_value = self.sigma_prop.view(
+                *([1] * (x_pred.dim() - self.sigma_prop.dim())), *self.sigma_prop.shape
+            )
+            sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop_value * x_pred)**2)
+        else:
+            sigma_total = sigma_add
+    
+        if n_samples > 1:
+            x_pred = x_pred.unsqueeze(0).expand(n_samples, *x_pred.shape)
+            sigma_total = sigma_total.unsqueeze(0).expand(n_samples, *sigma_total.shape)
+    
+        eps = torch.randn_like(x_pred)
+        return x_pred + sigma_total * eps
 
-        Args:
-            x_pred (Tensor): Predicted mean, shape (B,) or (B, ...)
-            n_samples (int): Number of samples to draw
 
-        Returns:
-            Tensor of shape (n_samples, *x_pred.shape)
-        """
-        sigma_add = torch.exp(self.log_sigma_add)
-        sigma_prop = torch.exp(self.log_sigma_prop)
-        sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop * x_pred)**2)
 
-        # Expand sigma to match x_pred shape
-        sigma_total = sigma_total.expand_as(x_pred)
 
-        # Draw samples
-        eps = torch.randn((n_samples,) + x_pred.shape, device=x_pred.device)
-        return x_pred.unsqueeze(0) + sigma_total.unsqueeze(0) * eps
+
 
 
 
@@ -423,6 +410,7 @@ class Encoder_Transformer_NF(nn.Module):
         self.selu = nn.SELU()        # instantiate ReLU module here
         self.flow = NormalizingFlow(latent_dim, num_flows=num_flow_layers)
       #  self.flow = ConditionalNormalizingFlow(latent_dim,cond_dim=2*model_dim,hidden_flow_dim=32, num_flows=num_flow_layers)
+        self.latent_dim = latent_dim
 
         self.pos_encoder = PositionalEncoding(model_dim)
         self.raw_encoder = nn.Linear(input_dim,model_dim)
@@ -445,6 +433,7 @@ class Encoder_Transformer_NF(nn.Module):
             self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
         
         self.register_buffer("iteration", torch.tensor(1.0))
+      #  self.logvar_scale = nn.Parameter(torch.tensor(0.0))  
 
 
      
@@ -460,6 +449,12 @@ class Encoder_Transformer_NF(nn.Module):
             for name, param in self.named_parameters():
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
+    @torch.no_grad()
+    def sample_prior(self, num_samples=10, device="cpu"):
+        z0 = torch.randn(num_samples, self.latent_dim, device=device)
+        z_k, _ = self.flow(z0)
+        return z_k
+
                 
     def sample(self, mu_q, logvar_q, num_samples=10):
         """
@@ -496,7 +491,7 @@ class Encoder_Transformer_NF(nn.Module):
 
 
 
-    def forward(self, t, x, mask=None):
+    def forward(self,t, x, mask=None):
         """
         t: [B, T]
         x: [B, T]
@@ -507,18 +502,34 @@ class Encoder_Transformer_NF(nn.Module):
         h = self.input_proj2(h)                                      # [B, T, model_dim]
         h = self.pos_encoder(h)
     
+        if mask is None:
+       # All positions are valid if mask not provided
+            mask = torch.ones(t.shape[0], t.shape[1], dtype=torch.bool, device=t.device)
+            
+        all_masked = (mask.sum(dim=1) == 0)  # shape [B], True if all time steps are masked
+
         h_enc = self.transformer_encoder(
-            h, src_key_padding_mask=~mask if mask is not None else None
-        )  # [B, T, model_dim]
-    
-        pooled = h_enc.mean(dim=1)  # [B, model_dim]
+               h, src_key_padding_mask=~mask if mask is not None else None
+           )  # [B, T, model_dim]
+        
+        valid_counts = mask.sum(dim=1, keepdim=True).clamp(min=1)  # avoid divide by zero
+        pooled = (h_enc * mask.unsqueeze(-1)).sum(dim=1) / valid_counts
+        pooled[all_masked] = 0.0  # ensure zero input for fully masked
+
+
         skip_data=self.raw_encoder(inp)
         skip_data_pooled = skip_data.mean(dim=1)  # [B, model_dim]
         cond_vec = torch.cat([pooled, skip_data_pooled], dim=-1)  # [B, model_dim + raw_feat_dim]
-
+        
+      
+        
         mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
     #    mu_q=torch.zeros_like(mu_q)
         logvar_q = self.fc_logvar2(self.selu(self.fc_logvar1(pooled)))
+        
+        mu_q[all_masked] = 0.0
+        logvar_q[all_masked] = 0.0  # logvar=0 → std=1
+        
         
         std = torch.exp(0.5 * logvar_q)
         eps = torch.randn_like(std)
@@ -527,13 +538,14 @@ class Encoder_Transformer_NF(nn.Module):
         if self.training:
                # z_k, log_det = self.flow(z0, cond_vec)  # pass both z0 and pooled conditioning vector
                 z_k, log_det = self.flow(z0)  # pass both z0 and pooled conditioning vector
-
+                z_k_0, _ =self.flow(z0)
         else:
                 z_k = mu_q
                 log_det = torch.zeros(z_k.size(0), device=z_k.device)
+                z_k_0 = torch.zeros_like(z0)
 
     
-        return z_k, mu_q, logvar_q, log_det
+        return z_k_0, z_k, mu_q, logvar_q, log_det
 
    
 class NormalizingFlow(nn.Module):
@@ -561,9 +573,9 @@ class PlanarFlow(nn.Module):
         self.latent_dim = latent_dim
         
         # Small weights, close to zero => small transformation
-        epsilon = 1e-20
-        self.u = nn.Parameter(epsilon * torch.randn(1, latent_dim))
-        self.w =nn.Parameter(epsilon * torch.randn(1, latent_dim))
+        self.u = nn.Parameter(torch.randn(1, latent_dim) * 0.01)
+        self.w = nn.Parameter(torch.randn(1, latent_dim) * 0.01)
+
         self.b = nn.Parameter(torch.zeros(1))
 
         
@@ -589,8 +601,56 @@ class PlanarFlow(nn.Module):
         log_det = torch.log(torch.abs(det_jacobian) + 1e-8).squeeze(-1)  # [B]
     
         return z_new, log_det
-   
     
+class PlanarFlow2(nn.Module):
+   def __init__(self, latent_dim):
+       super().__init__()
+       self.latent_dim = latent_dim
+
+       #epsilon = 1e-20
+       # Reasonable small stddev for stable flow init
+       std = 0.01
+       self.u = nn.Parameter(torch.randn(1, latent_dim) * std)
+       self.w = nn.Parameter(torch.randn(1, latent_dim) * std)
+       self.b = nn.Parameter(torch.zeros(1))
+
+
+       # Learnable raw mixture weight parameter (unconstrained)
+       self.mix_weight_raw = nn.Parameter(torch.tensor(1.0))  # initialized to 0 => sigmoid(0)=0.5
+
+   def forward(self, z):
+       w = self.w  # [1, D]
+       u = self.u
+       b = self.b
+
+       # Enforce invertibility (u_hat)
+       wu = torch.matmul(w, u.t())  # [1,1]
+       m = -1 + F.softplus(wu)
+       u_hat = u + (m - wu) * w / (torch.norm(w, p=2) ** 2 + 1e-8)
+
+       linear = torch.matmul(z, w.t()) + b  # [B, 1]
+
+       # Learnable mixture weight alpha in [0,1]
+       alpha = torch.sigmoid(self.mix_weight_raw)
+
+       h_softplus = F.softplus(linear)
+       h_tanh = torch.tanh(linear)
+       h = alpha * h_softplus + (1 - alpha) * h_tanh  # [B, 1]
+
+       z_new = z + u_hat * h  # [B, D]
+
+       # Derivative dh/dlinear
+       d_softplus = torch.sigmoid(linear)
+       d_tanh = 1 - h_tanh ** 2
+       dh = alpha * d_softplus + (1 - alpha) * d_tanh  # [B, 1]
+
+       psi = dh * w  # [B, D]
+
+       det_jacobian = 1 + torch.matmul(psi, u_hat.t())  # [B, 1]
+       log_det = torch.log(torch.abs(det_jacobian) + 1e-8).squeeze(-1)  # [B]
+
+       return z_new, log_det  
+   
     
 class SimpleDecoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim=128):
@@ -746,3 +806,83 @@ class Encoder_Transformer_VAE(nn.Module):
         logvar_q = self.fc_logvar2(self.selu(self.fc_logvar1(pooled)))
 
         return mu_q, logvar_q
+    
+    
+    
+
+class DoseAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.query = nn.Linear(hidden_dim, hidden_dim)
+        self.key = nn.Linear(hidden_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, hidden_dim)
+        self.scale = hidden_dim ** 0.5
+        
+        # Learned default output when no valid doses
+        self.default_output = nn.Parameter(torch.zeros(hidden_dim))
+        #self.time_bias_scale = nn.Parameter(torch.tensor(-7.0))  # initialized to -1.0
+        self.time_bias_net = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.SELU(),
+            nn.Linear(16, 1)
+        )
+        nn.init.xavier_uniform_(self.time_bias_net[-1].weight)
+        nn.init.constant_(self.time_bias_net[-1].bias, 0.0)  # start bias neutral
+
+    def forward(self, gru_outputs, mask,T2_all):
+        # gru_outputs: [batch, seq_len, hidden_dim]
+        # mask: [batch, seq_len] bool tensor, True for valid dose times
+
+        batch_size, seq_len, hidden_dim = gru_outputs.size()
+        
+        Q = self.query(gru_outputs)  # [B, T, H]
+        K = self.key(gru_outputs)    # [B, T, H]
+        V = self.value(gru_outputs)  # [B, T, H]
+
+        scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale  # [B, T, T]
+
+        # Create mask for attention scores: expand dims
+        attn_mask = mask.unsqueeze(1).expand(-1, seq_len, -1)  # [B, T, T]
+        
+        # Identify batch elements with all False masks along last dim (no valid doses)
+        no_valid_mask = (~mask).all(dim=1)  # [B] True if all False
+        
+        # Mask invalid positions with -inf
+        scores = scores.masked_fill(~attn_mask, float('-inf'))
+        if T2_all is not None:
+            # x: [B, dim_parameter_encoder]
+            # expand to [B, T, dim_parameter_encoder]
+            time_diff = T2_all.unsqueeze(2) - T2_all.unsqueeze(1)  # [B, T, T]
+
+# For simplicity, take abs or clamp and reshape to feed a small network
+            time_diff_abs = torch.abs(time_diff).unsqueeze(-1)  # [B, T, T, 1]
+        
+            # Transpose if needed for broadcasting in scores addition
+          #  time_bias = time_bias.transpose(1, 2)  # [B, 1, T]
+            rel_time_bias = self.time_bias_net(time_diff_abs).squeeze(-1)  # [B, T, T]
+
+            scores = scores + 35*rel_time_bias
+
+
+
+      
+        
+        attn_weights = torch.zeros_like(scores)
+        
+        # For batches with valid masks, compute softmax normally
+        valid_batches = ~no_valid_mask
+        if valid_batches.any():
+            attn_weights[valid_batches] = F.softmax(scores[valid_batches], dim=-1)
+       
+        # For batches with no valid doses, attention weights remain zeros
+      #  print(attn_weights)
+        attn_output = torch.bmm(attn_weights, V)  # [B, T, H]
+   
+        # Average over sequence dim for output
+        output = attn_output.mean(dim=1)  # [B, H]
+
+        # Replace outputs for no_valid_mask batches with default learned embedding
+        if no_valid_mask.any():
+            output[no_valid_mask] = self.default_output.unsqueeze(0).expand(no_valid_mask.sum(), -1)
+        
+        return output, attn_weights
