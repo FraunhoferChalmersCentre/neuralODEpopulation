@@ -26,21 +26,13 @@ import matplotlib.gridspec as gridspec
 import matplotlib.tri as tri
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.stats import pearsonr, norm
+
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
 
 import torch
 from torch.utils.data import DataLoader
-from torchdiffeq import odeint as odeint
-
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import pandas as pd
-
-# ---- 3D plot ---- #
-from mpl_toolkits.mplot3d import Axes3D
-    
+from torchdiffeq import odeint
 
 
 from lib.utils.my_utils import (
@@ -824,11 +816,7 @@ def rf_predict_params_from_encoder_validation(
         df_train, dataset_train, df_val, dataset_val,
         encoder, latent_dim, dim_parameter_encoder,
         device=None, n_estimators=200, random_state=42):
-    import numpy as np
-    import torch
-    import matplotlib.pyplot as plt
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.metrics import r2_score
+  
 
     if device is None:
         device = next(encoder.parameters()).device

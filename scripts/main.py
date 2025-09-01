@@ -14,12 +14,6 @@ import sys
 import torch.optim as optim
 import torch
 import pandas as pd
-import ast
-
-
-
-
-from torch.utils.data import Dataset, DataLoader
 
 
 
@@ -38,12 +32,10 @@ if __name__ == "__main__":
                 '--save_dir', 'models',
                 '--load_dir', 'models/old']
     
-    from lib.utils.my_utils import prepare_datasets_and_loaders_simulated, prepare_optimizer, plot_individual_fits, train_model, prepare_datasets_and_loaders, compute_global_stats, TrajectoryDataset, collate_fn_simulated, ODEWrapper
+    from lib.utils.my_utils import prepare_datasets_and_loaders_simulated, prepare_optimizer, plot_individual_fits, train_model, prepare_datasets_and_loaders, compute_global_stats, collate_fn, ODEWrapper
     from lib.models.NNmodels import Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
-    from lib.utils.model_validation import vpc_all, plot_node_latent_vs_reduced, vpc, rf_predict_params_from_encoder_validation, plot_encoder_mu_vs_params
-    # Define your parser
-    
-    # Define your parser
+    from lib.utils.model_validation import vpc_all, vpc, rf_predict_params_from_encoder_validation, plot_encoder_mu_vs_params
+
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
     parser.add_argument("--data_path", type=str, required=True, help="Path to training CSV file")
     parser.add_argument("--data_test_path", type=str, required=True, help="Path to test CSV file")
@@ -65,7 +57,6 @@ if __name__ == "__main__":
     modelname = "MultipleDoseAddError_AE_NF2"
 
     
-     #   def __init__(self, path, compartment='C2', augment_with_prefixes=False, augment_dose_times=False, dose_jitter_std=0.01):
 
     
     args = parser.parse_args()
@@ -219,12 +210,7 @@ if __name__ == "__main__":
 
 
 
-#
-# Population prediction vs data
-#
 
-
-### Predictions without encoder
 vpc(global_max_dose,
     global_max_time,
     global_mean, 

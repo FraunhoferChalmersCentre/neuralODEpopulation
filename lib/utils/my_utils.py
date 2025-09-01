@@ -603,9 +603,9 @@ def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_
     batch_size_val = max(1, int(len(val_dataset)))
     batch_size_test = max(1, int(len(test_dataset)))
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, collate_fn=collate_fn_simulated)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=False, collate_fn=collate_fn_simulated)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False, collate_fn=collate_fn_simulated)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False, collate_fn=collate_fn)
 
     # --- Combined dose + time tensor ---
     df = pd.read_csv(data_path_train)
@@ -2179,7 +2179,7 @@ class TrajectoryDataset_paracetamol(Dataset):
 
 
 
-def collate_fn_simulated(batch):
+def collate_fn(batch):
     # Unpack dataset tuples
     # (t, x_global, dose, dose_times, id, x_dose, occasion)
     t_list, x_global_list, dose_list, dose_times_list, id_list, x_dose_list = zip(*batch)
@@ -2210,34 +2210,34 @@ def collate_fn_simulated(batch):
 
 
 
-def collate_fn(batch):
-    # Unpack dataset tuples
-    # (t, x_global, dose, dose_times, id, x_dose, occasion)
-    t_list, x_global_list, dose_list, dose_times_list, _, x_dose_list, subject_id = zip(*batch)
+# def collate_fn(batch):
+#     # Unpack dataset tuples
+#     # (t, x_global, dose, dose_times, id, x_dose, occasion)
+#     t_list, x_global_list, dose_list, dose_times_list, _, x_dose_list, subject_id = zip(*batch)
 
-    # Pad time & both x variants
-    t_padded = pad_sequence(t_list, batch_first=True)
-    x_global_padded = pad_sequence(x_global_list, batch_first=True)
-    x_dose_padded = pad_sequence(x_dose_list, batch_first=True)
+#     # Pad time & both x variants
+#     t_padded = pad_sequence(t_list, batch_first=True)
+#     x_global_padded = pad_sequence(x_global_list, batch_first=True)
+#     x_dose_padded = pad_sequence(x_dose_list, batch_first=True)
 
-    # Build mask
-    max_len = t_padded.size(1)
-    mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
-    for i, t in enumerate(t_list):
-        mask[i, :len(t)] = 1
+#     # Build mask
+#     max_len = t_padded.size(1)
+#     mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
+#     for i, t in enumerate(t_list):
+#         mask[i, :len(t)] = 1
 
-    # Dose tensor
-    dose_tensor = torch.stack(dose_list)
+#     # Dose tensor
+#     dose_tensor = torch.stack(dose_list)
 
-    return (
-        subject_id,         # ✅ only Occasion kept
-        t_padded,
-        x_global_padded,  # z-score normalized
-        mask,
-        dose_tensor,
-        dose_times_list,
-        x_dose_padded     # per-dose normalized
-    )
+#     return (
+#         subject_id,         # ✅ only Occasion kept
+#         t_padded,
+#         x_global_padded,  # z-score normalized
+#         mask,
+#         dose_tensor,
+#         dose_times_list,
+#         x_dose_padded     # per-dose normalized
+#     )
 
 
 
@@ -2332,328 +2332,6 @@ def kl_divergence_NF(
 
 
 
-def train_model(
-    global_mean,
-    global_std,
-    global_max_time,
-    global_max_dose,
-    p_dropout,
-    main_params,
-    dataloader_val,
-    dataloader,
-    models,
-    optimizer,
-    scheduler,
-    func,
-    reducer,
-    initial_encoder,
-    encoder,
-    noise,
-    t_dense,
-    n_epochs,
-    warmup_epochs_noise,
-    warmup_epochs_iiv,
-    smoothing_start_epoch,
-    traing_against_validation,
-    enable_ae_training,
-    enable_nf_training,
-    enable_onlymedian_training,
-    plot_from_training_records_enable,
-    free_bits,
-    df,
-    df_val,
-    dataset,
-    dataset_val,
-    max_points_visible,
-    print_epoch=1,
-    plot_epoch=1,
-    max_plots=4,
-    nr_col=1,
-    nr_row=5,
-):
-    """
-    Train a neural ODE model for concentration–time data with flexible modes (AE, NF, VAE).
-
-    Training procedure:
-      1. Iterates through training batches, prepares dose/time features and encodes latent states.
-      2. Solves ODE trajectories with `torchdiffeq.odeint`.
-      3. Computes losses: reconstruction (NLL), KL divergence (VAE/NF), log-det penalty (NF).
-      4. Backpropagation with gradient clipping.
-      5. Optionally validates on a separate dataset and applies early stopping.
-      6. Logs progress, learning rates, and can plot trajectories during training.
-
-    Args:
-        global_mean (float): Mean concentration (for denormalization).
-        global_std (float): Std concentration (for denormalization).
-        global_max_time (float): Time scaling factor.
-        global_max_dose (float): Dose scaling factor.
-        p_dropout (float): Dropout probability for encoder masking.
-        main_params (list): Parameter groups for optimizer.
-        dataloader_val (DataLoader): Validation dataloader.
-        dataloader (DataLoader): Training dataloader.
-        models (dict): Dictionary of model components (func, reducer, encoders, etc.).
-        optimizer (torch.optim.Optimizer): Optimizer.
-        scheduler (torch.optim.lr_scheduler): Learning rate scheduler.
-        func (nn.Module): Neural ODE function.
-        reducer (nn.Module): Reduces ODE latent trajectories to outputs.
-        initial_encoder (nn.Module): Encodes initial concentration state.
-        encoder (nn.Module): Variational encoder (VAE/NF/AE).
-        noise (nn.Module): Noise model for NLL computation.
-        t_dense (torch.Tensor): Dense time grid for ODE solver.
-        n_epochs (int): Number of training epochs.
-        warmup_epochs_noise (int): Epochs before enabling noise learning.
-        warmup_epochs_iiv (int): Epochs before enabling full KL regularization.
-        smoothing_start_epoch (int): Epoch to start EMA smoothing.
-        traing_against_validation (bool): If True, evaluates on validation set.
-        enable_ae_training (bool): Train as AE (no KL).
-        enable_nf_training (bool): Train with normalizing flows.
-        enable_onlymedian_training (bool): Force latent z to zero (median).
-        plot_from_training_records_enable (bool): Whether to plot trajectories during training.
-        free_bits (float): Free-bits threshold for KL divergence.
-        df (DataFrame): Training dataframe (for plotting).
-        df_val (DataFrame): Validation dataframe (for plotting).
-        dataset (Dataset): Training dataset.
-        dataset_val (Dataset): Validation dataset.
-        max_points_visible (int): Max observed points visible to encoder.
-        print_epoch (int): Logging frequency.
-        plot_epoch (int): Plotting frequency.
-        max_plots (int): Max number of subjects to plot.
-        nr_col (int): Number of subplot columns (plots).
-        nr_row (int): Number of subplot rows (plots).
-
-    Returns:
-        None
-    """
-
-    device = next(func.parameters()).device
-    latent_dim = func.dim_latent
-
-    best_val_mse = float("inf")
-    epochs_no_improve = 0
-    patience = 30  # early stopping patience
-
-    batch_size = dataloader.batch_size
-    t_dense = t_dense.to(device)
-
-    # --- Initialization Logs ---
-    if enable_nf_training:
-        print("---- NF training initialized ----")
-    elif enable_ae_training:
-        print("---- AE training initialized ----")
-    else:
-        print("---- VAE training initialized ----")
-
-    print(f"Total epochs: {n_epochs}")
-    print(f"Warmup epochs (noise): {warmup_epochs_noise}")
-    print(f"Warmup epochs (IIV): {warmup_epochs_iiv}")
-    print(f"Smoothing (EMA) starts after epoch: {smoothing_start_epoch}")
-    print("========================================")
-
-    # --- Training Loop ---
-    for epoch in range(n_epochs):
-        first_batch = True
-        start_time = time.time()
-
-        # Stage logs
-        if epoch == warmup_epochs_noise:
-            print(f"[Epoch {epoch}] ➤ Noise training activated.")
-        if epoch == warmup_epochs_iiv:
-            print(f"[Epoch {epoch}] ➤ Full KL regularization activated.")
-        if epoch == smoothing_start_epoch:
-            print(f"[Epoch {epoch}] ➤ EMA smoothing activated.")
-
-        # Reset epoch accumulators
-        total_transform = total_loss = total_kl = total_recon = total_mse = 0.0
-        z_individual_list, logvar_q_list, mu_q_list, trajectory_records = [], [], [], []
-
-        # Enable/disable noise training
-        for param in noise.parameters():
-            param.requires_grad = epoch >= warmup_epochs_noise
-
-        # --- Mini-batch Training ---
-        for id_list, t_padded, x_padded, mask, dose_tensor, dose_times_list, x_normalized in dataloader:
-            # Move to device
-            t_padded, x_padded, mask, x_normalized = (
-                t_padded.to(device),
-                x_padded.to(device),
-                mask.to(device),
-                x_normalized.to(device),
-            )
-            dose_tensor = dose_tensor.to(device)
-            dose_times_list = [dt.to(device) for dt in dose_times_list]
-            batch_size = t_padded.size(0)
-
-            # --- Pad and expand dose times ---
-            dose_times_padded, dose_times_mask = pad_dose_times(dose_times_list)
-            dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, dose_times_padded.size(1)).unsqueeze(-1)
-            dose_times_expanded = dose_times_padded.unsqueeze(-1)
-
-            # --- Encode latent z ---
-            if enable_nf_training:
-                _, z_refined, mu_q, logvar_q, log_det = encoder(t_padded, x_normalized)
-            else:
-                _, _, mu_q, logvar_q, _ = encoder(t_padded, x_normalized)
-                std_q = torch.exp(0.5 * logvar_q)
-                z_refined = mu_q + std_q * torch.randn_like(mu_q)
-
-            if enable_ae_training:
-                z_refined = mu_q
-            if enable_onlymedian_training:
-                z_refined = torch.zeros_like(z_refined)
-
-            # --- Encode initial state ---
-            x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
-            x0 = torch.cat([x0_1 + 0.01 * torch.randn_like(x0_1),
-                            z_refined + 0.01 * torch.randn_like(z_refined)], dim=1)
-
-            # --- Solve ODE ---
-            ode_func = ODEWrapper(func, dose_times_expanded, dose_tensor_expanded, dose_times_mask)
-            if epoch == 0 and first_batch:
-                print("ODE Solving starting")
-            pred = odeint(ode_func, x0, t_dense, method="rk4")
-            if epoch == 0 and first_batch:
-                print("ODE Solving finished")
-
-            pred_batch = pred.permute(1, 0, 2)  # [batch, time, features]
-
-            # --- Interpolate predictions ---
-            t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
-            pred_interp = batch_linear_interpolate_1d(
-                reducer(pred_batch[:, :, :latent_dim]), t_dense_exp, t_padded
-            )
-
-            # --- Loss computation ---
-            recon_loss_noise, mse = noise.nll(
-                destandardize_concentration(x_padded, global_mean, global_std),
-                destandardize_concentration(pred_interp, global_mean, global_std),
-                mask,
-            )
-            mu_std_low = torch.zeros_like(mu_q)
-            logvar_std_low = torch.zeros_like(logvar_q)
-
-            if enable_ae_training:
-                kl_weight, KL_loss, log_det_penalty, log_det_sum = 0, 0, torch.tensor(0), torch.tensor(0)
-            else:
-                free_bits_on = 0 if epoch + 1 >= warmup_epochs_iiv else free_bits * (1 - min(1.0, epoch / warmup_epochs_iiv))
-                kl_weight = 1 if epoch + 1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
-                if enable_nf_training:
-                    KL_loss, log_det_sum, kl_gauss, log_det_penalty = kl_divergence_NF(
-                        epoch, warmup_epochs_iiv, mu_q, logvar_q,
-                        mu_std_low, logvar_std_low, log_det,
-                        free_bits=free_bits_on, log_det_penalty_lambda=1,
-                    )
-                else:
-                    KL_loss = kl_divergence_gaussians(mu_q, logvar_q, mu_std_low, logvar_std_low, free_bits_on)
-                    kl_gauss, log_det_sum, log_det_penalty = KL_loss, torch.tensor(0), 0
-
-            loss = recon_loss_noise + kl_weight * KL_loss + log_det_penalty
-
-            # --- Backpropagation ---
-            total_transform += log_det_sum.item()
-            total_loss += loss.item()
-            total_mse += mse.item()
-            total_kl += kl_gauss.item() if not enable_ae_training else 0.0
-            total_recon += recon_loss_noise.item()
-
-            optimizer.zero_grad()
-            if epoch == 0 and first_batch:
-                print("Backprop")
-            loss.backward()
-
-            for param_group in main_params:
-                torch.nn.utils.clip_grad_norm_(param_group["params"], max_norm=1)
-
-            if epoch == 0 and first_batch:
-                for name, model in models.items():
-                    for param_name, param in model.named_parameters():
-                        if param.requires_grad and param.grad is None:
-                            print(f"[WARNING] No gradient for {name}.{param_name}")
-
-            optimizer.step()
-            first_batch = False
-
-            # Store latent trajectories for plotting
-            z_individual_list.append(z_refined.detach())
-            mu_q_list.append(mu_q.detach())
-            logvar_q_list.append(logvar_q.detach())
-            for i in range(batch_size):
-                trajectory_records.append((
-                    id_list[i], t_padded[i, mask[i]], x_padded[i, mask[i]],
-                    dose_tensor[i], dose_times_list[i], z_refined[i].detach()
-                ))
-
-        # --- EMA update ---
-        with torch.no_grad():
-            if epoch > smoothing_start_epoch:
-                func.update_ema(alpha=0.1)
-                reducer.update_ema(alpha=0.1)
-                initial_encoder.update_ema(alpha=0.1)
-                encoder.update_ema(alpha=0.1)
-
-        scheduler.step(total_mse)
-        end_time = time.time()
-
-        # --- Logging ---
-        if epoch % print_epoch == 0:
-            main_lr = optimizer.param_groups[0]["lr"]
-            if enable_ae_training:
-                print(f"Epoch {epoch}, MSE {batch_size/len(dataset) * total_mse:.1f} "
-                      f"-LL: {batch_size/len(dataset) * total_recon:.4f}, "
-                      f"Add. error: {torch.exp(noise.log_sigma_add).item():.8f}, "
-                      f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.1f}, "
-                      f"lr: {main_lr:.3f}, {end_time - start_time:.2f}s")
-            elif enable_nf_training:
-                print(f"Epoch {epoch}, MSE {batch_size/len(dataset) * total_mse:.1f} "
-                      f"loss: {batch_size/len(dataset) * total_loss:.4f}, "
-                      f"-LL: {batch_size/len(dataset) * total_recon:.1f}, "
-                      f"KL: {batch_size/len(dataset) * total_kl:.8f}, "
-                      f"log_det: {batch_size/len(dataset) * total_transform:.8f}, "
-                      f"Add. error: {(torch.exp(noise.log_sigma_add)).item():.2f}, "
-                      f"Prop. error: {torch.exp(noise.log_sigma_prop).item():.4f}, "
-                      f"lr: {main_lr:.3f}, {end_time - start_time:.1f}s")
-            else:
-                print(f"Epoch {epoch}, MSE {batch_size/len(dataset) * total_mse:.1f} "
-                      f"loss: {batch_size/len(dataset) * total_loss:.2f}, "
-                      f"-LL: {batch_size/len(dataset) * total_recon:.2f}, "
-                      f"KL: {batch_size/len(dataset) * total_kl:.4f}, "
-                      f"Add. error: {(torch.exp(noise.log_sigma_add)).item():.2f}, "
-                      f"1000 lr: {1000 * main_lr:.1f}, {end_time - start_time:.1f}s")
-
-        # --- Plotting ---
-        if plot_from_training_records_enable and epoch % plot_epoch == 0:
-            plot_from_training_records(
-                batch_size, device, df=df, dataset=dataset, latent_dim=latent_dim,
-                records=trajectory_records, func=func, reducer=reducer,
-                initial_encoder=initial_encoder, ODEWrapper=ODEWrapper,
-                t_dense=t_dense, max_plots=max_plots, nr_row=nr_row, nr_col=nr_col,
-            )
-
-        # --- Validation ---
-        if traing_against_validation:
-            val_mse = evaluate_on_val(
-                global_mean, global_std, global_max_time, global_max_dose,
-                enable_nf_training, enable_ae_training, max_points_visible,
-                func, noise, reducer, dataset_val, dataloader_val,
-                10, device, encoder, initial_encoder, t_dense,
-            )
-            if epoch % 10 == 0:
-                print(f"MSE on validation set: {val_mse:.4f}")
-
-            # Early stopping
-            if val_mse < best_val_mse:
-                best_val_mse = val_mse
-                epochs_no_improve = 0
-                best_model_state = {k: v.state_dict() for k, v in models.items()}
-            else:
-                epochs_no_improve += 1
-                print(f"[Early Stop Monitor] No improvement for {epochs_no_improve} epochs")
-
-            if epochs_no_improve >= patience:
-                print(f"Early stopping triggered after {epoch + 1} epochs")
-                break
-
-        torch.cuda.empty_cache()
-        gc.collect()
 
 
 
