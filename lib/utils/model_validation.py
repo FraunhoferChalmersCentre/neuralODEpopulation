@@ -22,22 +22,196 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from scipy.stats import pearsonr
+import matplotlib.gridspec as gridspec
+import matplotlib.tri as tri
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import pearsonr, norm
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestRegressor
 
 import torch
 from torch.utils.data import DataLoader
 from torchdiffeq import odeint as odeint
 
-from lib.utils.my_utils import  collate_fn, ODEWrapper, torch_linear_interpolate2, batch_linear_interpolate_1d, destandardize_concentration, pad_dose_times, truncate_time_series, pad_sequence
-
-
-
-
-import torch
 import matplotlib.pyplot as plt
+import matplotlib.tri as tri
 import numpy as np
-from scipy.stats import norm
+import pandas as pd
+
+# ---- 3D plot ---- #
+from mpl_toolkits.mplot3d import Axes3D
+    
+
+
+from lib.utils.my_utils import (
+    collate_fn, collate_fn_simulated,  ODEWrapper, torch_linear_interpolate2, batch_linear_interpolate_1d,
+    destandardize_concentration, pad_dose_times, truncate_time_series, pad_sequence
+)
+
+
+def plot_node_latent_vs_reduced(
+    dataset, idx, latent_dim, dim_parameters, 
+    initial_encoder, encoder, func, reducer, noise, ODEWrapper,
+    t_dense, global_max_time, global_max_dose, 
+    global_mean, global_std, onlymedian=False,
+    add_noise_to_prediction: bool = False,
+    enable_ae_training=False, enable_nf_training=False
+):
+    """
+    Plot NODE latent states vs reduced states for one individual using encoder.
+    """
+
+
+    device = next(func.parameters()).device
+    t_dense = t_dense.to(device)
+
+    # ---- Pick individual ---- #
+    entry = dataset[idx]
+    t_real, x_true, dose, dose_times, subject_id, x_norm = entry
+    t_real, x_true, x_norm = t_real.to(device), x_true.to(device), x_norm.to(device)
+    dose = dose * global_max_dose / global_max_dose
+    dose_times = dose_times.to(device)
+
+    with torch.no_grad():
+        # ---- Set models to eval ---- #
+        encoder.eval()
+        initial_encoder.eval()
+        reducer.eval()
+        func.eval()
+
+        conc_mean, conc_std = global_mean, global_std
+
+        # ---- Encode initial condition ---- #
+        x0_encoded = initial_encoder(x_true[0].unsqueeze(0))
+        if x0_encoded.dim() == 1:
+            x0_encoded = x0_encoded.unsqueeze(0)
+
+        # ---- Latent sampling using encoder ---- #
+        t_real_padded = t_real.unsqueeze(0)  # batch dim
+        x_norm_padded = x_norm.unsqueeze(0)
+
+        if enable_nf_training:
+            _, z_tensor, _, _, _ = encoder(t_real_padded, x_norm_padded)
+        else:
+            _, _, mu_q, logvar_q, _ = encoder(t_real_padded, x_norm_padded)
+            std_q = torch.exp(0.5 * logvar_q)
+            eps = torch.randn_like(std_q)
+            z_tensor = mu_q + eps * std_q
+
+        if enable_ae_training:
+            z_tensor = mu_q
+
+        # ---- Combine initial state and latent ---- #
+        x0 = torch.cat([x0_encoded, z_tensor], dim=1)
+
+        # ---- Dosing ---- #
+        doses_tensor = dose.repeat(dose_times.size(0)).unsqueeze(0).to(device)
+        dose_mask = (dose_times != 0).unsqueeze(0).to(device)
+        ode_func = ODEWrapper(func, dose_times.unsqueeze(0).unsqueeze(-1),
+                              doses_tensor.unsqueeze(-1), dose_mask)
+
+        # ---- Solve NODE ---- #
+        pred = odeint(ode_func, x0, t_dense, method="rk4")  # [T, 1, latent_dim+z]
+        latent_states = pred[:, 0, :latent_dim]
+        reduced_states = reducer(latent_states)
+        reduced_states = destandardize_concentration(reduced_states, conc_mean, conc_std)
+
+        # ---- Convert to numpy ---- #
+        latent_np = latent_states.cpu().numpy()
+        reduced_np = reduced_states.cpu().numpy().squeeze()
+        time_hours = t_dense.cpu().numpy() * global_max_time
+
+        # ---- Put everything in a DataFrame ---- #
+        df = pd.DataFrame({
+            "latent1": latent_np[:, 0],
+            "latent2": latent_np[:, 1] if latent_np.shape[1] >= 2 else np.zeros_like(latent_np[:, 0]),
+            "reduced": reduced_np,
+            "time": time_hours
+        })
+
+        # ---- Sort by reduced concentration ---- #
+        df_sorted = df.sort_values(by="reduced").reset_index(drop=True)
+        print(df_sorted)
+
+        # ---- Plotting ---- #
+    
+        fig3d = plt.figure(figsize=(10, 8))
+        ax1 = fig3d.add_subplot(111, projection="3d")
+        
+        if latent_np.shape[1] >= 2:
+            ax1.plot(latent_np[:, 0], latent_np[:, 1], reduced_np, color="blue", label="NODE trajectory")
+            sc = ax1.scatter(latent_np[:, 0], latent_np[:, 1], reduced_np, c=time_hours, cmap="viridis", s=20)
+            ax1.set_xlabel("Latent dim 1")
+            ax1.set_ylabel("Latent dim 2")
+            ax1.set_zlabel("Concentration state")
+            ax1.set_title("3D: Latent1 vs Latent2 vs Concentration")
+            ax1.view_init(elev=30, azim=60)
+        else:
+            ax1.text(0.5, 0.5, 0.5, "Need >=2 latent dims", transform=ax1.transAxes)
+        
+        plt.show()
+        
+        
+        # ---- 3x1 grid for contour + 2D latent plots ---- #
+        fig, axes = plt.subplots(1,3, figsize=(20, 6))
+        plt.subplots_adjust(hspace=0.35)
+        
+        # ---- Top: contour plot ---- #
+        ax2 = axes[0]
+        if latent_np.shape[1] >= 2:
+            triang = tri.Triangulation(latent_np[:, 0], latent_np[:, 1])
+            contour = ax2.tricontourf(triang, reduced_np, cmap="viridis")
+            cbar = fig.colorbar(contour, ax=ax2, label="Concentration")
+            ax2.set_xlabel("Latent dim 1")
+            ax2.set_ylabel("Latent dim 2")
+            ax2.set_title("Contour: Latent1 vs Latent2 vs Concentration")
+            ax2.set_xlim(latent_np[:, 0].min(), latent_np[:, 0].max())
+            ax2.set_ylim(latent_np[:, 1].min(), latent_np[:, 1].max())
+        else:
+            ax2.text(0.5, 0.5, "Need >=2 latent dims", transform=ax2.transAxes)
+        
+        # ---- Middle: latent1 vs reduced ---- #
+        ax3 = axes[1]
+        sort_idx = np.argsort(reduced_np)
+        reduced_sorted = reduced_np[sort_idx]
+        latent1_sorted = latent_np[sort_idx, 0]
+        
+        ax3.plot(reduced_sorted, latent1_sorted, marker='o', color="red")
+        ax3.set_xlabel("Concentration")
+        ax3.set_ylabel("Latent dim 1")
+        ax3.set_title("Concentration vs Latent 1")
+        ax3.set_xlim(reduced_sorted.min(), reduced_sorted.max())
+        ax3.set_ylim(latent1_sorted.min(), latent1_sorted.max())
+        ax3.set_xticks(np.linspace(reduced_sorted.min(), reduced_sorted.max(), 5))
+        ax3.set_yticks(np.linspace(latent1_sorted.min(), latent1_sorted.max(), 5))
+        
+        # ---- Bottom: latent2 vs reduced ---- #
+        ax4 = axes[2]
+        if latent_np.shape[1] >= 2:
+            latent2_sorted = latent_np[sort_idx, 1]
+            ax4.plot(reduced_sorted, latent2_sorted, marker='o', color="green")
+            ax4.set_xlabel("Concentration")
+            ax4.set_ylabel("Latent dim 2")
+            ax4.set_title("Concentration vs Latent 2")
+            ax4.set_xlim(reduced_sorted.min(), reduced_sorted.max())
+            ax4.set_ylim(latent2_sorted.min(), latent2_sorted.max())
+            ax4.set_xticks(np.linspace(reduced_sorted.min(), reduced_sorted.max(), 5))
+            ax4.set_yticks(np.linspace(latent2_sorted.min(), latent2_sorted.max(), 5))
+        else:
+            ax4.text(0.5, 0.5, "Only 1 latent dim", transform=ax4.transAxes)
+        
+        plt.show()
+        
+                
+
+
+
+
+
+
+
+
+
 @torch.no_grad()
 def compute_residuals(global_mean, global_std,func, encoder, reducer, initial_encoder, noise, dataloader, t_dense, device):
     """
@@ -187,162 +361,323 @@ def compute_residuals(global_mean, global_std,func, encoder, reducer, initial_en
 
     return residual_std
     
+def generate_plot_data(df, dataset, t_dense, global_max_time, global_max_dose, global_mean, global_std,
+                   latent_dim, dim_parameters, initial_encoder, encoder, func, reducer, noise,
+                   ODEWrapper, num_simulated_total=500, add_noise_to_prediction=False,
+                   enable_ae_training=False, enable_nf_training=False):
 
-
-
-
- 
+              with torch.no_grad():
+                encoder.eval()
+                initial_encoder.eval()
+                reducer.eval()
+                func.eval()
+                device = next(func.parameters()).device
         
-def vpc(global_max_dose,  global_mean, 
+                conc_mean, conc_std = global_mean, global_std
+        
+                # Collect unique dose times
+                
+                dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
+                all_times = np.concatenate(dose_times_lists)
+                unique_times_np = np.unique(all_times)
+                dose_times_tensor = torch.from_numpy(unique_times_np).float().to(t_dense.device) / global_max_time
+                t_dense_local = torch.unique(torch.cat([t_dense, dose_times_tensor])).to(device)
+        
+                unique_doses = sorted(set(entry[2].item() for entry in dataset))
+                num_doses = len(unique_doses)
+                num_simulated_per_dose = max(1, num_simulated_total // num_doses)
+        
+                plot_data_local = []
+        
+                for dose_value in unique_doses:
+                    dose_filtered_dataset = [entry for entry in dataset if entry[2].item() == dose_value]
+                    if len(dose_filtered_dataset) == 0:
+                        continue
+                    indices = np.random.choice(len(dose_filtered_dataset), num_simulated_per_dose, replace=True)
+                    batch_entries = [dose_filtered_dataset[i] for i in indices]
+        
+                    t_reals, x_trues, doses, dose_times_list, x_dose_norm_list = [], [], [], [], []
+                    for entry in batch_entries:
+                        t_real, x_true, dose, dose_times, _, x_dose_norm = entry
+                        t_reals.append(t_real)
+                        x_trues.append(x_true)
+                        doses.append(dose)
+                        dose_times_list.append(dose_times)
+                        x_dose_norm_list.append(x_dose_norm)
+        
+                    dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
+                    dose_mask = (dose_times_padded != 0).to(device)
+                    doses_tensor = torch.stack(doses).to(device).unsqueeze(1).expand(-1, dose_times_padded.size(1))
+        
+                    t_real_padded = torch.nn.utils.rnn.pad_sequence(t_reals, batch_first=True).to(device)
+                    x_dose_norm_list_padded = torch.nn.utils.rnn.pad_sequence(x_dose_norm_list, batch_first=True).to(device)
+        
+                    # Latent sampling from encoder
+                    if enable_nf_training:
+                        _, z_tensor, mu_q, logvar_q, _ = encoder(t_real_padded, x_dose_norm_list_padded)
+                    else:
+                        _, _, mu_q, logvar_q, _ = encoder(t_real_padded, x_dose_norm_list_padded)
+                        std_q = torch.exp(0.5 * logvar_q)
+                        eps = torch.randn_like(std_q)
+                        z_tensor =  eps
+        
+                    # Encode initial conditions
+                    x0_list = []
+                    for x in x_trues:
+                        out = initial_encoder(x[0].unsqueeze(0).to(device))
+                        if out.dim() == 1:
+                            out = out.unsqueeze(0)
+                        x0_list.append(out)
+                    x0_tensor = torch.cat(x0_list, dim=0)
+        
+                    if doses_tensor.dim() == 1:
+                        doses_tensor = doses_tensor.unsqueeze(1)
+                    doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))
+        
+                    if enable_ae_training:
+                        z_tensor = mu_q
+                 
+                    x0 = torch.cat([x0_tensor, z_tensor], dim=1).to(device)
+                    ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1), doses_tensor.unsqueeze(-1), dose_mask)
+                    pred = odeint(ode_func, x0, t_dense_local, method='rk4')
+        
+                    x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean, conc_std)
+        
+                    if add_noise_to_prediction:
+                        mask = x_pred > 0
+                        x_pred = torch.where(mask, noise.sample(x_pred, n_samples=1).squeeze(0), x_pred)
+                        x_pred = torch.clamp(x_pred, min=0)
+        
+                    perc10_sim = torch.quantile(x_pred.squeeze(-1), 0.10, dim=1)
+                    median_sim = torch.quantile(x_pred.squeeze(-1), 0.50, dim=1)
+                    perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1)
+        
+                    interp_all = [
+                        torch_linear_interpolate2(t_real.to(t_dense_local.device),
+                                                  x_true.to(t_dense_local.device), t_dense_local)
+                        for t_real, x_true in zip(t_reals, x_trues)
+                    ]
+                    data_matrix = torch.stack(interp_all)
+                    perc10_data = torch.quantile(data_matrix, 0.10, dim=0)
+                    median_data = torch.quantile(data_matrix, 0.50, dim=0)
+                    perc90_data = torch.quantile(data_matrix, 0.90, dim=0)
+        
+                    plot_data_local.append({
+                        "dose_value": dose_value * global_max_dose,
+                        "time_hours": t_dense_local.cpu().numpy() * global_max_time,
+                        "perc10_sim": perc10_sim.detach().cpu().numpy(),
+                        "median_sim": median_sim.detach().cpu().numpy(),
+                        "perc90_sim": perc90_sim.detach().cpu().numpy(),
+                        "perc10_data": destandardize_concentration(perc10_data, conc_mean, conc_std).detach().cpu().numpy(),
+                        "median_data": destandardize_concentration(median_data, conc_mean, conc_std).detach().cpu().numpy(),
+                        "perc90_data": destandardize_concentration(perc90_data, conc_mean, conc_std).detach().cpu().numpy()
+                    })
+        
+              return plot_data_local
+
+
+def vpc_all(global_max_dose, global_max_time, global_mean, global_std,
+                 onlymedian, dataset_1, dataset_2, df1,df2,
+                 latent_dim, dim_parameters,encoder_ae, initial_encoder_ae, func_ae, reducer_ae, noise_ae,
+                 encoder_vae, initial_encoder_vae, func_vae, reducer_vae, noise_vae,
+                 ODEWrapper, t_dense, compartment, num_simulated_total=500,
+                 add_noise_to_prediction=False):
+
+
+    # --- Generate data ---
+    plot_data_test_1_AE = generate_plot_data(
+                    df=df1,
+                    dataset=dataset_1,
+                    t_dense=t_dense,
+                    global_max_time=global_max_time,
+                    global_max_dose=global_max_dose,
+                    global_mean=global_mean,
+                    global_std=global_std,
+                    latent_dim=latent_dim,
+                    dim_parameters=dim_parameters,
+                    initial_encoder=initial_encoder_ae,
+                    encoder=encoder_ae,
+                    func=func_ae,
+                    reducer=reducer_ae,
+                    noise=noise_ae,
+                    ODEWrapper=ODEWrapper,
+                    num_simulated_total=num_simulated_total,
+                    add_noise_to_prediction=False,
+                    enable_ae_training=True,
+                    enable_nf_training=False
+                )
+                
+    plot_data_test_2_AE = generate_plot_data(
+                    df=df2,
+                    dataset=dataset_2,
+                    t_dense=t_dense,
+                    global_max_time=global_max_time,
+                    global_max_dose=global_max_dose,
+                    global_mean=global_mean,
+                    global_std=global_std,
+                    latent_dim=latent_dim,
+                    dim_parameters=dim_parameters,
+                    initial_encoder=initial_encoder_ae,
+                    encoder=encoder_ae,
+                    func=func_ae,
+                    reducer=reducer_ae,
+                    noise=noise_ae,
+                    ODEWrapper=ODEWrapper,
+                    num_simulated_total=num_simulated_total,
+                    add_noise_to_prediction=False,
+                    enable_ae_training=True,
+                    enable_nf_training=False
+                    )
+        
+        
+    plot_data_test_1_VAE = generate_plot_data(
+                    df=df1,
+                    dataset=dataset_1,
+                    t_dense=t_dense,
+                    global_max_time=global_max_time,
+                    global_max_dose=global_max_dose,
+                    global_mean=global_mean,
+                    global_std=global_std,
+                    latent_dim=latent_dim,
+                    dim_parameters=dim_parameters,
+                    initial_encoder=initial_encoder_vae,
+                    encoder=encoder_vae,
+                    func=func_vae,
+                    reducer=reducer_vae,
+                    noise=noise_vae,
+                    ODEWrapper=ODEWrapper,
+                    num_simulated_total=num_simulated_total,
+                    add_noise_to_prediction=False,
+                    enable_ae_training=False,
+                    enable_nf_training=False
+                    )
+        
+    plot_data_test_2_VAE = generate_plot_data(
+                    df=df2,
+                    dataset=dataset_2,
+                    t_dense=t_dense,
+                    global_max_time=global_max_time,
+                    global_max_dose=global_max_dose,
+                    global_mean=global_mean,
+                    global_std=global_std,
+                    latent_dim=latent_dim,
+                    dim_parameters=dim_parameters,
+                    initial_encoder=initial_encoder_vae,
+                    encoder=encoder_vae,
+                    func=func_vae,
+                    reducer=reducer_vae,
+                    noise=noise_vae,
+                    ODEWrapper=ODEWrapper,
+                    num_simulated_total=num_simulated_total,
+                    add_noise_to_prediction=False,
+                    enable_ae_training=False,
+                    enable_nf_training=False
+                    )
+
+
+
+    # --- Plot 2x2 grid ---
+    fig = plt.figure(figsize=(18, 12))
+    outer = gridspec.GridSpec(2, 2, wspace=0.2, hspace=0.2, width_ratios=[1, 1.5])
+
+    panel_labels = ['a', 'b', 'c', 'd']
+    plots_per_panel = [2, 3, 2, 3]  # a,c=val; b,d=test
+    panel_to_data = [plot_data_test_1_AE, plot_data_test_2_AE, plot_data_test_1_VAE, plot_data_test_2_VAE]
+
+    for i in range(4):
+        n_plots = plots_per_panel[i]
+        data_set = panel_to_data[i]
+    
+        # --- Only keep doses 50, 150, 250 for c and d ---
+        if i in [1, 3]:  # panels b and d
+            filtered_doses = [50, 150, 250]
+            data_set = [d for d in data_set if d["dose_value"] in filtered_doses]
+
+        n_plots = len(data_set)
+    
+        if n_plots == 0:
+            print(f"⚠️ Panel {panel_labels[i]} has no data to plot. Skipping.")
+            continue
+    
+        if n_plots <= 2:
+            inner = gridspec.GridSpecFromSubplotSpec(1, n_plots, subplot_spec=outer[i], wspace=0.3, hspace=0.3)
+        else:
+            inner = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[i], wspace=0.3, hspace=0.3)
+      
+        ax_panel = plt.Subplot(fig, outer[i])
+        ax_panel.axis('off')
+        ax_panel.text(-0.1, 1.05, panel_labels[i], transform=ax_panel.transAxes,
+                      fontsize=25, fontweight='bold', va='top', ha='left')
+        fig.add_subplot(ax_panel)
+      
+        for j in range(n_plots):
+            data = data_set[j]
+            ax = plt.Subplot(fig, inner[j])
+            
+            # --- Plot simulated and observed data ---
+            ax.plot(data["time_hours"], data["median_sim"], color="blue", marker="o", markersize=3, label="Sim median")
+            ax.plot(data["time_hours"], data["perc10_sim"], color="blue", linestyle="--", label="Sim 10th")
+            ax.plot(data["time_hours"], data["perc90_sim"], color="blue", linestyle="--", label="Sim 90th")
+      
+            ax.plot(data["time_hours"], data["median_data"], color="orange", label="Obs median")
+            ax.plot(data["time_hours"], data["perc10_data"], color="orange", linestyle="--", label="Obs 10th")
+            ax.plot(data["time_hours"], data["perc90_data"], color="orange", linestyle="--", label="Obs 90th")
+            
+            ax.set_title(f"Dose {data['dose_value']:.0f}", fontsize=20)
+            ax.set_xlim(0, 24)  # 🔹 Set x-axis limit
+            ax.tick_params(axis='both', which='major', labelsize=16)
+            ax.grid(True)
+            fig.add_subplot(ax)
+
+
+
+    # Shared labels
+    fig.text(0.5, 0.05, 'Time (hours)', ha='center', fontsize=20)
+    fig.text(0.05, 0.5, f'Concentration', va='center', rotation='vertical', fontsize=20)
+
+    plt.tight_layout(pad=1.0)
+    plt.savefig("vpc_plot.png", dpi=300)  # dpi=300 gives high resolution
+
+    # Optional: save as PDF
+    plt.savefig("vpc_plot.pdf")
+    
+    # Show the plot
+    plt.show()
+
+
+
+
+
+
+        
+def vpc(global_max_dose, global_max_time,  global_mean, 
   global_std,onlymedian,
         df_training, df, dataset, latent_dim,
-      dim_parameters, initial_encoder, func, reducer, noise, ODEWrapper,
-    t_dense,compartment, num_simulated_total=500,
+      dim_parameters, initial_encoder,encoder, func, reducer, noise, ODEWrapper,
+    t_dense,compartment,enable_nf_training, enable_ae_training,  num_simulated_total=500,
     add_noise_to_prediction: bool = False  # 🔧 NEW ARGUMENT
 ):
-   with torch.no_grad():
-
-    initial_encoder.eval()
-    reducer.eval()
-    func.eval()
-    
-    plot_data = []
-
-    device = next(func.parameters()).device
-    t_dense=t_dense.to(device)
-    MAX_TIME = estimate_max_time(df_training)
-    MAX_DOSE = estimate_max_dose(df_training)
-    MAX_TIME_test = estimate_max_time(df)
-    MAX_DOSE_test = estimate_max_dose(df)
-   # conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
-    conc_mean, conc_std = global_mean, global_std
-
-    dataloader = DataLoader(dataset, batch_size=20, shuffle=True, collate_fn=collate_fn, num_workers=0)
-    dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
-    all_times = np.concatenate(dose_times_lists)
-    
-    unique_times_np = np.unique(all_times)
-    dose_times_tensor = torch.from_numpy(unique_times_np).float().to(t_dense.device) / MAX_TIME
-    #t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
-
-    
-    #t_dense = torch.unique(torch.cat([t_dense.to(device), dose_times_tensor]))
-    
-    unique_doses = sorted(set(entry[2].item() for entry in dataset))
-    num_doses = len(unique_doses)
-    num_simulated_per_dose = max(1, num_simulated_total // num_doses)
-
-    for dose_value in unique_doses:
-        dose_filtered_dataset = [entry for entry in dataset if entry[2].item() == dose_value]
-        if len(dose_filtered_dataset) == 0:
-            print(f"⚠️ No data found for dose {dose_value}. Skipping plot.")
-            continue
-        indices = np.random.choice(len(dose_filtered_dataset), num_simulated_per_dose, replace=True)
-        batch_entries = [dose_filtered_dataset[i] for i in indices]
-        t_dense2 = t_dense
-        
-
-        t_reals, x_trues, doses, dose_times_list, z_samples = [], [], [], [], []
-   
-        for entry in batch_entries:
-            t_real, x_true, dose, dose_times = entry[:4]
-
-            t_reals.append(t_real)
-            x_trues.append(x_true)
-            doses.append(dose)
-            dose_times_list.append(dose_times)
-            sample_shape = torch.Size([dim_parameters])
-            new_sample = torch.randn(sample_shape)
-            z_samples.append(new_sample)
-        
-        doses  = [dose * MAX_DOSE_test / MAX_DOSE for dose in doses]
-        dose_times=dose_times.to(device)
-       # t_dense2 = torch.unique(torch.cat([t_dense2, dose_times]))
-        doses_tensor = torch.stack(doses).to(device)
-        dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
-        dose_mask = (dose_times_padded != 0).to(device)
-        z_tensor = torch.stack(z_samples).to(device)
-        if onlymedian:
-            z_tensor=torch.zeros_like(z_tensor)
-            
-        x0_list = []
-        x_trues=x_trues
-        for x in x_trues:
-            x=x.to(device)
-            out = initial_encoder(x[0].unsqueeze(0))  # expect shape [1, 4]
-            if out.dim() == 1:
-                out = out.unsqueeze(0)  # convert [4] -> [1, 4]
-            x0_list.append(out)
-        x0_tensor = torch.cat(x0_list, dim=0)  # now shape [6, 4]
-        
-
-                # Expand doses_tensor to match the shape of dose_times_padded
-        # dose_times_padded: [B, max_doses], so we want doses_tensor: [B, max_doses]
-        if doses_tensor.dim() == 1:
-            doses_tensor = doses_tensor.unsqueeze(1)  # [B] -> [B, 1]
-        doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))  # [B, max_doses]
-
-     
-        ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1),doses_tensor.unsqueeze(-1), dose_mask)
-        x0 = torch.cat([x0_tensor, z_tensor], dim=1)  # shape [batch_size, 6]
-        x0=x0.to(device)
-
-        pred = odeint(ode_func, x0, t_dense.to(device), method='rk4')  # [time, batch, latent_dim+1]
-        
-        x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean,conc_std)  # [time, batch, state_dim]
-
-        # ✅ Optionally add noise
-        if add_noise_to_prediction:
-            # Create mask: only where predicted values are > 0
-            mask = x_pred > 0
-        
-            # Sample noise normally
-            noisy_x_pred = noise.sample(x_pred, n_samples=1).squeeze(0)
-        
-            # Apply noise only where x_pred > 0
-            x_pred = torch.where(mask, noisy_x_pred, x_pred)
-        
-            # Clamp any negative values to 0
-            x_pred = torch.clamp(x_pred, min=0)
-
-
-        # Compute quantiles
-        perc10_sim = torch.quantile(x_pred.squeeze(-1), 0.10, dim=1)
-        median_sim = torch.quantile(x_pred.squeeze(-1), 0.50, dim=1)
-        perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1)
-
-        interp_all = [
-            torch_linear_interpolate2(t_real.to(t_dense2.device), x_true.to(t_dense2.device), t_dense2)
-            for t_real, x_true in zip(t_reals, x_trues)
-        ]
-
-        data_matrix = torch.stack(interp_all)
-
-        perc10_data = torch.quantile(data_matrix, 0.10, dim=0)
-        median_data = torch.quantile(data_matrix, 0.50, dim=0)
-        perc90_data = torch.quantile(data_matrix, 0.90, dim=0)
-
-        # De-standardize
-        perc10_sim_real = perc10_sim
-        median_sim_real = median_sim
-        perc90_sim_real = perc90_sim
-
-        perc10_data_real = destandardize_concentration(perc10_data, conc_mean, conc_std)
-        median_data_real = destandardize_concentration(median_data, conc_mean, conc_std)
-        perc90_data_real = destandardize_concentration(perc90_data, conc_mean, conc_std)
-        time_hours = t_dense.cpu().numpy() * MAX_TIME_test
-
-        plot_data.append({
-        "dose_value": dose_value * global_max_dose,
-        "time_hours": time_hours,
-        "perc10_sim": perc10_sim_real.detach().cpu().numpy(),
-        "median_sim": median_sim_real.detach().cpu().numpy(),
-        "perc90_sim": perc90_sim_real.detach().cpu().numpy(),
-        "perc10_data": perc10_data_real.detach().cpu().numpy(),
-        "median_data": median_data_real.detach().cpu().numpy(),
-        "perc90_data": perc90_data_real.detach().cpu().numpy()
-    })
-
+        plot_data = generate_plot_data(
+          df=df,
+          dataset=dataset,
+          t_dense=t_dense,
+          global_max_time=global_max_time,
+          global_max_dose=global_max_dose,
+          global_mean=global_mean,
+          global_std=global_std,
+          latent_dim=latent_dim,
+          dim_parameters=dim_parameters,
+          initial_encoder=initial_encoder,
+          encoder=encoder,
+          func=func,
+          reducer=reducer,
+          noise=noise,
+          ODEWrapper=ODEWrapper,
+          num_simulated_total=num_simulated_total,
+          add_noise_to_prediction=add_noise_to_prediction,
+          enable_ae_training=enable_ae_training,
+          enable_nf_training=enable_nf_training
+      )
         # ---- Plot all in a grid ---- #
         n_plots = len(plot_data)
         n_cols = 3
@@ -360,7 +695,7 @@ def vpc(global_max_dose,  global_mean,
             ax.plot(data["time_hours"], data["median_data"], label="Raw median", color="orange")
             ax.plot(data["time_hours"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--")
         
-            ax.set_xlim(0, MAX_TIME)
+            ax.set_xlim(0, global_max_time)
             ax.set_ylim(0, 180)
             ax.set_title(f"Dose {data['dose_value']:.0f}")
             ax.set_xlabel("Time (hours)")
@@ -375,315 +710,6 @@ def vpc(global_max_dose,  global_mean,
         
         plt.tight_layout()
         plt.show()
-        
-def vpc_extended(
-    global_max_dose, global_mean, global_std, onlymedian,
-    df_training, df, dataset, latent_dim,
-    dim_parameters, initial_encoder, func, reducer, noise, ODEWrapper,
-    t_dense, compartment, num_simulated_total=500,
-    num_vpc_datasets=1000, add_noise_to_prediction: bool = False
-):
-    device = next(func.parameters()).device
-    t_dense = t_dense.to(device)
-    MAX_TIME = estimate_max_time(df_training)
-    MAX_DOSE = estimate_max_dose(df_training)
-    MAX_TIME_test = estimate_max_time(df)
-    MAX_DOSE_test = estimate_max_dose(df)
-    initial_encoder.eval()
-    reducer.eval()
-    func.eval()
-    conc_mean, conc_std = global_mean, global_std
-    unique_doses = sorted(set(entry[2].item() for entry in dataset))
-    num_doses = len(unique_doses)
-    num_simulated_per_dose = max(1, num_simulated_total // num_doses)
-
-    all_vpc_results = []
-
-    for dose_value in unique_doses:
-        dose_filtered_dataset = [entry for entry in dataset if entry[2].item() == dose_value]
-        if len(dose_filtered_dataset) == 0:
-            print(f"⚠️ No data found for dose {dose_value}. Skipping.")
-            continue
-
-        # Collect percentiles across multiple VPC datasets
-        perc10_all, median_all, perc90_all = [], [], []
-
-        for vpc_iter in range(num_vpc_datasets):
-            indices = np.random.choice(len(dose_filtered_dataset), num_simulated_per_dose, replace=True)
-            batch_entries = [dose_filtered_dataset[i] for i in indices]
-
-            t_reals, x_trues, doses, dose_times_list, z_samples = [], [], [], [], []
-
-            for entry in batch_entries:
-                t_real, x_true, dose, dose_times = entry[:4]
-                t_reals.append(t_real)
-                x_trues.append(x_true)
-                doses.append(dose)
-                dose_times_list.append(dose_times)
-                z_samples.append(torch.randn(dim_parameters))
-
-            doses = [dose * MAX_DOSE_test / MAX_DOSE for dose in doses]
-            dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
-            dose_mask = (dose_times_padded != 0).to(device)
-            doses_tensor = torch.tensor(doses, device=device).unsqueeze(1).expand(-1, dose_times_padded.size(1))
-            z_tensor = torch.stack(z_samples).to(device)
-            if onlymedian:
-                z_tensor = torch.zeros_like(z_tensor)
-
-            x0_list = []
-            for x in x_trues:
-                x = x.to(device)
-                out = initial_encoder(x[0].unsqueeze(0))
-                if out.dim() == 1:
-                    out = out.unsqueeze(0)
-                x0_list.append(out)
-            x0_tensor = torch.cat(x0_list, dim=0)
-
-            ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1), doses_tensor.unsqueeze(-1), dose_mask)
-            x0 = torch.cat([x0_tensor, z_tensor], dim=1).to(device)
-
-            pred = odeint(ode_func, x0, t_dense, method='rk4')
-            x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean, conc_std)
-
-            if add_noise_to_prediction:
-                mask = x_pred > 0
-                noisy_x_pred = noise.sample(x_pred, n_samples=1).squeeze(0)
-                x_pred = torch.where(mask, noisy_x_pred, x_pred)
-                x_pred = torch.clamp(x_pred, min=0)
-
-            # Percentiles for this VPC dataset
-            perc10_sim = torch.quantile(x_pred.squeeze(-1), 0.10, dim=1).cpu().numpy()
-            median_sim = torch.quantile(x_pred.squeeze(-1), 0.50, dim=1).cpu().numpy()
-            perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1).cpu().numpy()
-
-            perc10_all.append(perc10_sim)
-            median_all.append(median_sim)
-            perc90_all.append(perc90_sim)
-
-        # Convert to arrays
-        perc10_all = np.stack(perc10_all)
-        median_all = np.stack(median_all)
-        perc90_all = np.stack(perc90_all)
-
-        # Compute percentiles of percentiles
-        perc10_vpc = np.percentile(perc10_all, [10, 50, 90], axis=0)
-        median_vpc = np.percentile(median_all, [10, 50, 90], axis=0)
-        perc90_vpc = np.percentile(perc90_all, [10, 50, 90], axis=0)
-
-        time_hours = t_dense.cpu().numpy() * MAX_TIME_test
-
-        all_vpc_results.append({
-            "dose_value": dose_value * global_max_dose,
-            "time_hours": time_hours,
-            "perc10_vpc": perc10_vpc,
-            "median_vpc": median_vpc,
-            "perc90_vpc": perc90_vpc
-        })
-
-    # ---- Plotting ---- #
-    n_plots = len(all_vpc_results)
-    n_cols = 3
-    n_rows = math.ceil(n_plots / n_cols)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 8 * n_rows), sharex=True, sharey=True)
-    axes = axes.flatten()
-
-    for i, data in enumerate(all_vpc_results):
-        ax = axes[i]
-
-        # Shaded areas
-        ax.fill_between(data["time_hours"], data["perc10_vpc"][0], data["perc10_vpc"][2], color='blue', alpha=0.2)
-        ax.fill_between(data["time_hours"], data["median_vpc"][0], data["median_vpc"][2], color='green', alpha=0.2)
-        ax.fill_between(data["time_hours"], data["perc90_vpc"][0], data["perc90_vpc"][2], color='red', alpha=0.2)
-
-        # Median lines
-        ax.plot(data["time_hours"], data["perc10_vpc"][1], color='blue', linestyle='--', label='10th percentile')
-        ax.plot(data["time_hours"], data["median_vpc"][1], color='green', marker='o', markersize=3, label='Median')
-        ax.plot(data["time_hours"], data["perc90_vpc"][1], color='red', linestyle='--', label='90th percentile')
-
-        ax.set_xlim(0, MAX_TIME)
-        ax.set_ylim(0, 180)
-        ax.set_title(f"Dose {data['dose_value']:.0f}")
-        ax.set_xlabel("Time (hours)")
-        ax.set_ylabel(f"Concentration ({compartment})")
-        ax.grid(True)
-        if i == 0:
-            ax.legend()
-
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-
-    plt.tight_layout()
-    plt.show()
- 
-
-def vpc_with_encoder(global_max_value,global_max_dose, global_mean, global_std,
-                     enable_ae_training, enable_nf_training,
-                     df_training, df, dataset, latent_dim,
-                     dim_parameters, initial_encoder, encoder,
-                     func, reducer, noise, ODEWrapper,
-                     t_dense, compartment, num_simulated_total=500,
-                     add_noise_to_prediction: bool = False):
-
-    with torch.no_grad():
-        encoder.eval()
-        initial_encoder.eval()
-        reducer.eval()
-        func.eval()
-        device = next(func.parameters()).device
-
-        MAX_TIME = estimate_max_time(df_training)
-        MAX_DOSE = estimate_max_dose(df_training)
-
-        conc_mean, conc_std = global_mean, global_std
-
-        dose_times_lists = df['Dose times'].apply(ast.literal_eval).tolist()
-        all_times = np.concatenate(dose_times_lists)
-        unique_times_np = np.unique(all_times)
-        dose_times_tensor = torch.from_numpy(unique_times_np).float().to(t_dense.device) / MAX_TIME
-        t_dense = torch.unique(torch.cat([t_dense, dose_times_tensor]))
-
-        unique_doses = sorted(set(entry[2].item() for entry in dataset))
-        num_doses = len(unique_doses)
-        num_simulated_per_dose = max(1, num_simulated_total // num_doses)
-
-        plot_data = []
-
-        for dose_value in unique_doses:
-            dose_filtered_dataset = [entry for entry in dataset if entry[2].item() == dose_value]
-            if len(dose_filtered_dataset) == 0:
-                print(f"⚠️ No data found for dose {dose_value}. Skipping plot.")
-                continue
-
-            indices = np.random.choice(len(dose_filtered_dataset), num_simulated_per_dose, replace=True)
-            batch_entries = [dose_filtered_dataset[i] for i in indices]
-            t_dense2 = t_dense.to(device)  #torch.linspace(0, 1, steps=120).to(device)
-
-            t_reals, x_trues, doses, dose_times_list, x_dose_norm_list = [], [], [], [], []
-            for entry in batch_entries:
-                t_real, x_true, dose, dose_times, subject_id, x_dose_norm = entry
-                t_reals.append(t_real)
-                x_trues.append(x_true)
-                doses.append(dose)
-                dose_times_list.append(dose_times)
-                x_dose_norm_list.append(x_dose_norm)
-
-            dose_times = dose_times.to(device)
-            t_dense2 = torch.unique(torch.cat([t_dense2, dose_times]))
-
-            doses_tensor = torch.stack(doses).to(device)
-            dose_times_padded = torch.nn.utils.rnn.pad_sequence(dose_times_list, batch_first=True).to(device)
-            dose_mask = (dose_times_padded != 0).to(device)
-
-            t_real_padded = torch.nn.utils.rnn.pad_sequence(t_reals, batch_first=True).to(device)
-            x_true_padded = torch.nn.utils.rnn.pad_sequence(x_trues, batch_first=True).to(device)
-            x_dose_norm_list_padded = torch.nn.utils.rnn.pad_sequence(x_dose_norm_list, batch_first=True).to(device)
-
-            # Latent sampling
-            if enable_nf_training:
-                _, z_tensor, mu_q, logvar_q, _ = encoder(t_real_padded, x_dose_norm_list_padded)
-            else:
-                _, _, mu_q, logvar_q, _ = encoder(t_real_padded, x_dose_norm_list_padded)
-                std_q = torch.exp(0.5 * logvar_q)
-                eps = torch.randn_like(std_q)
-                z_tensor = mu_q + eps * std_q
-
-            # Encode initial conditions
-            x0_list = []
-            for x in x_trues:
-                out = initial_encoder(x[0].unsqueeze(0).to(device))
-                if out.dim() == 1:
-                    out = out.unsqueeze(0)
-                x0_list.append(out)
-            x0_tensor = torch.cat(x0_list, dim=0)
-
-            if doses_tensor.dim() == 1:
-                doses_tensor = doses_tensor.unsqueeze(1)
-            doses_tensor = doses_tensor.expand(-1, dose_times_padded.size(1))
-
-            if enable_ae_training:
-                z_tensor = mu_q
-
-            ode_func = ODEWrapper(func, dose_times_padded.unsqueeze(-1), doses_tensor.unsqueeze(-1), dose_mask)
-            x0 = torch.cat([x0_tensor, z_tensor], dim=1).to(device)
-
-            pred = odeint(ode_func, x0, t_dense.to(device), method='rk4')
-
-            x_pred = destandardize_concentration(reducer(pred[:, :, :latent_dim]), conc_mean, conc_std)
-
-            if add_noise_to_prediction:
-                x_pred = noise.sample(x_pred, n_samples=1).squeeze(0)
-
-            perc10_sim = torch.quantile(x_pred.squeeze(-1), 0.10, dim=1)
-            median_sim = torch.quantile(x_pred.squeeze(-1), 0.50, dim=1)
-            perc90_sim = torch.quantile(x_pred.squeeze(-1), 0.90, dim=1)
-
-            interp_all = [
-                torch_linear_interpolate2(t_real.to(t_dense2.device), x_true.to(t_dense2.device), t_dense2)
-                for t_real, x_true in zip(t_reals, x_trues)
-            ]
-            data_matrix = torch.stack(interp_all)
-
-            perc10_data = torch.quantile(data_matrix, 0.10, dim=0)
-            median_data = torch.quantile(data_matrix, 0.50, dim=0)
-            perc90_data = torch.quantile(data_matrix, 0.90, dim=0)
-
-            perc10_sim_real = perc10_sim
-            median_sim_real = median_sim
-            perc90_sim_real = perc90_sim
-            perc10_data_real = destandardize_concentration(perc10_data, conc_mean, conc_std)
-            median_data_real = destandardize_concentration(median_data, conc_mean, conc_std)
-            perc90_data_real = destandardize_concentration(perc90_data, conc_mean, conc_std)
-
-            time_hours = t_dense.cpu().numpy() * MAX_TIME
-
-            plot_data.append({
-                "dose_value": dose_value * global_max_dose,
-                "time_hours": time_hours,
-                "perc10_sim": perc10_sim_real.detach().cpu().numpy(),
-                "median_sim": median_sim_real.detach().cpu().numpy(),
-                "perc90_sim": perc90_sim_real.detach().cpu().numpy(),
-                "perc10_data": perc10_data_real.detach().cpu().numpy(),
-                "median_data": median_data_real.detach().cpu().numpy(),
-                "perc90_data": perc90_data_real.detach().cpu().numpy()
-            })
-
-        # ======= Plot all doses in one figure =======
-        n_plots = len(plot_data)
-        n_cols = 3
-        n_rows = math.ceil(n_plots / n_cols)
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 8 * n_rows), sharex=True, sharey=True)
-        axes = axes.flatten()
-      
-        
-        for i, data in enumerate(plot_data):
-            ax = axes[i]
-            ax.plot(data["time_hours"], data["perc10_sim"], label="Simulated 10th", color="blue", linestyle="--")
-            ax.plot(data["time_hours"], data["median_sim"], label="Simulated median", color="blue", marker="o", markersize=3)
-            ax.plot(data["time_hours"], data["perc90_sim"], label="Simulated 90th", color="blue", linestyle="--")
-
-            ax.plot(data["time_hours"], data["perc10_data"], label="Raw 10th", color="orange", linestyle="--")
-            ax.plot(data["time_hours"], data["median_data"], label="Raw median", color="orange")
-            ax.plot(data["time_hours"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--")
-
-            ax.set_xlim(0, MAX_TIME)
-            ax.set_ylim(0, global_max_value)
-            ax.set_title(f"Dose {data['dose_value']:.0f}")
-            ax.set_xlabel("Time (hours)")
-            ax.set_ylabel(f"Concentration ({compartment})")
-            ax.grid(True)
-            if i == 0:
-                ax.legend()
-
-        # Hide unused subplots
-        for j in range(i + 1, len(axes)):
-            fig.delaxes(axes[j])
-
-        plt.tight_layout()
-        plt.show()
-
-
-
-
 
 
 def plot_encoder_mu_vs_params(df, dataset, encoder, latent_dim, dim_parameter_encoder, device=None):
@@ -793,17 +819,6 @@ def plot_encoder_mu_vs_params(df, dataset, encoder, latent_dim, dim_parameter_en
     return mu_array, ka_array, cl_array, dose_array
 
 
-import numpy as np
-import torch
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score
-import matplotlib.pyplot as plt
-
-import numpy as np
-import torch
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score
-import matplotlib.pyplot as plt
 
 def rf_predict_params_from_encoder_validation(
         df_train, dataset_train, df_val, dataset_val,
@@ -864,105 +879,113 @@ def rf_predict_params_from_encoder_validation(
     r2_cl = r2_score(y_cl_val, y_cl_pred)
 
     # Plot
+    # Plot predictions
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
+   
     axes[0].scatter(y_ka_val, y_ka_pred, c='blue', alpha=0.7, edgecolors='k')
-    axes[0].plot([y_ka_val.min(), y_ka_val.max()], [y_ka_val.min(), y_ka_val.max()], 'r--')
+    axes[0].plot([y_ka_val.min(), y_ka_val.max()],
+                 [y_ka_val.min(), y_ka_val.max()], 'r--')
     axes[0].set_xlabel("True ka (validation)")
     axes[0].set_ylabel("Predicted ka")
     axes[0].set_title(f"ka prediction (R²={r2_ka:.2f})")
-
+   
     axes[1].scatter(y_cl_val, y_cl_pred, c='green', alpha=0.7, edgecolors='k')
-    axes[1].plot([y_cl_val.min(), y_cl_val.max()], [y_cl_val.min(), y_cl_val.max()], 'r--')
+    axes[1].plot([y_cl_val.min(), y_cl_val.max()],
+                 [y_cl_val.min(), y_cl_val.max()], 'r--')
     axes[1].set_xlabel("True cl (validation)")
     axes[1].set_ylabel("Predicted cl")
     axes[1].set_title(f"cl prediction (R²={r2_cl:.2f})")
-
+    
     plt.tight_layout()
     plt.show()
+   
+    # ----------------------------------------------------------
+    # Plot individual latent parameters against ka and cl
+    # ----------------------------------------------------------
+    n_params = X_val.shape[1]
 
-    return rf_ka, rf_cl, y_ka_pred, y_cl_pred
+    
+    # --- Create outer 2x2 grid ---
+    fig = plt.figure(figsize=(18, 12))
+    outer = gridspec.GridSpec(2, 2, wspace=0.2, hspace=0.2)
+    
+    panel_labels = ['a', 'b', 'c', 'd']
+    
+    # (a) mu[0] vs ka/cl
+    inner_a = gridspec.GridSpecFromSubplotSpec(1, 1, subplot_spec=outer[0])
+    ax_panel_a = plt.Subplot(fig, outer[0]); ax_panel_a.axis('off')
+    ax_panel_a.text(-0.1, 1.05, panel_labels[0], transform=ax_panel_a.transAxes,
+                    fontsize=20, fontweight='bold', va='top', ha='left')
+    fig.add_subplot(ax_panel_a)
+    
+    ax_a = plt.Subplot(fig, inner_a[0])
+    ax_a.scatter(X_val[:, 0], y_ka_val, c='blue', alpha=0.7, edgecolors='k', label="ka")
+    ax_a.scatter(X_val[:, 0], y_cl_val, c='green', alpha=0.7, edgecolors='k', label="cl")
+    ax_a.set_xlabel("mu[0]", fontsize=20)
+    ax_a.set_ylabel("True value", fontsize=20)
+    ax_a.legend(fontsize=16)
+    fig.add_subplot(ax_a)
+    
+    # (b) mu[1] vs ka/cl
+    inner_b = gridspec.GridSpecFromSubplotSpec(1, 1, subplot_spec=outer[1])
+    ax_panel_b = plt.Subplot(fig, outer[1]); ax_panel_b.axis('off')
+    ax_panel_b.text(-0.1, 1.05, panel_labels[1], transform=ax_panel_b.transAxes,
+                    fontsize=20, fontweight='bold', va='top', ha='left')
+    fig.add_subplot(ax_panel_b)
+    
+    ax_b = plt.Subplot(fig, inner_b[0])
+    ax_b.scatter(X_val[:, 1], y_ka_val, c='blue', alpha=0.7, edgecolors='k', label="ka")
+    ax_b.scatter(X_val[:, 1], y_cl_val, c='green', alpha=0.7, edgecolors='k', label="cl")
+    ax_b.set_xlabel("mu[1]", fontsize=20)
+    ax_b.set_ylabel("True value", fontsize=20)
+    ax_b.legend(fontsize=16)
+    fig.add_subplot(ax_b)
+    
+    # (c) RF ka prediction
+    inner_c = gridspec.GridSpecFromSubplotSpec(1, 1, subplot_spec=outer[2])
+    ax_panel_c = plt.Subplot(fig, outer[2]); ax_panel_c.axis('off')
+    ax_panel_c.text(-0.1, 1.05, panel_labels[2], transform=ax_panel_c.transAxes,
+                    fontsize=20, fontweight='bold', va='top', ha='left')
+    fig.add_subplot(ax_panel_c)
+    
+    ax_c = plt.Subplot(fig, inner_c[0])
+    ax_c.scatter(y_ka_val, y_ka_pred, c='blue', alpha=0.7, edgecolors='k')
+    ax_c.plot([y_ka_val.min(), y_ka_val.max()],
+              [y_ka_val.min(), y_ka_val.max()], 'r--')
+    ax_c.set_xlabel("True ka", fontsize=20)
+    ax_c.set_ylabel("Predicted ka", fontsize=20)
+    # Add R² inside plot
+    ax_c.text(0.05, 0.9, f"R² = {r2_ka:.2f}", transform=ax_c.transAxes,
+              fontsize=20, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
+    fig.add_subplot(ax_c)
+    
+    # (d) RF cl prediction
+    inner_d = gridspec.GridSpecFromSubplotSpec(1, 1, subplot_spec=outer[3])
+    ax_panel_d = plt.Subplot(fig, outer[3]); ax_panel_d.axis('off')
+    ax_panel_d.text(-0.1, 1.05, panel_labels[3], transform=ax_panel_d.transAxes,
+                    fontsize=20, fontweight='bold', va='top', ha='left')
+    fig.add_subplot(ax_panel_d)
+    
+    ax_d = plt.Subplot(fig, inner_d[0])
+    ax_d.scatter(y_cl_val, y_cl_pred, c='green', alpha=0.7, edgecolors='k')
+    ax_d.plot([y_cl_val.min(), y_cl_val.max()],
+              [y_cl_val.min(), y_cl_val.max()], 'r--')
+    ax_d.set_xlabel("True cl", fontsize=20)
+    ax_d.set_ylabel("Predicted cl", fontsize=20)
+    # Add R² inside plot
+    ax_d.text(0.05, 0.9, f"R² = {r2_cl:.2f}", transform=ax_d.transAxes,
+              fontsize=20, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
+    ax_d.tick_params(axis='both', which='major', labelsize=16)
+    ax_c.tick_params(axis='both', which='major', labelsize=16)
+    ax_a.tick_params(axis='both', which='major', labelsize=16)
+    ax_b.tick_params(axis='both', which='major', labelsize=16)
 
-def rf_predict_params_from_encoderanddose_validation(
-        df_train, dataset_train, df_val, dataset_val,
-        encoder, latent_dim, dim_parameter_encoder,
-        device=None, n_estimators=200, random_state=42):
-    import numpy as np
-    import torch
-    import matplotlib.pyplot as plt
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.metrics import r2_score
 
-    if device is None:
-        device = next(encoder.parameters()).device
-
-    def extract_mu_q_with_dose(df, dataset):
-        mu_list, dose_list, ka_list, cl_list = [], [], [], []
-
-        encoder.eval()
-        with torch.no_grad():
-            for t_real, x_true, dose, dose_times, subject_id, x_dose_norm in dataset:
-                t_real_t = t_real.unsqueeze(0).to(device)
-                x_dose_norm_t = x_dose_norm.unsqueeze(0).to(device)
-
-                _, _, mu_q, _, _ = encoder(t_real_t, x_dose_norm_t)
-                mu_array = mu_q.squeeze(0).cpu().numpy()
-                mu_list.append(mu_array[:dim_parameter_encoder])  # use only specified dims
-
-                # Include dose as feature (flatten if needed)
-                dose_list.append(dose.numpy().flatten())
-
-                # Get ka/cl for this subject
-                try:
-                    subj_id_val = int(subject_id)
-                except:
-                    subj_id_val = subject_id
-                row = df[df["ID"] == subj_id_val]
-                ka_list.append(row["ka"].values[0])
-                cl_list.append(row["cl"].values[0])
-
-        # Concatenate latent features and dose
-        X = np.hstack([np.stack(mu_list), np.stack(dose_list)])
-        y_ka = np.array(ka_list)
-        y_cl = np.array(cl_list)
-        return X, y_ka, y_cl
-
-    # Extract features and labels
-    X_train, y_ka_train, y_cl_train = extract_mu_q_with_dose(df_train, dataset_train)
-    X_val, y_ka_val, y_cl_val = extract_mu_q_with_dose(df_val, dataset_val)
-
-    # Train Random Forests
-    rf_ka = RandomForestRegressor(n_estimators=n_estimators, random_state=random_state)
-    rf_cl = RandomForestRegressor(n_estimators=n_estimators, random_state=random_state)
-
-    rf_ka.fit(X_train, y_ka_train)
-    rf_cl.fit(X_train, y_cl_train)
-
-    # Predictions on validation
-    y_ka_pred = rf_ka.predict(X_val)
-    y_cl_pred = rf_cl.predict(X_val)
-
-    r2_ka = r2_score(y_ka_val, y_ka_pred)
-    r2_cl = r2_score(y_cl_val, y_cl_pred)
-
-    # Plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    axes[0].scatter(y_ka_val, y_ka_pred, c='blue', alpha=0.7, edgecolors='k')
-    axes[0].plot([y_ka_val.min(), y_ka_val.max()], [y_ka_val.min(), y_ka_val.max()], 'r--')
-    axes[0].set_xlabel("True ka (validation)")
-    axes[0].set_ylabel("Predicted ka")
-    axes[0].set_title(f"ka prediction (R²={r2_ka:.2f})")
-
-    axes[1].scatter(y_cl_val, y_cl_pred, c='green', alpha=0.7, edgecolors='k')
-    axes[1].plot([y_cl_val.min(), y_cl_val.max()], [y_cl_val.min(), y_cl_val.max()], 'r--')
-    axes[1].set_xlabel("True cl (validation)")
-    axes[1].set_ylabel("Predicted cl")
-    axes[1].set_title(f"cl prediction (R²={r2_cl:.2f})")
-
+    fig.add_subplot(ax_d)
+    
+    
+    
     plt.tight_layout()
     plt.show()
-
-    return rf_ka, rf_cl, y_ka_pred, y_cl_pred
 
 

@@ -22,7 +22,7 @@ if __name__ == "__main__":
                 '--data_path', 'lib/data/paracetamol_data2.csv',
                 '--save_dir', 'models',
                 '--load_dir', 'models/old',
-                '--base_dir','results/run5']
+                '--base_dir','results/run1']
     
     
     from lib.utils.my_utils import prepare_datasets_and_loaders, run_model_variant, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset_paracetamol, collate_fn, ODEWrapper
@@ -76,78 +76,101 @@ if __name__ == "__main__":
     
     for i in range(n_repeats):    
         train_dataset, val_dataset, test_dataset, train_loader, val_loader, combined = prepare_datasets_and_loaders(
-    args.data_path, all_ids, i, global_max_dose, global_max_time, global_mean, global_std, device)
+    args.data_path, args.base_dir, all_ids, i,already_done, global_max_dose, global_max_time, global_mean, global_std, device, batch_fraction=0.05, trunctation=0.6)
 
         
    
-        mse_training = float('inf')  # initialize mse_training high
+        mse_train = float('inf')  # initialize mse_training high
 
         
-    
-
-        encoder = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=16, num_heads=4, num_layers=2,num_flow_layers=3, dropout=0.1).to(device)
-        func = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
-        reducer = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
-        initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
-        noise = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
-   
-        models = {"func": func, "encoder": encoder, "reducer": reducer, "initial_encoder": initial_encoder, "noise": noise}
-
-       
+        max_attempts = 3
+        attempt = 0
         
-    
-        main_params = [
-            {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder.parameters()) , "lr": lr},
-            {"params": list(noise.parameters()), "lr": 10*lr},
-        ]
+        while mse_train > 100 and attempt < max_attempts:
+            attempt += 1
+            print(f"\n===== Attempt {attempt} =====")
         
-        optimizer = torch.optim.Adam(main_params, lr=lr)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=7,min_lr=1e-4)  # Set your desired minimum LR here)
-    
-        for name, model in models.items():
-              model.to(device)
-              print(f"{name} is on {next(model.parameters()).device}")
-    
+            encoder = Encoder_Transformer_NF(
+                dim_parameter_encoder, input_dim=2, model_dim=64, hidden_dim=64,
+                hidden_flow_dim=16, num_heads=4, num_layers=2, num_flow_layers=3, dropout=0.1
+            ).to(device)
         
-        # AE
-        run_model_variant(
-            variant_name="_ae",
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            test_dataset=test_dataset,
-            models=models,
-            main_params=main_params,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            combined=combined,
-            global_max_dose=global_max_dose,
-            global_max_time=global_max_time,
-            global_mean=global_mean,
-            global_std=global_std,
-            latent_dim=latent_dim,
-            noise=noise,
-            encoder=encoder,
-            func=func,
-            reducer=reducer,
-            initial_encoder=initial_encoder,
-            ODEWrapper=ODEWrapper,
-            device=device,
-            metrics=metrics,
-            residuals=residuals,
-            iteration=i,
-            n_epochs=n_epochs,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            base_dir=args.base_dir,
-            warmup_noise=1000,
-            warmup_iiv=0,
-            enable_ae=True,
-            enable_nf=False,
-            free_bits=1
-        )
+            func = ODEFunc(latent_dim, dim_parameter_encoder, hid_dim).to(device)
+            reducer = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
+            initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
+            noise = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
         
+            models = {
+                "func": func,
+                "encoder": encoder,
+                "reducer": reducer,
+                "initial_encoder": initial_encoder,
+                "noise": noise
+            }
+        
+            main_params = [
+                {"params": list(func.parameters()) + list(reducer.parameters())
+                 + list(initial_encoder.parameters()) + list(encoder.parameters()), "lr": lr},
+                {"params": list(noise.parameters()), "lr": 10*lr},
+            ]
+        
+            optimizer = torch.optim.Adam(main_params, lr=lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.7, patience=7, min_lr=1e-4
+            )
+        
+            for name, model in models.items():
+                model.to(device)
+                print(f"{name} is on {next(model.parameters()).device}")
+        
+            # AE
+            mse_train = run_model_variant(
+                variant_name="_ae",
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                test_dataset=test_dataset,
+                models=models,
+                main_params=main_params,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                combined=combined,
+                global_max_dose=global_max_dose,
+                global_max_time=global_max_time,
+                global_mean=global_mean,
+                global_std=global_std,
+                latent_dim=latent_dim,
+                noise=noise,
+                encoder=encoder,
+                func=func,
+                reducer=reducer,
+                initial_encoder=initial_encoder,
+                ODEWrapper=ODEWrapper,
+                device=device,
+                metrics=metrics,
+                residuals=residuals,
+                iteration=i,
+                n_epochs=n_epochs,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                base_dir=args.base_dir,
+                warmup_noise=1000,
+                warmup_iiv=0,
+                enable_ae=True,
+                enable_nf=False,
+                plot_from_training_records_enable=False,
+                free_bits=1
+            )
+        
+            print(f"Training MSE after attempt {attempt}: {mse_train}")
+        
+        if mse_train > 100:
+            print("\n⚠️ Training did not reach desired MSE <= 100 after 3 attempts.")
+        else:
+            print("\n✅ Training succeeded with MSE <= 100.")
+        
+                
         # AE + Noise
-        run_model_variant(
+        mse_train=run_model_variant(
             variant_name="_ae_noise",
             train_dataset=train_dataset,
             val_dataset=val_dataset,
@@ -180,11 +203,12 @@ if __name__ == "__main__":
             warmup_iiv=0,
             enable_ae=True,
             enable_nf=False,
+            plot_from_training_records_enable=False,
             free_bits=1
         )
         
         # VAE / standard NF
-        run_model_variant(
+        mse_train=run_model_variant(
             variant_name="",
             train_dataset=train_dataset,
             val_dataset=val_dataset,
@@ -214,9 +238,10 @@ if __name__ == "__main__":
             val_loader=val_loader,
             base_dir=args.base_dir,
             warmup_noise=1000,
-            warmup_iiv=10,
+            warmup_iiv=20,
             enable_ae=False,
             enable_nf=False,
+            plot_from_training_records_enable=False,
             free_bits=0
         )
 

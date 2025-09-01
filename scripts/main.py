@@ -5,7 +5,6 @@ Created on Sun Jun 29 16:04:21 2025
 @author: Baaz
 """
 
-# SAFE SETTINGS TO AVOID OpenMP CRASHES
 
 
 
@@ -23,7 +22,6 @@ import ast
 from torch.utils.data import Dataset, DataLoader
 
 
- 
 
 
 # ---- Training ---- 
@@ -34,15 +32,16 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-                '--data_validation_path', 'lib/data/simulated_validation_data6.csv', 
-                '--data_test_path', 'lib/data/simulated_test_data6.csv', 
-                '--data_path', 'lib/data/simulated_training_data6.csv',
+                '--data_validation_path', 'lib/data/simulated_validation_data5.csv', 
+                '--data_test_path', 'lib/data/simulated_test_data5.csv', 
+                '--data_path', 'lib/data/simulated_training_data5.csv',
                 '--save_dir', 'models',
                 '--load_dir', 'models/old']
     
-    from lib.utils.my_utils import train_model, TrajectoryDataset, collate_fn, ODEWrapper,load_models, save_models
+    from lib.utils.my_utils import prepare_datasets_and_loaders_simulated, prepare_optimizer, plot_individual_fits, train_model, prepare_datasets_and_loaders, compute_global_stats, TrajectoryDataset, collate_fn_simulated, ODEWrapper
     from lib.models.NNmodels import Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
-    from lib.utils.model_validation import predict_and_evaluate_mse, vpc, vpc_with_encoder, plot_individual_fits, plot_encoder_mu_vs_params, rf_predict_params_from_encoder_validation, rf_predict_params_from_encoderanddose_validation
+    from lib.utils.model_validation import vpc_all, plot_node_latent_vs_reduced, vpc, rf_predict_params_from_encoder_validation, plot_encoder_mu_vs_params
+    # Define your parser
     
     # Define your parser
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
@@ -60,7 +59,10 @@ if __name__ == "__main__":
   #  device = torch.device("cpu")
     
     print("Using device:", device)
-    
+        
+    load_dir = args.load_dir
+    save_dir = args.save_dir
+    modelname = "MultipleDoseAddError_AE_NF2"
 
     
      #   def __init__(self, path, compartment='C2', augment_with_prefixes=False, augment_dose_times=False, dose_jitter_std=0.01):
@@ -68,105 +70,91 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     df = pd.read_csv(args.data_path)
-    
     df_validation=pd.read_csv(args.data_validation_path)
-
     df_test=pd.read_csv(args.data_test_path)
     
-    df_all = pd.concat([df, df_test, df_validation], ignore_index=True)
-
-    global_max_dose = df_all['Dose'].max()
-    global_max_time = df_all['Time'].max()
-    global_mean = df_all['C2'].mean()
-    global_std = df_all['C2'].std()
     
-  
-    dataset = TrajectoryDataset(args.data_path, augment_with_prefixes=False,augment_dose_times=False,
-    max_dose=global_max_dose,
-    max_time=global_max_time,
-    conc_mean=global_mean,
-    conc_std=global_std)
-    
-    
-    dataset_test=TrajectoryDataset(args.data_test_path, augment_with_prefixes=False, max_dose=global_max_dose,
-    max_time=global_max_time,
-    conc_mean=global_mean,
-    conc_std=global_std)
-    
-    
-    dataset_plot= TrajectoryDataset(args.data_path, augment_with_prefixes=False,   max_dose=global_max_dose,
-       max_time=global_max_time,
-       conc_mean=global_mean,
-       conc_std=global_std)
-    dataset_validation=TrajectoryDataset(args.data_validation_path, augment_with_prefixes=False,   max_dose=global_max_dose,
-       max_time=global_max_time,
-       conc_mean=global_mean,
-       conc_std=global_std)
+    global_max_dose, global_max_time, global_mean, global_std, global_max_value=compute_global_stats(df)
+    dataset_train, dataset_validation, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, combined, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders_simulated(args.data_path, args.data_validation_path, args.data_test_path, global_max_dose, global_max_time, global_mean, global_std, device, batch_fraction=0.05, trunctation=1)
 
     
     
-    
-    load_dir = args.load_dir
-    save_dir = args.save_dir
-    modelname = "MultipleDoseAddError_AE_NF2"
-
-
-    import matplotlib.pyplot as plt
 
 
 
 
 
-    def plot_dose_level_time_series(dataset):
-       """
-       Plot all dose-level normalized time series in the same window,
-       with different colors for different doses.
-       """
-       df = dataset.df.copy()
-       unique_doses = sorted(df['Dose'].unique())
-       colors = plt.cm.tab10.colors  # 10 distinct colors
-   
-       fig, ax = plt.subplots(figsize=(8, 5))
-       fig.canvas.manager.set_window_title("Dose-Level Normalized Time Series")
-   
-       for i, dose in enumerate(unique_doses):
-           df_dose = df[df['Dose'] == dose].reset_index(drop=True)
-   
-           # Find start of each trajectory
-           start_idxs = df_dose[df_dose['Time'] == 0].index.tolist() + [len(df_dose)]
-           for j in range(len(start_idxs) - 1):
-               traj = df_dose.iloc[start_idxs[j]:start_idxs[j + 1]]
-               ax.plot(
-                   traj['Time_norm'],
-                   traj['C2_dose_norm'],
-                   color=colors[i % len(colors)],
-                   label=f"Dose {dose}" if j == 0 else "",
-                   alpha=0.7
-               )
-   
-       ax.set_title("Dose-Level Normalized Time Series (All Doses)")
-       ax.set_xlabel("Normalized Time")
-       ax.set_ylabel("Dose-Level Normalized Concentration")
-       ax.legend(title="Dose", loc="best")
-       ax.grid(True)
-       plt.show()
-
-
-    plot_dose_level_time_series(dataset)
-    latent_dim=4
+    latent_dim=2
     dim_parameter_encoder=2
     hid_dim=512
  
     
+    encoder_ae = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=16, num_heads=4, num_layers=2,num_flow_layers=3, dropout=0.1).to(device)
+    func_ae = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
+    reducer_ae = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
+    initial_encoder_ae = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
+    noise_ae = TrainableNoise(size=1, init_add_std=2, init_prop_std=0).to(device)
 
-    encoder = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=16, num_heads=4, num_layers=2,num_flow_layers=3, dropout=0.1).to(device)
+    models = {
+    "func": func_ae,
+    "encoder": encoder_ae,
+    "reducer": reducer_ae,
+    "initial_encoder": initial_encoder_ae,
+    "noise": noise_ae,
+        }
+        
+    optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001)
+    
+    
+
    
 
-    #conc_mean, conc_std = dataset.conc_mean, dataset.conc_std
+    train_model(
+          global_mean,
+          global_std,
+          global_max_time,
+          global_max_dose,
+          main_params,
+          val_loader,
+          train_loader,
+          models, 
+          optimizer, 
+          scheduler, 
+          func_ae, 
+          reducer_ae,
+          initial_encoder_ae, 
+          encoder_ae,
+          noise_ae,
+          t_dense=combined,
+          n_epochs=1000,
+          warmup_epochs_noise=1000,
+          warmup_epochs_iiv=0,
+          smoothing_start_epoch=1000,
+          traing_against_validation=False,
+          enable_ae_training=True,
+          enable_nf_training=False,
+          enable_onlymedian_training=False, 
+          plot_from_training_records_enable=False,              
+          free_bits=1,                                            
+          df=df,
+          df_val=df_test,
+          dataset=dataset_train,
+          dataset_val=dataset_validation,
+          max_points_visible=1,   
+          print_epoch=1,
+          plot_epoch=1,
+          max_plots=50,
+          nr_col=5,
+          nr_row=10)  
+   
+    
+
+    
+    encoder = Encoder_Transformer_NF(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=64,hidden_flow_dim=16, num_heads=4, num_layers=2,num_flow_layers=3, dropout=0.1).to(device)
     func = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
     reducer = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
     initial_encoder = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
-    noise = TrainableNoise(dataset, size=1, init_add_std=3.2, init_prop_std=0).to(device)
+    noise = TrainableNoise(size=1, init_add_std=2, init_prop_std=0).to(device)
     #3.18
     models = {
     "func": func,
@@ -177,46 +165,18 @@ if __name__ == "__main__":
     # add any other models...
     } 
    
-    lr=0.0001
-
-    main_params = [
-        {"params": list(func.parameters()) + list(reducer.parameters()) + list(initial_encoder.parameters()) +list(encoder.parameters()) , "lr": lr},
-        {"params": list(noise.parameters()), "lr": lr},
-    ]
-    
-    optimizer = torch.optim.Adam(main_params, lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=7, verbose=True,min_lr=1e-4)  # Set your desired minimum LR here)
-
-    for name, model in models.items():
-          model.to(device)
-          print(f"{name} is on {next(model.parameters()).device}")
-
-   
-    batch_size =  max(1, int(len(dataset) * 0.05))
-    batch_size_val =  max(1, int(len(dataset_validation) * 0.05))
+    optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001)
 
 
 
-    dataloader = DataLoader(dataset, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
-    
-    dataloader_validation=DataLoader(dataset_validation, batch_size=batch_size_val,shuffle=True, collate_fn=collate_fn, num_workers=0)
-    dataloader_test=DataLoader(dataset_test, batch_size=batch_size,shuffle=True, collate_fn=collate_fn, num_workers=0)
-    p_dropout=0.0001
-    doses = torch.tensor([3, 8, 13, 18], dtype=torch.float32) / 24
-    time_points = torch.linspace(0, 1, steps=120)
-    combined = torch.cat((time_points, doses)).to(device)
-    combined, indices = torch.sort(combined)  # ensures ascending order
-
-
-   
-    
     train_model(
-        global_mean, 
+        global_mean,
         global_std,
-        p_dropout, 
+        global_max_time,
+        global_max_dose,
         main_params,
-        dataloader_validation,
-        dataloader,
+        val_loader,
+        train_loader,
         models, 
         optimizer, 
         scheduler, 
@@ -229,7 +189,7 @@ if __name__ == "__main__":
         n_epochs=1000,
         warmup_epochs_noise=1000,
         warmup_epochs_iiv=0,
-        smoothing_start_epoch=1000,
+        smoothing_start_epoch=0,
         traing_against_validation=False,
         enable_ae_training=False,
         enable_nf_training=False,
@@ -238,8 +198,8 @@ if __name__ == "__main__":
         free_bits=1,                                            
         df=df,
         df_val=df_test,
-        dataset=dataset,
-        dataset_val=dataset_test,
+        dataset=dataset_train,
+        dataset_val=dataset_validation,
         max_points_visible=1,   
         print_epoch=1,
         plot_epoch=1,
@@ -248,28 +208,7 @@ if __name__ == "__main__":
         nr_row=10)  
  
 
-   # load_models(models, save_dir, "Finished_model1")
-             
 
-#    predict_and_evaluate_mse(
- #   enable_ae_training=False,
-  #  enable_nf_training=True,
- #   noise=noise,
- #   df=df_test,
- #   models=models,
- #   dataloader=dataloader_test,
-#    dataset=dataset_test,
- #   t_dense=torch.linspace(0, 1, steps=50),
-#    max_points_visible=0.1)
-
-
-
-   #save_models(models, save_dir, "Finished_model1")
-
-   # MSE 15.
-   
-    #decoder = Encoder_Transformer_NF(...)  # same args as decoder1
- 
 
 
 
@@ -279,69 +218,25 @@ if __name__ == "__main__":
 # -----------------------
 
 
+
 #
 # Population prediction vs data
 #
 
 
 ### Predictions without encoder
-vpc_with_encoder(global_max_dose,
-    global_mean, 
-    global_std,
-    enable_ae_training=False,
-    enable_nf_training=False,
-    df_training=df,
-    df=df,
-    dataset=dataset_plot,
-    latent_dim=latent_dim,
-    dim_parameters=dim_parameter_encoder,
-    initial_encoder=initial_encoder,
-    encoder=encoder,
-    func=func,
-    reducer=reducer,
-    noise=noise,
-    ODEWrapper=ODEWrapper,
-    t_dense=torch.linspace(0, 1, steps=120),
-    compartment="C2",
-    num_simulated_total=1000,
-    add_noise_to_prediction=True
-)
-
-vpc_with_encoder(global_max_dose,
-    global_mean, 
-    global_std,
-    enable_ae_training=False,
-    enable_nf_training=False,
-    df_training=df,
-    df=df_test,
-    dataset=dataset_test,
-    latent_dim=latent_dim,
-    dim_parameters=dim_parameter_encoder,
-    initial_encoder=initial_encoder,
-    encoder=encoder,
-    func=func,
-    reducer=reducer,
-    noise=noise,
-    ODEWrapper=ODEWrapper,
-    t_dense=torch.linspace(0, 1, steps=120),
-    compartment="C2",
-    num_simulated_total=1000,
-    add_noise_to_prediction=False
-)
-
-rf_predict_params_from_encoder_validation(df, dataset_plot, df_test, dataset_test,encoder, latent_dim, dim_parameter_encoder,device=None, n_estimators=200, random_state=42)
-
-
 vpc(global_max_dose,
+    global_max_time,
     global_mean, 
     global_std,
     onlymedian=False,
-    df_training=df,
+    df_training=df_validation,
     df=df,
-    dataset=dataset_plot,
+    dataset=train_base_dataset,
     latent_dim=latent_dim,
     dim_parameters=dim_parameter_encoder,
     initial_encoder=initial_encoder,
+    encoder=encoder,
     func=func,
     reducer=reducer,
     noise=noise,
@@ -349,22 +244,118 @@ vpc(global_max_dose,
     t_dense=torch.linspace(0, 1, steps=120),
     compartment="C2",
     num_simulated_total=1000,
+    enable_ae_training=True,
+    enable_nf_training=False,
     add_noise_to_prediction=False
 )
 
+
 vpc(global_max_dose,
+    global_max_time,
     global_mean, 
     global_std,
     onlymedian=False,
     df_training=df_test,
-    df=df_test,
+    df=df,
     dataset=dataset_test,
     latent_dim=latent_dim,
     dim_parameters=dim_parameter_encoder,
     initial_encoder=initial_encoder,
+    encoder=encoder,
     func=func,
     reducer=reducer,
     noise=noise,
+    ODEWrapper=ODEWrapper,
+    t_dense=torch.linspace(0, 1, steps=120),
+    compartment="C2",
+    num_simulated_total=1000,
+    enable_ae_training=True,
+    enable_nf_training=False,
+    add_noise_to_prediction=False
+)
+
+rf_predict_params_from_encoder_validation(df, train_base_dataset, df_test, dataset_test,encoder, latent_dim, dim_parameter_encoder,device=None, n_estimators=200, random_state=42)
+
+
+vpc(global_max_dose,
+    global_max_time,
+    global_mean, 
+    global_std,
+    onlymedian=False,
+    df_training=df_validation,
+    df=df,
+    dataset=train_base_dataset,
+    latent_dim=latent_dim,
+    dim_parameters=dim_parameter_encoder,
+    initial_encoder=initial_encoder,
+    encoder=encoder,
+    func=func,
+    reducer=reducer,
+    noise=noise,
+    ODEWrapper=ODEWrapper,
+    t_dense=torch.linspace(0, 1, steps=120),
+    compartment="C2",
+    num_simulated_total=1000,
+    enable_ae_training=False,
+    enable_nf_training=False,
+    add_noise_to_prediction=False
+)
+
+
+vpc(global_max_dose,
+    global_max_time,
+    global_mean, 
+    global_std,
+    onlymedian=False,
+    df_training=df_test,
+    df=df,
+    dataset=dataset_test,
+    latent_dim=latent_dim,
+    dim_parameters=dim_parameter_encoder,
+    initial_encoder=initial_encoder,
+    encoder=encoder,
+    func=func,
+    reducer=reducer,
+    noise=noise,
+    ODEWrapper=ODEWrapper,
+    t_dense=torch.linspace(0, 1, steps=120),
+    compartment="C2",
+    num_simulated_total=1000,
+    enable_ae_training=False,
+    enable_nf_training=False,
+    add_noise_to_prediction=False
+)
+
+
+    
+
+vpc_all(
+    global_max_dose=global_max_dose,
+    global_max_time=global_max_time,
+    global_mean=global_mean,
+    global_std=global_std,
+    onlymedian=False,
+    dataset_1=dataset_validation,
+    dataset_2=dataset_test,  # test dataset
+    df1=df_validation,
+    df2=df_test,
+    latent_dim=latent_dim,
+    dim_parameters=dim_parameter_encoder,
+    
+    # AE models
+    encoder_ae=encoder_ae,
+    initial_encoder_ae=initial_encoder_ae,
+    func_ae=func_ae,
+    reducer_ae=reducer_ae,
+    noise_ae=noise_ae,
+    
+    # VAE/NF models
+    encoder_vae=encoder,
+    initial_encoder_vae=initial_encoder,
+    func_vae=func,
+    reducer_vae=reducer,
+    noise_vae=noise,
+    
     ODEWrapper=ODEWrapper,
     t_dense=combined,
     compartment="C2",
@@ -375,12 +366,10 @@ vpc(global_max_dose,
 
 
 
+plot_encoder_mu_vs_params(df, train_base_dataset, encoder, latent_dim,dim_parameter_encoder, device=None)
 
 
-plot_encoder_mu_vs_params(df, dataset_plot, encoder, latent_dim,dim_parameter_encoder, device=None)
-
-rf_predict_params_from_encoder_validation(df, dataset_plot, df_validation, dataset_validation,encoder, latent_dim, dim_parameter_encoder,device=None, n_estimators=200, random_state=42)
-rf_predict_params_from_encoderanddose_validation(df, dataset_plot, df_validation, dataset_validation,encoder, latent_dim, dim_parameter_encoder,device=None, n_estimators=200, random_state=42)
+rf_predict_params_from_encoder_validation(df, train_base_dataset, df_validation, dataset_validation,encoder, latent_dim, dim_parameter_encoder,device=None, n_estimators=200, random_state=42)
 
 
-plot_individual_fits(global_max_dose,global_mean, global_std,False, False, dataset_plot, df, latent_dim, noise,encoder, func, reducer, initial_encoder, ODEWrapper, combined,max_individuals=20, n_samples=100, device=device,truncation=0, add_noise=True)
+plot_individual_fits(global_max_dose,global_mean, global_std,False, False, train_base_dataset, df, latent_dim, noise,encoder, func, reducer, initial_encoder, ODEWrapper, combined,max_individuals=20, n_samples=100, device=device,truncation=0, add_noise=True)
