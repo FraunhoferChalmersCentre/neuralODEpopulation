@@ -36,7 +36,7 @@ from torchdiffeq import odeint
 
 
 from lib.utils.my_utils import (
-    collate_fn, collate_fn_simulated,  ODEWrapper, torch_linear_interpolate2, batch_linear_interpolate_1d,
+    collate_fn, collate_fn,  ODEWrapper, torch_linear_interpolate2, batch_linear_interpolate_1d,
     destandardize_concentration, pad_dose_times, truncate_time_series, pad_sequence
 )
 

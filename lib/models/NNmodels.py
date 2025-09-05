@@ -102,20 +102,26 @@ class ODEFunc(nn.Module):
     def dirac_pulse(self, t, dose_times, dose_amounts, dose_mask):
         sigma = self.get_sigma()
         diff = t - dose_times  # [batch_size, num_doses]
-
-        dose_mask = dose_mask.unsqueeze(-1)  # [1920, 4, 1]
+        
+       # dose_mask = dose_mask.unsqueeze(-1)  # [1920, 4, 1]
 
         # Only consider doses in the past 
         mask = (diff >= 0).float() * dose_mask.float()
         
         gauss = gauss = torch.exp(-0.5 * (diff / sigma) ** 2) #torch.exp(-0.5 * (diff / sigma) ** 2) / (sigma * (2 * 3.1415) ** 0.5)
         gauss = gauss * mask
+   
+    
+        dose_amounts = dose_amounts.squeeze(-1) if dose_amounts.dim() == 3 else dose_amounts  # [batch, num_doses]
 
+
+        
         weighted = gauss * dose_amounts
+        
+        
         dose_signal = weighted.sum(dim=1, keepdim=True)
     
-            
-    
+      
 
         return dose_signal
 
@@ -129,17 +135,17 @@ class ODEFunc(nn.Module):
         if keep_mask is None:
             keep_mask = torch.ones(batch_size, 1, device=device)  # All rows are "kept"
     
-      
- 
+   
+         
      
         dose_amounts_squeezed = dose_amounts.squeeze(-1)  # [10, 4]
         dose_exp = dose_amounts_squeezed[ :,0].unsqueeze(1)  # shape [4, 1]
         dose_input = self.dirac_pulse(t, dose_times, dose_amounts, dose_mask)  # [batch_size, 1]
+        
+        
 
-
-        inp_dose= dose_input.squeeze(-1) # torch.cat([dose_exp, dose_input.squeeze(-1)],dim=1)
-        inp_dose2= torch.cat([x[:, -self.dim_parameter_encoder:], inp_dose* self.dose_scale],dim=1)
-       # inp_dose2= torch.cat([x, inp_dose* self.dose_scale,dose_exp],dim=1)
+        
+        inp_dose2= torch.cat([x[:, -self.dim_parameter_encoder:], dose_input* self.dose_scale],dim=1)
 
 
         beta=self.beta(inp_dose2) 
@@ -197,7 +203,6 @@ class TrainableNoise(nn.Module):
 
     def forward(self, x_pred):
         sigma_add = self.sigma_add
-
         if self.use_prop:
             sigma_prop_value = self.sigma_prop.view(
                 *([1] * (x_pred.dim() - self.sigma_prop.dim())), *self.sigma_prop.shape
@@ -205,9 +210,12 @@ class TrainableNoise(nn.Module):
             sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop_value * x_pred)**2)
         else:
             sigma_total = sigma_add
-
+    
+        sigma_total = torch.clamp(sigma_total, min=1e-6)
+    
+        # Reparameterization trick: eps is independent, gradient flows through sigma_total
         eps = torch.randn_like(x_pred)
-        return x_pred + sigma_total * eps
+        return x_pred + sigma_total * eps  # gradients flow through sigma_total
 
     def nll(self, x_true, x_pred, mask=None):
         sigma_add = self.sigma_add
