@@ -38,7 +38,7 @@ import math
 import os
 
 import torch.nn.functional as F
-from lib.utils.my_utils import *
+#from lib.utils.my_utils import *
 
 
 
@@ -50,8 +50,9 @@ class ODEFunc(nn.Module):
         super().__init__()
         self.dim_parameter_encoder = dim_parameter_encoder  
         self.dim_latent = latent_dim
+        
         self.net = nn.Sequential(
-            nn.Linear((latent_dim+dim_parameter_encoder), hid_dim),
+            nn.Linear((latent_dim+dim_parameter_encoder+1), hid_dim),
             nn.SELU(),
             nn.Linear(hid_dim, hid_dim),
             nn.SELU(),
@@ -59,21 +60,12 @@ class ODEFunc(nn.Module):
             nn.SELU(),
             nn.Linear(hid_dim, latent_dim ))
         
-
-
-        self.skip = nn.Sequential(
-            nn.Linear((latent_dim+dim_parameter_encoder), latent_dim))
-
-
-        self.beta = nn.Sequential(
-        nn.Linear(1+dim_parameter_encoder, hid_dim),
-        nn.SELU(),
-   
-        nn.Linear(hid_dim, latent_dim))
-      
-   
-        self.dose_scale = nn.Parameter(torch.tensor(10.0))  # initialize scale > 1
     
+        self.skip = nn.Sequential(
+            nn.Linear((latent_dim+dim_parameter_encoder+1), latent_dim))
+   
+   
+
 
         self.log_sigma = nn.Parameter(torch.log(torch.tensor(0.05)))
 
@@ -98,7 +90,7 @@ class ODEFunc(nn.Module):
     def get_sigma(self):
         # Ensure positivity with exp()
        return torch.exp(self.log_sigma)  
-     #  return torch.tensor(0.01)  # or any fixed positive value
+    #  return torch.tensor(0.01)  # or any fixed positive value
     def dirac_pulse(self, t, dose_times, dose_amounts, dose_mask):
         sigma = self.get_sigma()
         diff = t - dose_times  # [batch_size, num_doses]
@@ -108,26 +100,18 @@ class ODEFunc(nn.Module):
         # Only consider doses in the past 
         mask = (diff >= 0).float() * dose_mask.float()
         
-        gauss = gauss = torch.exp(-0.5 * (diff / sigma) ** 2) #torch.exp(-0.5 * (diff / sigma) ** 2) / (sigma * (2 * 3.1415) ** 0.5)
+        gauss  = torch.exp(-0.5 * (diff / sigma) ** 2) #torch.exp(-0.5 * (diff / sigma) ** 2) / (sigma * (2 * 3.1415) ** 0.5)
         gauss = gauss * mask
    
     
         dose_amounts = dose_amounts.squeeze(-1) if dose_amounts.dim() == 3 else dose_amounts  # [batch, num_doses]
-
-
         
         weighted = gauss * dose_amounts
-        
-        
+         
         dose_signal = weighted.sum(dim=1, keepdim=True)
-    
-      
 
         return dose_signal
 
-
-
-  
 
     def forward(self, t, x, dose_times,dose_amounts, dose_mask, keep_mask=None):
         batch_size = x.size(0)
@@ -138,21 +122,25 @@ class ODEFunc(nn.Module):
    
          
      
-        dose_amounts_squeezed = dose_amounts.squeeze(-1)  # [10, 4]
-        dose_exp = dose_amounts_squeezed[ :,0].unsqueeze(1)  # shape [4, 1]
+        
+        
         dose_input = self.dirac_pulse(t, dose_times, dose_amounts, dose_mask)  # [batch_size, 1]
+        dose_amounts = dose_amounts.squeeze(-1)
         
-        
+      
+ 
+        inp_dose2= torch.cat([x, dose_input* 10],dim=1)
 
-        
-        inp_dose2= torch.cat([x[:, -self.dim_parameter_encoder:], dose_input* self.dose_scale],dim=1)
 
 
-        beta=self.beta(inp_dose2) 
-        dxdt_deep = self.net(x)
-        dxdt_skip=self.skip(x)
-        dxdt=dxdt_deep  + dxdt_skip +beta
+        dxdt_deep = self.net(inp_dose2)
+        dxdt_skip=self.skip(inp_dose2)
+
+   
+        #
+        dxdt=dxdt_deep      +  dxdt_skip 
         
+        dxdt = dxdt
         
         zero = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
         dxdt_concat = torch.cat([dxdt, zero], dim=1)
@@ -217,9 +205,10 @@ class TrainableNoise(nn.Module):
         eps = torch.randn_like(x_pred)
         return x_pred + sigma_total * eps  # gradients flow through sigma_total
 
-    def nll(self, x_true, x_pred, mask=None):
+    def nll(self, x_true, x_pred, mask=None, auc_tensor=None):
         sigma_add = self.sigma_add
-
+        x_pred = torch.clamp(x_pred, min=-1e6, max=1e6)
+      #  print(x_pred)
         if self.use_prop:
             sigma_prop_value = self.sigma_prop.view(
                 *([1] * (x_pred.dim() - self.sigma_prop.dim())), *self.sigma_prop.shape
@@ -227,12 +216,23 @@ class TrainableNoise(nn.Module):
             sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop_value * x_pred)**2)
         else:
             sigma_total = sigma_add
-
+    
         sigma_total = torch.clamp(sigma_total, min=1e-6)  # avoid div by zero
+        
+    
+   
+      #  x_true_log = torch.log(x_true+1e-8)
+       # x_pred_log = torch.log(x_pred+1e-8)
+            
+      
 
+       # nll_elementwise = (x_true_log - x_pred_log) ** 2 #0.5 * ((x_true_log - x_pred_log) / sigma_add) ** 2 + torch.log(sigma_add)
+      #  mse_elementwise = (x_true_log - x_pred_log) ** 2
+        
+        
         nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
         mse_elementwise = (x_true - x_pred) ** 2
-
+        
         if mask is not None:
             if nll_elementwise.dim() > mask.dim():
                 mask = mask.unsqueeze(-1)
@@ -242,10 +242,14 @@ class TrainableNoise(nn.Module):
             nll_value = nll_elementwise.sum() / total_valid
             mse_value = mse_elementwise.sum() / total_valid
         else:
-            nll_value = nll_elementwise.mean()
-            mse_value = mse_elementwise.mean()
-
+            nll_value = nll_elementwise.sum()
+            mse_value = mse_elementwise.sum()
+    
+        # === Scale only MSE with AUC if provided ===
+ 
+    
         return nll_value, mse_value
+
 
     def sample(self, x_pred, n_samples=1):
         sigma_add = self.sigma_add
@@ -393,10 +397,14 @@ class Encoder_Transformer_NF(nn.Module):
         mask: optional [B, T] bool mask for valid positions
         """
         inp = torch.cat([t.unsqueeze(-1), x.unsqueeze(-1)], dim=-1)  # [B, T, 2]
-        h = self.selu(self.input_proj1(inp))                         # [B, T, hidden_dim]
-        h = self.input_proj2(h)                                      # [B, T, model_dim]
-        h = self.pos_encoder(h)
-    
+      #  print("inp min/max/mean:", inp.min().item(), inp.max().item(), inp.mean().item())
+        h1 = self.selu(self.input_proj1(inp))
+      #  print("h1 min/max/mean:", h1.min().item(), h1.max().item(), h1.mean().item())
+        h2 = self.input_proj2(h1)
+      #  print("h2 min/max/mean:", h2.min().item(), h2.max().item(), h2.mean().item())
+        h = self.pos_encoder(h2)
+    #    print("h after pos_encoder min/max/mean:", h.min().item(), h.max().item(), h.mean().item())
+
         if mask is None:
        # All positions are valid if mask not provided
             mask = torch.ones(t.shape[0], t.shape[1], dtype=torch.bool, device=t.device)
@@ -418,18 +426,20 @@ class Encoder_Transformer_NF(nn.Module):
         
       
         
-        mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
-    #    mu_q=torch.zeros_like(mu_q)
-        logvar_q = self.fc_logvar2(self.selu(self.fc_logvar1(pooled)))
+        mu_q = torch.clamp(self.fc_mu2(self.selu(self.fc_mu1(pooled))), -1e2, 1e2)
+        logvar_q = torch.clamp(self.fc_logvar2(self.selu(self.fc_logvar1(pooled))), -10, 10)
+
         
         mu_q[all_masked] = 0.0
         logvar_q[all_masked] = 0.0  # logvar=0 → std=1
         
-        
+        logvar_q = torch.clamp(logvar_q, -10, 10)  # choose bounds to keep std reasonable
+
         std = torch.exp(0.5 * logvar_q)
         eps = torch.randn_like(std)
         z0 = mu_q + eps * std
-    
+        z0 = torch.clamp(z0, -1e2, 1e2)
+
         if self.training:
                # z_k, log_det = self.flow(z0, cond_vec)  # pass both z0 and pooled conditioning vector
                 z_k, log_det = self.flow(z0)  # pass both z0 and pooled conditioning vector
@@ -438,7 +448,7 @@ class Encoder_Transformer_NF(nn.Module):
                 z_k = mu_q
                 log_det = torch.zeros(z_k.size(0), device=z_k.device)
                 z_k_0 = torch.zeros_like(z0)
-
+        
     
         return z_k_0, z_k, mu_q, logvar_q, log_det
 
@@ -547,85 +557,109 @@ class PlanarFlow2(nn.Module):
        return z_new, log_det  
    
     
+
 class SimpleDecoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim=128):
         super().__init__()
-        self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        self.relu = nn.SELU()        # instantiate ReLU module here
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 1)
-        self.relu2 = nn.ReLU()        # instantiate ReLU module here
-       
+        
+        # Define the entire network as a single sequential
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.SELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SELU(),
+            nn.Linear(hidden_dim, 1)#,
+            #nn.ReLU() # ensures positive output
+        )
 
-        nn.init.zeros_(self.fc3.weight)
-        nn.init.constant_(self.fc3.bias, -1)
-
+        # Initialize the last layer
+      #  nn.init.zeros_(self.net[-2].weight)  # second-to-last layer is last Linear
+        #nn.init.constant_(self.net[-2].bias, -1)
+        last_linear = self.net[4]  # last Linear layer before Softplus
+        nn.init.zeros_(last_linear.weight)  # small weights -> output ~0
+        nn.init.constant_(last_linear.bias, 1.0)  # bias ~0
+        # EMA buffers
         for name, param in self.named_parameters():
-           self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
-           
+            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
         self.register_buffer("iteration", torch.tensor(1.0))
-           
-           
-           
+
+    def forward(self, z):
+        return self.net(z).squeeze(-1)
 
     def update_ema(self, alpha=0.1):
-          with torch.no_grad():
-              for name, param in self.named_parameters():
-                  ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                  ema_param = ema_param.to(param.device)  # ensure same device
-                  ema_param.mul_(1 - alpha).add_(alpha * param.data)
-                  # Re-assign back the buffer (optional, since inplace)
-                  setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
-              self.iteration += 1.0
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                ema_param = ema_param.to(param.device)
+                ema_param.mul_(1 - alpha).add_(alpha * param.data)
+                setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
+            self.iteration += 1.0
 
     def apply_ema_weights(self):
         with torch.no_grad():
             for name, param in self.named_parameters():
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
-    def forward(self, z):
-        x = self.relu(self.fc1(z))  # call the instance, not the class
-        y=self.relu(self.fc2(x))
-        concentration = self.fc3(y)
-        #concentration = self.relu(z)
 
-        return concentration.squeeze(-1)
 
 class InitialConditionEncoder(nn.Module):
     def __init__(self, latent_dim, hidden_dim):
         super().__init__()
-        self.fc1 = nn.Linear(1, hidden_dim)
-        self.SELU = nn.SELU()        # instantiate ReLU module here
-        self.fc2 = nn.Linear(hidden_dim, latent_dim)
-        
-        for name, param in self.named_parameters():
-            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
-            
-        self.register_buffer("iteration", torch.tensor(1.0))
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim),
+            nn.ReLU() # ensures positive output
+        )
+
 
     def forward(self, x):
-        h = self.SELU(self.fc1(x))   # call the instance
-        z0 = self.fc2(h)
+        z0 = self.net(x)
         return z0
     
     
+
+
+
+class InitialConditionVAEEncoder(nn.Module):
+    def __init__(self, latent_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(1, hidden_dim)
+        self.SELU = nn.SELU()
+        
+        # Two separate layers for mean and log variance
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
+        # EMA buffers
+        for name, param in self.named_parameters():
+            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
+        self.register_buffer("iteration", torch.tensor(1.0))
+
+    def forward(self, x):
+        h = self.SELU(self.fc1(x))
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        z = self.reparameterize(mu, logvar)
+        return z, mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
     def update_ema(self, alpha=0.1):
         with torch.no_grad():
-           def update_ema(self, alpha=0.1):
-                with torch.no_grad():
-                    for name, param in self.named_parameters():
-                        ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                        ema_param = ema_param.to(param.device)  # ensure same device
-                        ema_param.mul_(1 - alpha).add_(alpha * param.data)
-                        # Re-assign back the buffer (optional, since inplace)
-                        setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
-                    self.iteration += 1.0
-
+            for name, param in self.named_parameters():
+                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
+                ema_param = ema_param.to(param.device)
+                ema_param.mul_(1 - alpha).add_(alpha * param.data)
+                setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
+            self.iteration += 1.0
 
     def apply_ema_weights(self):
         with torch.no_grad():
             for name, param in self.named_parameters():
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
-                
-  
+ 

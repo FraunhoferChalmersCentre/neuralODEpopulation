@@ -4,7 +4,7 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
 
-from lib.utils.data_generation import approx_dirac_delta_vectorized, pk_2cpt_step, solve_individual_vectorized, simulate_2cpt_and_save_vectorized
+from lib.utils.utils_data_generation import approx_dirac_delta_vectorized, pk_2cpt_step, solve_individual_vectorized, simulate_2cpt_and_save_vectorized
 
 
 def main():
@@ -14,14 +14,14 @@ def main():
 
     # Set default save directory and path
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "test.csv")
+    default_save_path = os.path.join(default_save_dir, "simulated_train_data8.csv")
 
     parser = argparse.ArgumentParser(description="Simulate and save 2CPT PK data.")
     parser.add_argument(
         "--save_path",
         type=str,
         default=default_save_path,
-        help="Path to save the simulated CSV file (default: lib/data/simulated_data1.csv)",
+        help="Path to save the simulated CSV file (default: lib/data/simulated_training_data6.csv)",
     )
     parser.add_argument(
         "--plot",
@@ -37,12 +37,12 @@ def main():
 
     # Run simulation
     simulate_2cpt_and_save_vectorized(
-        n_individuals=50,
-        add_e=5,
-        prop_e=0.001,
+        n_individuals=1000,
+        add_e=2,
+        prop_e=0.0001,
         dose_amounts=[100,200],
        # dose_times=[3,6,10], #, 9, 14, 15],
-        dose_times=[3, 8, 13, 18],
+        dose_times=[3, 8,13,18],
 
         save_path=args.save_path,
         plot=True,

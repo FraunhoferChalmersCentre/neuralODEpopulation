@@ -154,6 +154,7 @@ class TrajectoryDataset(Dataset):
         self,
         path,
         compartment='DV',
+        use_dose_normalization=True,
         augment_with_prefixes=False,
         augment_dose_times=False,
         dose_jitter_std=0.01,
@@ -161,15 +162,18 @@ class TrajectoryDataset(Dataset):
         max_time=None,
         conc_mean=None,
         conc_std=None,
-        sex_max_abs_dict=None,
+        dose_max_abs_dict=None,
         subset_ids=None
     ):
+  
+
         # === Step 1: Load data ===
         self.df = pd.read_csv(path, sep=";")
         self.compartment = compartment
         self.augment = augment_with_prefixes
         self.augment_dose_times = augment_dose_times
         self.dose_jitter_std = dose_jitter_std
+        self.use_dose_normalization = use_dose_normalization
 
         # Replace '.' with NaN and convert numeric
         self.df.replace('.', pd.NA, inplace=True)
@@ -196,65 +200,115 @@ class TrajectoryDataset(Dataset):
 
         self.df['AMT_norm'] = self.df['AMT'] / self.max_dose
         self.df['TIME_norm'] = self.df['TIME'] / self.max_time
-        self.df['DV_norm'] = (self.df[compartment] - self.conc_mean) / self.conc_std
+        self.df[f'{compartment}_norm'] = (self.df[compartment] - self.conc_mean) / self.conc_std
 
-        # === Step 3: Extract trajectories ===
+        # === Step 3: Optional dose normalization ===
+        if self.use_dose_normalization:
+            if dose_max_abs_dict is None:
+                dose_group_median = {}
+                for dose, df_dose in self.df.groupby('AMT'):
+                    median_val = float(df_dose[compartment].median())
+                    dose_group_median[dose] = median_val if median_val != 0 else 1.0
+                self.dose_max_abs = dose_group_median
+            else:
+                self.dose_max_abs = dose_max_abs_dict
+
+            self.df[f'{compartment}_dose_norm'] = self.df.apply(
+                lambda row: row[compartment] / (self.dose_max_abs[row['AMT']] + 1e-8),
+                axis=1
+            )
+
+        # === Step 4: Extract trajectories ===
         self.trajectories = self._extract_trajectories()
 
-        # === Step 4: Generate augmented samples ===
+        # === Step 5: Generate augmented samples ===
         self.samples = self._generate_samples(self.trajectories)
 
     def _extract_trajectories(self):
-         trajectories = []
-
-         for subject_id, group in self.df.groupby('ID'):
-             t = torch.tensor(group['TIME_norm'].values, dtype=torch.float32)
-             x_global = torch.tensor(group['DV_norm'].values, dtype=torch.float32)
-             amt_val = group['AMT'].dropna().values
-             amt = torch.tensor(amt_val[0], dtype=torch.float32) / self.max_dose if len(amt_val) > 0 else torch.tensor(0.0)
-             
-             # Get DOSE TIME for the subject
-             dose_times_list = group['DOSE TIME'].values[0] if len(group['DOSE TIME'].values) > 0 else []
-             dose_times = torch.tensor(dose_times_list, dtype=torch.float32)/self.max_time
-
-             trajectories.append({
-                 't': t,
-                 'x_global': x_global,
-                 'amt': amt,
-                 'dose_times': dose_times,
-                 'subject_id': subject_id,
-             })
-         return trajectories
-
+        trajectories = []
+    
+        for subject_id, group in self.df.groupby('ID'):
+            t = torch.tensor(group['TIME_norm'].values, dtype=torch.float32)
+            x_global = torch.tensor(group[f'{self.compartment}_norm'].values, dtype=torch.float32)
+    
+            if self.use_dose_normalization:
+                x_dose = torch.tensor(group[f'{self.compartment}_dose_norm'].values, dtype=torch.float32)
+            else:
+                x_dose = None
+    
+            amt_val = group['AMT'].dropna().values
+            amt = torch.tensor(amt_val[0], dtype=torch.float32) / self.max_dose if len(amt_val) > 0 else torch.tensor(0.0)
+    
+            dose_times_list = group['DOSE TIME'].values[0] if len(group['DOSE TIME'].values) > 0 else []
+            dose_times = torch.tensor(dose_times_list, dtype=torch.float32) / self.max_time
+    
+            # === Compute MEAN of raw (unnormalized) concentration values ===
+            mean_val = float(group[self.compartment].fillna(0).mean())
+    
+            trajectories.append({
+                't': t,
+                'x_global': x_global,
+                'amt': amt,
+                'dose_times': dose_times,
+                'subject_id': subject_id,
+                'x_dose': x_dose,
+                'auc': torch.tensor(mean_val, dtype=torch.float32)  # <-- replace auc with mean
+            })
+        return trajectories
+    
+    
     def _generate_samples(self, trajectories):
         augmented = []
         for traj in trajectories:
             t = traj['t']
             x_global = traj['x_global']
+            x_dose = traj['x_dose']
             amt = traj['amt']
             dose_times = traj['dose_times']
+            auc = traj['auc']
             subject_id_str = str(traj['subject_id'])
-
+    
             # Original sample
-            augmented.append({
+            sample = {
                 't': t,
                 'x_global': x_global,
                 'amt': amt,
                 'dose_times': dose_times,
                 'subject_id': subject_id_str,
-            })
-
-            # Optional prefix augmentation
+                'auc': auc
+            }
+            if self.use_dose_normalization:
+                sample['x_dose'] = x_dose
+            augmented.append(sample)
+    
+            # Optional prefix/suffix augmentation
             if self.augment:
                 T = len(t)
                 for end in range(1, T):
-                    augmented.append({
+                    sample_end = {
                         't': t[:end],
                         'x_global': x_global[:end],
                         'amt': amt,
                         'dose_times': dose_times,
                         'subject_id': subject_id_str + f"_prefix{end}",
-                    })
+                        'auc': auc
+                    }
+                    if self.use_dose_normalization:
+                        sample_end['x_dose'] = x_dose[:end]
+                    augmented.append(sample_end)
+    
+                for start in range(1, T - 1):
+                    sample_start = {
+                        't': t[start:],
+                        'x_global': x_global[start:],
+                        'amt': amt,
+                        'dose_times': dose_times,
+                        'subject_id': subject_id_str + f"_suffix{start}",
+                        'auc': auc
+                    }
+                    if self.use_dose_normalization:
+                        sample_start['x_dose'] = x_dose[start:]
+                    augmented.append(sample_start)
         return augmented
 
     def __len__(self):
@@ -276,14 +330,20 @@ class TrajectoryDataset(Dataset):
 
 
 
+
+
 def collate_fn(batch):
     t_list = [s['t'] for s in batch]
     x_global_list = [s['x_global'] for s in batch]
     dose_list = [s['amt'] for s in batch]
-    dose_times_list = [s['dose_times'] for s in batch]  # <-- new
+    dose_times_list = [s['dose_times'] for s in batch]
     id_list = [s['subject_id'] for s in batch]
+    auc_list = [s['auc'] for s in batch]
 
-    # Pad time & x
+    # Check if dose-normalized values exist
+    x_dose_list = [s['x_dose'] for s in batch] if 'x_dose' in batch[0] else None
+
+    # Pad time & x_global
     t_padded = pad_sequence(t_list, batch_first=True)
     x_global_padded = pad_sequence(x_global_list, batch_first=True)
 
@@ -294,8 +354,17 @@ def collate_fn(batch):
         mask[i, :len(t)] = 1
 
     dose_tensor = torch.stack(dose_list)
+    auc_tensor = torch.stack(auc_list)
 
-    return id_list, t_padded, x_global_padded, mask, dose_tensor, dose_times_list
+    if x_dose_list is not None:
+        x_dose_padded = pad_sequence(x_dose_list, batch_first=True)
+    else:
+        x_dose_padded = None
+
+    return id_list, t_padded, x_global_padded, mask, dose_tensor, dose_times_list, x_dose_padded, auc_tensor
+
+
+
 
 
 
@@ -312,7 +381,7 @@ def prepare_optimizer(models,device, lr=0.001):
                    list(models["reducer"].parameters()) +
                    list(models["initial_encoder"].parameters()) +
                    list(models["encoder"].parameters()), "lr": lr},
-        {"params": list(models["noise"].parameters()), "lr": lr*10}
+        {"params": list(models["noise"].parameters()), "lr": 10*lr}
     ]
     optimizer = torch.optim.Adam(main_params, lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -410,18 +479,17 @@ def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, gl
     test_loader  = DataLoader(test_dataset, batch_size=max(1, int(len(test_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
 
     # Combined dose + time tensor
-    doses = torch.tensor([3], dtype=torch.float32) / 24
+    #doses = torch.tensor([3], dtype=torch.float32) / 24
     time_points = torch.linspace(0, 1, steps=120)
-    combined = torch.cat((time_points, doses)).to(device)
-    combined, _ = torch.sort(combined)  # ensure ascending order
+  
 
-    return train_dataset, val_dataset, test_dataset, train_loader, val_loader,test_loader, combined
+    return train_dataset, val_dataset, test_dataset, train_loader, val_loader,test_loader, time_points
 
 def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_path_test,
                                         
                                            global_max_dose, global_max_time,
                                            global_mean, global_std, device,
-                                           batch_fraction=0.05, trunctation=1):
+                                           batch_fraction=0.05, trunctation=1,time_points=120):
     """
     Loads train/val/test datasets from CSV paths, creates DataLoaders, and generates
     the combined time+dose tensor.
@@ -489,9 +557,9 @@ def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_
    
 
    # doses = torch.tensor([3], dtype=torch.float32) / 24
-    time_points = torch.linspace(0, 1, steps=120)
+    time_points = torch.linspace(0, 1, steps=time_points)
     dose_times_tensor = torch.from_numpy(unique_times_np).float().to(time_points.device) / global_max_time
-    combined = torch.cat((time_points, dose_times_tensor)).to(device)
+    combined = torch.cat((time_points, dose_times_tensor))
     combined, _ = torch.sort(combined)  # ensure ascending order
 
     return train_dataset, val_dataset, test_dataset,train_base_dataset,  train_loader, val_loader, test_loader, combined, batch_size_train, batch_size_val, batch_size_test
