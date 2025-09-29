@@ -33,15 +33,15 @@ if __name__ == "__main__":
     sys.argv = ['script_name',
                 '--data_validation_path', 'lib/data/simulated_val_data8.csv', 
                 '--data_test_path', 'lib/data/simulated_test_data5.csv', 
-                '--data_path', 'lib/data/simulated_train_data8.csv',
+                '--data_path', 'lib/data/simulated_training_data_truncated.csv',
                 '--save_dir', 'models',
                 '--load_dir', 'models']
     
     from lib.utils.utils_preprocess import load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset, collate_fn
-    from lib.utils.utils_training import   train_loop_model, run_model_variant
+    from lib.utils.utils_training import   train_loop_model
     from lib.utils.utils_shared import ODEWrapper
-    from lib.utils.utils_post_processing import generate_dose_percentiles, build_dose_predictors_from_datasets, plot_individual_fits, vpc_true, plot_two_models_encoders_and_regression, vpc_2, plot_encoder_and_regression, linear_regression_log_params_from_encoder_validation, plot_encoder_vs_parameters, vpc
-    from lib.models.NNmodels import Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
+    from lib.utils.utils_post_processing import plot_encoder_vs_samples, plot_encoder_histograms, generate_dose_percentiles2, build_dose_predictors_from_datasets, plot_individual_fits, plot_two_models_encoders_and_regression, vpc_2, vpc
+    from lib.models.NNmodels import InitialConditionVAEEncoder, DoseClassifier, Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
     parser.add_argument("--data_path", type=str, required=True, help="Path to training CSV file")
@@ -72,8 +72,8 @@ if __name__ == "__main__":
     df_test=pd.read_csv(args.data_test_path, sep=';')
     
     
-    global_max_dose, global_max_time, global_mean, global_std, global_max_value=compute_global_stats(df)
-    dataset_train, dataset_val, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, t_dense, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders_simulated(args.data_path, args.data_validation_path, args.data_test_path, global_max_dose, global_max_time, global_mean, global_std, device, batch_fraction=0.1, trunctation=1,time_points=120)
+    global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df)
+    dataset_train, dataset_val, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, t_dense, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders_simulated(args.data_path, args.data_validation_path, args.data_test_path, global_max_dose, global_max_time, global_max_value,global_min_value, global_std, device, batch_fraction=0.1, trunctation=1,time_points=120)
 
     
     
@@ -95,7 +95,7 @@ if __name__ == "__main__":
     func_med = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
     reducer_med = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
     initial_encoder_med = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
-    noise_med = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
+    noise_med = TrainableNoise(size=1, init_add_std=2, init_prop_std=0).to(device)
     #3.18
     models = {
     "func": func_med,
@@ -106,11 +106,12 @@ if __name__ == "__main__":
     # add any other models...
     } 
     
-    save_models(models, save_dir, "med")
+   # load_models(models, save_dir, "med")
    
     optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001)
  
-    train_loop_model(p_dropout=0,
+    train_loop_model(
+        p_dropout=1,
     func_med=func_med,
     reducer_med=reducer_med,
     initial_encoder_med=initial_encoder_med,
@@ -119,8 +120,8 @@ if __name__ == "__main__":
     dataset_val=dataset_val,
     global_max_time=global_max_time,
     global_max_dose=global_max_dose,
-    global_mean=global_mean,
-    global_std=global_std,
+    global_max_value=global_max_value,
+    global_min=global_min_value,
     main_params=main_params,
     dataloader_val=val_loader,
     dataloader=train_loader,
@@ -162,8 +163,8 @@ if __name__ == "__main__":
         train_loader,
         global_max_dose,
         global_max_time,
-        global_mean,
-        global_std,
+        global_max_value,
+        global_min_value,
         dataset_train,
         latent_dim,
         dim_parameter_encoder,
@@ -177,10 +178,10 @@ if __name__ == "__main__":
         compartment="DV",
         onlymedian=True,
         enable_nf=False,
-        enable_ae=False,
+        enable_ae=True,
         enable_vae=False,
         add_noise_to_prediction=False,
-        num_simulated_total=10,
+        num_simulated_total=1000,
         normalization=False,
         truncation=1
     )
@@ -193,10 +194,7 @@ if __name__ == "__main__":
     initial_encoder_ae = InitialConditionEncoder(latent_dim, hidden_dim=8).to(device)
     noise_ae = TrainableNoise(size=1, init_add_std=2, init_prop_std=0).to(device)
     
-    encoder_ae.load_state_dict(encoder_med.state_dict())
-    func_ae.load_state_dict(func_med.state_dict())
-    reducer_ae.load_state_dict(reducer_med.state_dict())
-    initial_encoder_ae.load_state_dict(initial_encoder_med.state_dict())
+
     models = {
     "func": func_ae,
     "encoder": encoder_ae,
@@ -206,56 +204,62 @@ if __name__ == "__main__":
         }
         
     optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001)
-    
+  #  save_models(models, save_dir, "ae")
     
 
    
 
-    train_loop_model(0,
-    func_med=func_med,
-    reducer_med=reducer_med,
-    initial_encoder_med=initial_encoder_med,
-    encoder_med=encoder_med,
-    dataset=dataset_train,
-    dataset_val=dataset_val,
-    global_max_time=global_max_time,
-    global_max_dose=global_max_dose,
-    global_mean=global_mean,
-    global_std=global_std,
-    main_params=main_params,
-    dataloader_val=val_loader,
-    dataloader=train_loader,
-    models=models,
-    optimizer=optimizer,
-    scheduler=scheduler,
-    func=func_ae,
-    reducer=reducer_ae,
-    initial_encoder=initial_encoder_ae,
-    encoder=encoder_ae,
-    noise=noise_ae,
-    t_dense=t_dense,
-    n_epochs=1000,
-    warmup_epochs_noise=1000,
-    warmup_epochs_iiv=0,
-    smoothing_start_epoch=1000,
-    traing_against_validation=False,
-    enable_ae=True,
-    enable_vae=False,
-    enable_nf=False,
-    enable_onlymedian=False,
-    normalization=True,
-    plot_training=False,
-    free_bits=1,
-    truncation=1,
-    print_epoch=1,
-    plot_epoch=1,
-    max_plots=4,
-    nr_col=1,
-    nr_row=5
-)
+    train_loop_model(
+           p_dropout=0,
+       func_med=func_ae,
+       reducer_med=reducer_ae,
+       initial_encoder_med=initial_encoder_ae,
+       encoder_med=encoder_ae,
+       dataset=dataset_train,
+       dataset_val=dataset_val,
+       global_max_time=global_max_time,
+       global_max_dose=global_max_dose,
+       global_max_value=global_max_value,
+       global_min=global_min_value,
+       main_params=main_params,
+       dataloader_val=val_loader,
+       dataloader=train_loader,
+       models=models,
+       optimizer=optimizer,
+       scheduler=scheduler,
+       func=func_ae,
+       reducer=reducer_ae,
+       initial_encoder=initial_encoder_ae,
+       encoder=encoder_ae,
+       noise=noise_ae,
+       t_dense=t_dense,
+       n_epochs=1000,
+       warmup_epochs_noise=1000,
+       warmup_epochs_iiv=0,
+       smoothing_start_epoch=1000,
+       traing_against_validation=False,
+       enable_ae=True,
+       enable_vae=False,
+       enable_nf=False,
+       enable_onlymedian=False,
+       normalization=False,
+       plot_training=False,
+       free_bits=1,
+       truncation=1,
+       print_epoch=1,
+       plot_epoch=1,
+       max_plots=4,
+       nr_col=1,
+       nr_row=5
+   )
+    
 
   #  save_models(models, save_dir, "ae")
-    
+    plot_encoder_histograms(encoder_ae, initial_encoder_ae, func_ae, t_dense, reducer_ae, global_max_value, global_min_value, dataset_train, encoder_ae, latent_dim, device=None, truncation=1, normalization=False)
+    plot_encoder_vs_samples( encoder_med, initial_encoder_med, func_med,
+     t_dense, reducer_med, global_max_value, global_min_value,
+     dataset_train, encoder_ae, latent_dim, device=None, truncation=1, normalization=True)
+
     vpc(func_med,
               reducer_med,
               initial_encoder_med,
@@ -264,8 +268,8 @@ if __name__ == "__main__":
             train_loader,
             global_max_dose,
             global_max_time,
-            global_mean,
-            global_std,
+            global_max_value,
+            global_min_value,
             dataset_train,
             latent_dim,
             dim_parameter_encoder,
@@ -283,7 +287,7 @@ if __name__ == "__main__":
             enable_vae=False,
             add_noise_to_prediction=False,
             num_simulated_total=1000,
-            normalization=True,
+            normalization=False,
             truncation=1
         )
  
@@ -336,8 +340,8 @@ if __name__ == "__main__":
           dataset_val,
           global_max_time,
           global_max_dose,
-          global_mean,
-          global_std,
+          global_max_value,
+          global_min,
           main_params,
           val_loader,
           train_loader,
@@ -378,8 +382,8 @@ if __name__ == "__main__":
             train_loader,
             global_max_dose,
             global_max_time,
-            global_mean,
-            global_std,
+            global_max_value,
+            global_min,
             dataset_test,
             latent_dim,
             dim_parameter_encoder,
@@ -432,8 +436,8 @@ if __name__ == "__main__":
       dataset_val,
       global_max_time,
       global_max_dose,
-      global_mean,
-      global_std,
+      global_max_value,
+      global_min,
       main_params,
       val_loader,
       train_loader,
@@ -474,8 +478,8 @@ if __name__ == "__main__":
         train_loader,
         global_max_dose,
         global_max_time,
-        global_mean,
-        global_std,
+        global_max_value,
+        global_min,
         dataset_train,
         latent_dim,
         dim_parameter_encoder,
@@ -534,8 +538,8 @@ if __name__ == "__main__":
       dataset_val,
       global_max_time,
       global_max_dose,
-      global_mean,
-      global_std,
+      global_max_value,
+      global_min,
       main_params,
       val_loader,
       train_loader,
@@ -584,7 +588,7 @@ vpc_2(
     # Model 2
     encoder_vae, initial_encoder_vae, func_vae, reducer_vae, noise_ae, models,
     test_loader, dataset_test, val_loader, dataset_val,t_dense, latent_dim, dim_parameter_encoder,
-    global_max_time, global_max_dose, global_mean, global_std,
+    global_max_time, global_max_dose, global_max_value, global_min,
     "DV", ODEWrapper,
     add_noise_to_prediction=False, num_simulated_total=1000,
     onlymedian=False, enable_nf=False, enable_ae=False, enable_vae=True,normalization=True,
@@ -595,11 +599,11 @@ vpc_2(
 
 plot_two_models_encoders_and_regression(
     df, df_validation, dataset_train, dataset_val,
-    encoder_vae_norm, initial_encoder_vae_norm, func_vae_norm, reducer_vae_norm,
-    encoder_vae, initial_encoder_vae, func_vae, reducer_vae,
-    encoder_med, initial_encoder_med, func_med, reducer_med,
-    latent_dim, global_mean, global_std, t_dense,
-    device, enable_nf=False, enable_ae=True, enable_onlymedian=False, truncation=1, normalization=True,
+    encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
+    encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
+    encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
+    latent_dim, global_max_value, global_min, t_dense,
+    device, enable_nf=False, enable_ae=True, enable_onlymedian=False, truncation=0.5, normalization=True,
     dim_parameter_encoder=2
 )
 
@@ -609,7 +613,7 @@ plot_two_models_encoders_and_regression(
 build_dose_predictors_from_datasets(  dataset_train, dataset_val,
   encoder_vae_norm, initial_encoder_vae_norm, reducer_vae_norm, func_vae_norm,
   encoder_med, initial_encoder_med, reducer_med, func_med,
-  global_max_time, global_max_dose, global_mean, global_std,
+  global_max_time, global_max_dose, global_max_value, global_min,
   latent_dim, dim_parameter_encoder,t_dense,
   normalization=True, truncation=1, device=device)
 
@@ -617,13 +621,13 @@ build_dose_predictors_from_datasets(  dataset_train, dataset_val,
 
 
 
-generate_dose_percentiles(
-    dataset_train, t_dense, global_max_time, global_max_dose,global_mean,global_std,
+generate_dose_percentiles2(
+    dataset_train, t_dense, global_max_time, global_max_dose, global_max_value, global_min,
     encoder_med, initial_encoder_med, func_med, reducer_med,
-    encoder_med, initial_encoder_med, func_med, reducer_med,
-    latent_dim, dim_parameter_encoder,
-    enable_onlymedian=True, enable_ae=False, enable_nf=False,
-    normalization=True, truncation=1
-)
+    encoder_ae, latent_dim,
+    batch_size=32,
+    truncation=0.5,
+    save_csv_path="dose_data.csv",
+    device=None)
 
-
+plot_encoder_histograms(dataset_train, encoder_ae, latent_dim, device=None, truncation=None)

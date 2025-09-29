@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import norm
 
-from lib.utils.utils_preprocess import standardize_concentration, destandardize_concentration, collate_fn
-from lib.utils.utils_training import encode_latent, preprocess_batch, prepare_ode_input, make_predictions, prepare_ode_input_eval
+from lib.utils.Theophylline.utils_preprocess_theo import standardize_concentration, destandardize_concentration, collate_fn
+from lib.utils.Theophylline.utils_shared_theo import encode_latent, preprocess_batch, prepare_ode_input, make_predictions, prepare_ode_input_eval
 from torch.nn.utils.rnn import pad_sequence
 
 from contextlib import contextmanager
@@ -213,7 +213,7 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
            
                     unique_doses = sorted(set(entry['amt'].item() for entry in dataset))
                     
-                    print(unique_doses)
+                   # print(unique_doses)
                     num_doses = len(unique_doses)
                     num_simulated_per_dose = max(1, num_simulated_total // num_doses)
             
@@ -263,8 +263,9 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
                             )
                             
                             if enable_vae:
-                                eps = torch.randn(num_simulated_per_dose, dim_parameters, device=mu_q.device)
-                                z_refined =  eps
+                           
+                                z_refined =  torch.randn_like(z_refined)
+
                     
                       
                           
@@ -280,8 +281,9 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
                             )
                             
                             if enable_vae:
-                                eps = torch.randn(num_simulated_per_dose, latent_dim, device=mu_q.device)
-                                x0 =  eps
+                                
+                                x0 =  eps = torch.randn_like(x0)
+
                     
                             
                          
@@ -336,8 +338,7 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
             
           
 def vpc(models, dataloader, global_max_dose, global_max_time,  global_mean, 
-  global_std,
-         dataset, latent_dim,
+  global_std, dataset, latent_dim,
       dim_parameters, initial_encoder,encoder, func, reducer, noise, 
     t_dense,compartment,onlymedian, enable_nf, enable_ae, enable_vae_training, add_noise_to_prediction,  
     num_simulated_total,truncation
@@ -356,7 +357,6 @@ def vpc(models, dataloader, global_max_dose, global_max_time,  global_mean,
           func=func,
           reducer=reducer,
           noise=noise,
-
           num_simulated_total=num_simulated_total,
           add_noise_to_prediction=add_noise_to_prediction,
           enable_ae=enable_ae,
@@ -445,6 +445,7 @@ def compute_residuals(dataset, latent_dim, global_mean, global_std,global_max_ti
                 dose_tensor,
                 dose_times_list
             )
+            
     
             # Make predictions
             pred_interp, pred_batch = make_predictions(
@@ -519,110 +520,339 @@ def compute_residuals(dataset, latent_dim, global_mean, global_std,global_max_ti
     return residuals_all, times_all, predictions_all, targets_all
 
 
-def vpc_true(func_med,
-             reducer_med,
-             initial_encoder_med,
-             encoder_med,
-             noise_med,
-             models,
-             dataloader,
-             dataset,
-             t_dense,
-             global_max_time,
-             global_max_dose,
-             global_mean,
-             global_std,
-             latent_dim,
-             dim_parameters,
-             initial_encoder,
-             encoder,
-             func,
-             reducer,
-             noise,
-             ODEWrapper,
-             compartment,
-             onlymedian,
-             enable_nf,
-             enable_ae,
-             enable_vae,
-             add_noise_to_prediction,
-             num_simulated_total,
-             normalization,
-             truncation=1,
-             num_studies=100):
+def vpc_true(
+    models, dataset, t_dense, global_max_time, global_max_dose,
+    global_mean, global_std, latent_dim, dim_parameters,
+    initial_encoder, encoder, func, reducer, noise, add_noise_to_prediction=False,
+    enable_onlymedian=True, enable_ae=False, enable_nf=False,
+    enable_vae=False, truncation=1, num_repeats=100
+):
+    import torch, gc, matplotlib.pyplot as plt
+    from torch.utils.data import DataLoader
+  
+    gc.collect()
+  
 
-    all_study_medians = []
 
-    for study_idx in range(num_studies):
-        # Generate a single simulated study
-        plot_data = generate_plot_data(
-            func_med, reducer_med, initial_encoder_med, encoder_med, noise_med,
-            models=models,
-            dataloader=dataloader,
-            dataset=dataset,
-            t_dense=t_dense,
-            global_max_time=global_max_time,
-            global_max_dose=global_max_dose,
-            global_mean=global_mean,
-            global_std=global_std,
-            latent_dim=latent_dim,
-            dim_parameters=dim_parameters,
-            initial_encoder=initial_encoder,
-            encoder=encoder,
-            func=func,
-            reducer=reducer,
-            noise=noise,
-            ODEWrapper=ODEWrapper,
-            num_simulated_total=num_simulated_total,
-            add_noise_to_prediction=add_noise_to_prediction,
-            enable_ae=enable_ae,
-            enable_nf=enable_nf,
-            enable_vae=enable_vae,
-            enable_onlymedian=onlymedian,
-            normalization=normalization,
-            truncation=truncation
+    
+    encoder.eval()
+    initial_encoder.eval()
+    reducer.eval()
+    func.eval()
+    device = next(func.parameters()).device
+
+    dataloader = DataLoader(dataset, batch_size=12, shuffle=False, collate_fn=collate_fn)
+
+    for batch in dataloader:
+        # --- Preprocess batch ---
+        id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, masks_list = preprocess_batch(
+            batch, device, truncation=truncation
         )
 
-        # Extract median per time point
-        for dose_data in plot_data:
-            all_study_medians.append(torch.tensor(dose_data['median_sim']))
+        # --- Encode latent ---
+        z_refined, mu_q, logvar_q, log_det = encode_latent(
+            encoder, t_encoder, x_encoder,
+            enable_nf=enable_nf, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
+        )
 
-    all_study_medians = torch.stack(all_study_medians)  # shape: [num_studies * doses, num_time_points]
+        if enable_vae:
+            z_refined = torch.randn_like(z_refined)
 
-    # Median of medians across studies
-    median_of_medians = torch.median(all_study_medians, dim=0).values
+        # --- Prepare ODE input ---
+        x0, ode_func, _, _ = prepare_ode_input(
+            initial_encoder, x_padded, z_refined, func, dose_tensor, dose_times_list, enable_vae
+        )
+        if enable_vae:
+            x0  = torch.randn_like(x0)
 
-    # 95% CI of the median using percentiles
-    lower_95 = torch.quantile(all_study_medians, 0.025, dim=0)
-    upper_95 = torch.quantile(all_study_medians, 0.975, dim=0)
+        # --- Simulate multiple studies for CI ---
+        all_perc10 = []
+        all_perc50 = []
+        all_perc90 = []
 
-    # Plotting
-    plt.figure(figsize=(12, 6))
-    plt.fill_between(t_dense.cpu().numpy() * global_max_time,
-                     lower_95.cpu().numpy(),
-                     upper_95.cpu().numpy(),
-                     color='blue', alpha=0.2, label='95% CI')
-    plt.plot(t_dense.cpu().numpy() * global_max_time,
-             median_of_medians.cpu().numpy(),
-             color='blue', marker='o', label='Median of medians')
+        for _ in range(num_repeats):
+            # Simulate trajectories
+            x0  = torch.randn_like(x0)
+            _, pred_batch = make_predictions(
+                t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std
+            )
 
-    # Raw data
-    for dose_value in sorted(set(entry['amt'].item() for entry in dataset)):
-        dose_filtered_dataset = [entry for entry in dataset if entry['amt'].item() == dose_value]
-        interp_all = [
-            torch_linear_interpolate2(entry['t'].to(t_dense.device),
-                                      entry['x_global'].to(t_dense.device),
-                                      t_dense)
-            for entry in dose_filtered_dataset
-        ]
-        data_matrix = torch.stack(interp_all)
-        median_data = torch.quantile(data_matrix, 0.5, dim=0)
-        plt.plot(t_dense.cpu().numpy() * global_max_time,
-                 destandardize_concentration(median_data, global_mean, global_std).cpu().numpy(),
-                 color='orange', label='Raw median' if dose_value == 0 else None)
+            if add_noise_to_prediction:
+                mask_pred = pred_batch > 0
+                pred_batch = torch.where(mask_pred, noise.sample(pred_batch, n_samples=1).squeeze(0), pred_batch)
+                pred_batch = torch.clamp(pred_batch, min=0)
 
-    plt.xlabel("Time (hours)")
-    plt.ylabel(f"Concentration ({compartment})")
-    plt.grid(True)
-    plt.legend()
+            # Compute percentiles for this repeat
+            all_perc10.append(torch.quantile(pred_batch, 0.05, dim=0).detach().cpu())
+            all_perc50.append(torch.quantile(pred_batch, 0.50, dim=0).detach().cpu())
+            all_perc90.append(torch.quantile(pred_batch, 0.95, dim=0).detach().cpu())
+
+        # Stack repeats
+        # --- Stack repeats along new dimension ---
+        all_perc10 = torch.stack(all_perc10, dim=0)  # shape [num_repeats, time_points]
+        all_perc50 = torch.stack(all_perc50, dim=0)
+        all_perc90 = torch.stack(all_perc90, dim=0)
+        
+        # --- Compute median percentiles across repeats ---
+        perc10 = torch.median(all_perc10, dim=0).values      # shape [time_points]
+        perc50 = torch.median(all_perc50, dim=0).values
+        perc90 = torch.median(all_perc90, dim=0).values
+        
+        # --- Compute 95% CI of percentiles across repeats ---
+        perc10_ci_lower = torch.quantile(all_perc10, 0.025, dim=0)
+        perc10_ci_upper = torch.quantile(all_perc10, 0.975, dim=0)
+        perc50_ci_lower = torch.quantile(all_perc50, 0.025, dim=0)
+        perc50_ci_upper = torch.quantile(all_perc50, 0.975, dim=0)
+        perc90_ci_lower = torch.quantile(all_perc90, 0.025, dim=0)
+        perc90_ci_upper = torch.quantile(all_perc90, 0.975, dim=0)
+
+
+
+        # --- Plot ---
+        plt.figure(figsize=(10,6))
+
+        t_dense_np = t_dense.detach().cpu().numpy()
+        plt.plot(t_dense_np, perc50.detach().cpu().numpy(), color='black', label='Median prediction')
+        plt.plot(t_dense_np, perc10.detach().cpu().numpy(), color='black', linestyle='--', label='5th percentile')
+        plt.plot(t_dense_np, perc90.detach().cpu().numpy(), color='black', linestyle='--', label='95th percentile')
+
+        plt.fill_between(t_dense_np, perc50_ci_lower.detach().cpu().numpy(), perc50_ci_upper.detach().cpu().numpy(), color='red', alpha=0.3, label='95% CI median')
+        plt.fill_between(t_dense_np, perc10_ci_lower.detach().cpu().numpy(), perc90_ci_upper.detach().cpu().numpy(), color='blue', alpha=0.2, label='95% CI outer percentiles')
+
+        # Plot observed data (destandardized)
+        for i in range(x_padded.shape[0]):
+            t_obs_np = t_padded[i, :mask[i].sum()].detach().cpu().numpy()
+            x_obs_np = destandardize_concentration(x_padded[i, :mask[i].sum()], global_mean, global_std).detach().cpu().numpy()
+            plt.scatter(t_obs_np, x_obs_np, color='gray', s=10, alpha=0.5)
+
+        plt.xlabel('Time')
+        plt.ylabel('Concentration / output')
+        plt.title('VPC by batch')
+        plt.legend()
+        plt.show()
+
+        # Free memory
+        del pred_batch, x0, z_refined
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        
+
+
+def analyze_model_with_vpc(
+    models,
+    dataset,
+    t_dense,
+    global_max_time,
+    global_max_dose,
+    global_mean,
+    global_std,
+    latent_dim,
+    dim_parameters,
+    initial_encoder,
+    encoder,
+    func,
+    reducer,
+    noise,
+    device,
+    add_noise_to_prediction=False,
+    enable_onlymedian=True,
+    enable_ae=False,
+    enable_nf=False,
+    enable_vae=False,
+    truncation=1,
+    num_repeats=100,
+):
+    """
+    Runs residual analysis and VPC, and combines the plots in a 2x2 grid.
+    VPC is placed in the top-left corner, and observed data is shown in the VPC.
+    """
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.stats import norm
+    from torch.utils.data import DataLoader
+    import gc
+
+    # -------------------------
+    # Residuals
+    # -------------------------
+    encoder.eval()
+    initial_encoder.eval()
+    reducer.eval()
+    func.eval()
+    noise.eval()
+
+    residuals_list, predictions_list, targets_list, times_list = [], [], [], []
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
+    with torch.no_grad():
+        for batch in dataloader:
+            id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, _ = preprocess_batch(
+                batch, device, truncation=truncation
+            )
+
+            z_refined, mu_q, logvar_q, log_det = encode_latent(
+                encoder, t_encoder, x_encoder,
+                enable_nf=False, enable_ae=True, enable_onlymedian=False
+            )
+
+            x0, ode_func, _, _ = prepare_ode_input_eval(
+                initial_encoder, x_padded, z_refined, func, dose_tensor, dose_times_list
+            )
+
+            pred_interp, pred_batch = make_predictions(
+                t_padded, t_dense, x0, ode_func, reducer,
+                latent_dim, global_mean, global_std
+            )
+
+            sigma_add = noise.sigma_add
+            sigma_prop = noise.sigma_prop
+            sigma_total = torch.sqrt(sigma_add**2 + (sigma_prop * pred_interp)**2)
+
+            targets = destandardize_concentration(x_padded, global_mean, global_std)
+            residuals = (targets - pred_interp) / sigma_total
+
+            residuals_list.append(residuals.view(-1))
+            times_list.append(t_padded.view(-1))
+            predictions_list.append(pred_interp.view(-1))
+            targets_list.append(targets.view(-1))
+
+    residuals_all = torch.cat(residuals_list)
+    times_all = torch.cat(times_list)
+    predictions_all = torch.cat(predictions_list)
+    targets_all = torch.cat(targets_list)
+
+    residuals_np = residuals_all.cpu().numpy()
+    times_np = times_all.cpu().numpy()
+    targets_np = targets_all.cpu().numpy()
+
+    x_vals = np.linspace(residuals_np.min(), residuals_np.max(), 500)
+    pdf_vals = norm.pdf(x_vals, loc=0.0, scale=1.0)
+
+    # -------------------------
+    # VPC
+    # -------------------------
+    gc.collect()
+    dataloader_vpc = DataLoader(dataset, batch_size=12, shuffle=False, collate_fn=collate_fn)
+
+    for batch in dataloader_vpc:
+        id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, masks_list = preprocess_batch(
+            batch, device, truncation=truncation
+        )
+
+        z_refined, mu_q, logvar_q, log_det = encode_latent(
+            encoder, t_encoder, x_encoder,
+            enable_nf=enable_nf, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
+        )
+
+        if enable_vae:
+            z_refined = torch.randn_like(z_refined)
+
+        x0, ode_func, _, _ = prepare_ode_input(
+            initial_encoder, x_padded, z_refined, func,
+            dose_tensor, dose_times_list, enable_vae
+        )
+
+        if enable_vae:
+            x0 = torch.randn_like(x0)
+
+        all_perc10, all_perc50, all_perc90 = [], [], []
+
+        for _ in range(num_repeats):
+            x0 = torch.randn_like(x0)
+            _, pred_batch = make_predictions(
+                t_padded, t_dense, x0, ode_func, reducer,
+                latent_dim, global_mean, global_std
+            )
+
+            if add_noise_to_prediction:
+                mask_pred = pred_batch > 0
+                pred_batch = torch.where(
+                    mask_pred, noise.sample(pred_batch, n_samples=1).squeeze(0), pred_batch
+                )
+                pred_batch = torch.clamp(pred_batch, min=0)
+
+            all_perc10.append(torch.quantile(pred_batch, 0.05, dim=0).detach().cpu())
+            all_perc50.append(torch.quantile(pred_batch, 0.50, dim=0).detach().cpu())
+            all_perc90.append(torch.quantile(pred_batch, 0.95, dim=0).detach().cpu())
+
+        all_perc10 = torch.stack(all_perc10, dim=0)
+        all_perc50 = torch.stack(all_perc50, dim=0)
+        all_perc90 = torch.stack(all_perc90, dim=0)
+
+        perc10 = torch.median(all_perc10, dim=0).values
+        perc50 = torch.median(all_perc50, dim=0).values
+        perc90 = torch.median(all_perc90, dim=0).values
+
+        perc10_ci_lower = torch.quantile(all_perc10, 0.025, dim=0)
+        perc10_ci_upper = torch.quantile(all_perc10, 0.975, dim=0)
+        perc50_ci_lower = torch.quantile(all_perc50, 0.025, dim=0)
+        perc50_ci_upper = torch.quantile(all_perc50, 0.975, dim=0)
+        perc90_ci_lower = torch.quantile(all_perc90, 0.025, dim=0)
+        perc90_ci_upper = torch.quantile(all_perc90, 0.975, dim=0)
+
+        break
+
+    # -------------------------
+    # Combined Plotting (2x2 grid, VPC in top-left)
+    # -------------------------
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+
+    # VPC plot (top left, axes[0])
+    t_dense_np = t_dense.detach().cpu().numpy()
+    axes[0].plot(t_dense_np, perc50.cpu().numpy(), color='black', label='Median prediction')
+    axes[0].plot(t_dense_np, perc10.cpu().numpy(), color='black', linestyle='--', label='5th percentile')
+    axes[0].plot(t_dense_np, perc90.cpu().numpy(), color='black', linestyle='--', label='95th percentile')
+    axes[0].fill_between(t_dense_np, perc50_ci_lower.cpu().numpy(), perc50_ci_upper.cpu().numpy(),
+                         color='red', alpha=0.3, label='95% CI median')
+    axes[0].fill_between(t_dense_np, perc10_ci_lower.cpu().numpy(), perc90_ci_upper.cpu().numpy(),
+                         color='blue', alpha=0.2, label='95% CI outer percentiles')
+
+    # Overlay observed data in VPC
+    for i in range(x_padded.shape[0]):
+        t_obs_np = t_padded[i, :mask[i].sum()].cpu().numpy()
+        x_obs_np = destandardize_concentration(
+            x_padded[i, :mask[i].sum()], global_mean, global_std
+        ).cpu().numpy()
+        axes[0].scatter(t_obs_np, x_obs_np, color='gray', s=10, alpha=0.5)
+
+    axes[0].set_title("Visual Predictive Check")
+    axes[0].legend()
+
+    # Histogram of residuals
+    axes[1].hist(residuals_np, bins=25, density=True, alpha=0.7, label="Residuals")
+    axes[1].plot(x_vals, pdf_vals, 'r--', label='N(0,1)')
+    axes[1].set_title("Histogram of residuals")
+    axes[1].legend()
+
+    # Residuals vs time
+    axes[2].scatter(global_max_time * times_np, residuals_np, alpha=0.5, s=5)
+    axes[2].set_title("Residuals vs Time")
+    axes[2].set_xlabel("Time")
+
+    # Residuals vs observed
+    axes[3].scatter(targets_np, residuals_np, alpha=0.5, s=5)
+    axes[3].set_title("Residuals vs Observed")
+    axes[3].set_xlabel("Observed value")
+
+    plt.tight_layout()
     plt.show()
+
+    return {
+        "residuals": residuals_all,
+        "times": times_all,
+        "predictions": predictions_all,
+        "targets": targets_all,
+        "vpc": {
+            "perc10": perc10,
+            "perc50": perc50,
+            "perc90": perc90,
+            "ci": {
+                "perc10": (perc10_ci_lower, perc10_ci_upper),
+                "perc50": (perc50_ci_lower, perc50_ci_upper),
+                "perc90": (perc90_ci_lower, perc90_ci_upper),
+            }
+        }
+    }

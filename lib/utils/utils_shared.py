@@ -16,18 +16,96 @@ import torch
 
 
 
-import matplotlib.pyplot as plt
+import numpy as np
 
-
-
-from torch.nn.utils.rnn import pad_sequence
 
 
 import torch.nn as nn
 from torchdiffeq import odeint as odeint
 
-from lib.utils.utils_preprocess import standardize_concentration, destandardize_concentration, collate_fn
+from lib.utils.utils_preprocess import destandardize_concentration
 
+
+
+
+def truncate_time_series(t_batch, x_batch, truncation_time):
+    """
+    Truncate a batch of time series to a specified cutoff time, and also return
+    the values that were removed.
+
+    Args:
+        t_batch (list[torch.Tensor]): List of time tensors, each shaped [T_i].
+        x_batch (list[torch.Tensor]): List of value tensors corresponding to t_batch, each shaped [T_i, ...].
+        truncation_time (float): Time cutoff. All entries with time > cutoff are removed.
+
+    Returns:
+        tuple:
+            truncated_t (list[torch.Tensor]): Truncated time tensors.
+            truncated_x (list[torch.Tensor]): Truncated value tensors.
+            masks (list[torch.BoolTensor]): Boolean masks indicating kept indices.
+            removed_t (list[torch.Tensor]): Time tensors that were removed.
+            removed_x (list[torch.Tensor]): Value tensors that were removed.
+    """
+    truncated_t, truncated_x, masks = [], [], []
+    removed_t, removed_x = [], []
+
+    for t_i, x_i in zip(t_batch, x_batch):
+        # Boolean mask: True where time ≤ cutoff
+        mask = t_i <= truncation_time
+
+        # Keep only values within cutoff
+        truncated_t.append(t_i[mask])
+        truncated_x.append(x_i[mask])
+        masks.append(mask)
+
+        # Keep values that were removed (inverse mask)
+        inv_mask = ~mask
+        removed_t.append(t_i[inv_mask])
+        removed_x.append(x_i[inv_mask])
+
+    return truncated_t, truncated_x, masks, removed_t, removed_x
+
+
+
+
+def randomly_truncate_time_series(t_batch, x_batch, drop_fraction):
+    """
+    Randomly truncate (remove) a percentage of points from each time series.
+
+    Args:
+        t_batch (list[torch.Tensor]): List of time tensors, each shaped [T_i].
+        x_batch (list[torch.Tensor]): List of value tensors corresponding to t_batch, each shaped [T_i, ...].
+        drop_fraction (float): Fraction of points to drop, e.g. 0.2 = remove 20%.
+
+    Returns:
+        tuple:
+            kept_t (list[torch.Tensor]): Time tensors with points kept.
+            kept_x (list[torch.Tensor]): Value tensors with points kept.
+            masks (list[torch.BoolTensor]): Boolean masks indicating kept indices.
+            removed_t (list[torch.Tensor]): Time tensors that were removed.
+            removed_x (list[torch.Tensor]): Value tensors that were removed.
+    """
+    kept_t, kept_x, masks = [], [], []
+    removed_t, removed_x = [], []
+
+    for t_i, x_i in zip(t_batch, x_batch):
+        n_points = t_i.shape[0]
+        n_remove = int(n_points * drop_fraction)
+
+        # Randomly choose indices to remove
+        remove_indices = torch.randperm(n_points)[:n_remove]
+        mask = torch.ones(n_points, dtype=torch.bool, device=t_i.device)
+        mask[remove_indices] = False  # False = removed
+
+        # Apply mask
+        kept_t.append(t_i[mask])
+        kept_x.append(x_i[mask])
+        masks.append(mask)
+
+        removed_t.append(t_i[~mask])
+        removed_x.append(x_i[~mask])
+
+    return kept_t, kept_x, masks, removed_t, removed_x
 
 
 def batch_linear_interpolate_1d(y, t_src, t_target):
@@ -91,62 +169,66 @@ class ODEWrapper(nn.Module):
             return self.func(t, x, self.dose_times,self.transfusion_times,  self.dose_amounts, self.dose_mask)
 
 
-def preprocess_batch(batch, device, truncation=1, dose_pad_value=-1.0):
+def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
     """
-    Preprocess a batch from TrajectoryDataset, truncating time series if needed.
+    Preprocess a batch with optional truncation and removal of first `skip_initial` points.
 
     Args:
         batch: output from collate_fn
         device: torch device
         truncation: optional truncation for encoder
-        dose_pad_value: padding value for doses (unused here but kept for compatibility)
+        skip_initial: number of initial time points to remove
 
     Returns:
         occ_list       : list of subject IDs
         t_padded       : padded time sequences [B, T]
         x_padded       : padded DV sequences [B, T]
-        t_encoder      : encoder time sequences [B, T_max]
-        x_encoder      : encoder DV sequences [B, T_max]
+        t_encoder      : encoder time sequences [B, T_max-skip_initial]
+        x_encoder      : encoder DV sequences [B, T_max-skip_initial]
         t_cut          : truncated times that were removed [B, T_cut]
         x_cut          : truncated values that were removed [B, T_cut]
-        masks          : mask for valid encoder points [B, T_max]
+        masks          : mask for valid encoder points [B, T_max-skip_initial]
         dose_tensor    : per-subject dose amounts
         dose_times_list: per-subject dose times
+        auc_tensor     : per-subject AUC (if available)
     """
+    from torch.nn.utils.rnn import pad_sequence
 
     # Unpack batch
-    occ_list, t_padded, x_padded, mask, dose_tensor, dose_times_list, x_dose_padded, auc_tensor = batch
+    occ_list, t_batch, x_batch, mask, dose_tensor, dose_times_list = batch
 
-
-    # Move tensors to device
-    t_padded = t_padded.to(device)
-    x_padded = x_padded.to(device)
-    x_dose_padded=x_dose_padded.to(device)
+    # Move to device
+    t_batch = [t.to(device) for t in t_batch]
+    x_batch = [x.to(device) for x in x_batch]
     mask = mask.to(device)
     dose_tensor = dose_tensor.to(device)
     dose_times_list = [dt.to(device) for dt in dose_times_list]
-    auc_tensor = auc_tensor.to(device)
 
-    # if truncation > 0:
-    #     # Truncate time series
-    #     t_encoder_list, x_encoder_list, masks_list, t_cut_list, x_cut_list = truncate_time_series(
-    #         t_padded, x_dose_padded, truncation
-    #     )
+  
+    # Truncate if needed
+    if truncation > 0:
+        t_enc_list, x_enc_list, masks_list, t_cut_list, x_cut_list = truncate_time_series(
+            t_batch, x_batch, truncation
+        )
+    else:
+        t_enc_list, x_enc_list, masks_list = t_batch, x_batch, [torch.ones_like(xi, dtype=torch.bool) for xi in x_batch]
+        t_cut_list, x_cut_list = [torch.zeros(0, device=device) for _ in t_batch], [torch.zeros(0, device=device) for _ in x_batch]
+    
+        # Remove first `skip_initial` points from encoder sequences
+        t_enc_list = [ti[skip_initial:] for ti in t_enc_list]
+        x_enc_list = [xi[skip_initial:] for xi in x_enc_list]
+        masks_list = [mask_i[skip_initial:] for mask_i in masks_list]
 
-    #     # Pad sequences to max length in batch
-    #     t_encoder = pad_sequence(t_encoder_list, batch_first=True)       # [B, T_max]
-    #     x_encoder = pad_sequence(x_encoder_list, batch_first=True)       # [B, T_max]
-    #    # masks = pad_sequence(masks_list, batch_first=True)               # [B, T_max], bool
+    # Pad sequences
+    t_encoder = pad_sequence(t_enc_list, batch_first=True)
+    x_encoder = pad_sequence(x_enc_list, batch_first=True)
+    masks = pad_sequence(masks_list, batch_first=True)
 
-    #     # Also pad the removed/cut values for consistency
-    #     t_cut = pad_sequence(t_cut_list, batch_first=True)               # [B, T_cut_max]
-    #     x_cut = pad_sequence(x_cut_list, batch_first=True)               # [B, T_cut_max]
-
-   # else:
-    t_encoder = t_padded
-    x_encoder = x_padded
-    t_cut, x_cut = t_padded, x_padded
-    # masks = mask
+    t_padded = pad_sequence(t_batch, batch_first=True)
+    x_padded = pad_sequence(x_batch, batch_first=True)
+    t_cut = pad_sequence(t_cut_list, batch_first=True)
+    x_cut = pad_sequence(x_cut_list, batch_first=True)
+    
 
     return (
         occ_list,
@@ -156,11 +238,9 @@ def preprocess_batch(batch, device, truncation=1, dose_pad_value=-1.0):
         x_encoder,
         t_cut,
         x_cut,
-        mask,
+        masks,
         dose_tensor,
         dose_times_list,
-        auc_tensor
-
     )
 
 
@@ -170,46 +250,97 @@ def preprocess_batch(batch, device, truncation=1, dose_pad_value=-1.0):
 
 
 
-def encode_latent(encoder, t_encoder, x_normalized, 
-                  enable_nf, enable_ae, enable_onlymedian):
+
+
+
+def encode_latent(
+    encoder,
+    t_encoder,
+    x_normalized,
+    enable_vae,
+    enable_ae,
+    enable_onlymedian,
+    warmup_epochs_iiv=0,
+    epoch=0,
+    min_batch_size=50,
+    augment=False
+):
     """
-    Encodes input sequences into latent space, handling NF, AE, median-only, or VAE cases.
+    Encodes input sequences into latent space, handling AE, median-only, or VAE cases.
+    For VAE, ensures the total number of latent samples (k_param) is at least min_batch_size.
+    If below threshold, repeats each individual the same number of times.
 
     Args:
         encoder: torch module
-        t_encoder: padded time tensor [batch, seq_len]
-        x_normalized: normalized concentration [batch, seq_len]
-        enable_nf: whether to use normalizing flow
-        enable_ae: whether AE mode
+        t_encoder: [batch, seq_len] time tensor
+        x_normalized: [batch, seq_len] normalized concentration tensor
+        enable_vae: use VAE mode
+        enable_ae: use AE mode
         enable_onlymedian: zero latent
+        warmup_epochs_iiv: warmup epochs for KL annealing
+        epoch: current epoch
+        min_batch_size: minimum number of latent samples
 
     Returns:
-        k_param, mu_q, logvar_q, log_det (log_det is 0 if not NF)
+        k_param: latent samples [batch_repeated, latent_dim]
+        mu_q: mean of latent [batch_repeated, latent_dim]
+        logvar_q: log variance [batch_repeated, latent_dim]
+        repeat_factor: how many times each individual was repeated
     """
-    # Remove first 4 measurements
-    t_encoder_trimmed = t_encoder
-    x_normalized_trimmed = x_normalized
 
-    if enable_nf:
-        _, k_param, mu_q, logvar_q, log_det = encoder(t_encoder_trimmed, x_normalized_trimmed)
-    elif enable_ae:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
+    B, T = t_encoder.size()
+    repeat_factor = 1  # default
+
+    # Remove first time step
+    t_encoder_trimmed = t_encoder[:, 1:]
+    x_normalized_trimmed = x_normalized[:, 1:]
+
+    # Handle empty sequence
+    if t_encoder_trimmed.size(1) == 0:
+        latent_dim = getattr(encoder, "latent_dim", 2)
+        k_param = torch.zeros(B, latent_dim, device=t_encoder.device)
+        mu_q = torch.zeros(B, latent_dim, device=t_encoder.device)
+        logvar_q = torch.zeros(B, latent_dim, device=t_encoder.device)
+        return k_param, mu_q, logvar_q, repeat_factor
+
+    # ----------------------------
+    # AE and median-only cases
+    # ----------------------------
+    if enable_ae:
+        _, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
         k_param = mu_q
-        log_det = 0
-        
+
     elif enable_onlymedian:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        k_param, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
         k_param = torch.zeros_like(mu_q)
-        mu_q=torch.zeros_like(mu_q)
-        logvar_q= torch.zeros_like(logvar_q)
-        log_det = 0
-    else:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
-        std_q = torch.exp(0.5 * logvar_q)
-        k_param = mu_q + std_q * torch.randn_like(mu_q)
-        log_det = 0
-        
-    return k_param, mu_q, logvar_q, log_det
+        mu_q = torch.zeros_like(mu_q)
+        logvar_q = torch.zeros_like(logvar_q)
+
+    # ----------------------------
+    # VAE case
+    # ----------------------------
+    elif enable_vae:
+        kl_weight = 1.0 if epoch + 1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
+
+        # Encode original batch
+        _, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        std = torch.exp(0.5 * logvar_q)
+        eps = torch.randn_like(std)
+
+        B_current = mu_q.size(0)
+
+        # Repeat individuals if batch too small
+        if B_current < min_batch_size and augment:
+            repeat_factor = int(np.ceil(min_batch_size / B_current))
+            mu_q = mu_q.repeat_interleave(repeat_factor, dim=0)
+            logvar_q = logvar_q.repeat_interleave(repeat_factor, dim=0)
+            eps = eps.repeat_interleave(repeat_factor, dim=0)
+
+        # Compute latent
+        k_param = mu_q + kl_weight * eps * torch.exp(0.5 * logvar_q)
+
+    return k_param, mu_q, logvar_q, repeat_factor
+
 
 
 def prepare_ode_input(
@@ -219,7 +350,7 @@ def prepare_ode_input(
     func,
     dose_tensor,
     dose_times_list,
-    enable_ae
+    enable_ae, repeat_factor=1
 ):
     """
     Prepare initial state and ODE function for the new TrajectoryDataset.
@@ -238,19 +369,26 @@ def prepare_ode_input(
     """
 
     # Encode initial state
-    x0_1 = initial_encoder(x_padded[:, 0].unsqueeze(1))
- 
     
     
+    if repeat_factor > 1:
+        x_padded_repeated = x_padded.repeat_interleave(repeat_factor, dim=0)
+    else:
+        x_padded_repeated = x_padded
+        
+    
+        
+    x0_1, mu_x0,logvar_x0 = initial_encoder(x_padded_repeated[:, 0].unsqueeze(1))
+    x0_1=mu_x0
     if enable_ae:
         x0 = torch.cat([
-            x0_1 + 0.01 * torch.randn_like(x0_1),
-            k_param + 0.01 * torch.randn_like(k_param) 
+            mu_x0, #+ 0.01 * torch.randn_like(x0_1),
+            k_param #+ 0.1 * torch.randn_like(k_param) 
         ], dim=1)
     else:    
         x0 = torch.cat([
-            x0_1,
-            k_param 
+            x0_1, # * torch.randn_like(x0_1),
+            k_param #+ 0.15 * torch.randn_like(k_param) 
         ], dim=1)
         
     # Dose mask: 1 where dose exists, 0 otherwise
@@ -266,9 +404,28 @@ def prepare_ode_input(
             dose_times_mask[i, :len(dt)] = 1
 
     # Expand dose_tensor to match dose_times
-    dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, max_doses).unsqueeze(-1)
+    # Ensure dose_tensor is 2D: [batch, max_doses]
+    if dose_tensor.dim() == 0:  # scalar
+        dose_tensor_expanded = dose_tensor.unsqueeze(0).repeat(1, max_doses)
+    elif dose_tensor.dim() == 1:  # [batch]
+        dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, max_doses)
+    else:  # already 2D or more
+        dose_tensor_expanded = dose_tensor
+        if dose_tensor_expanded.size(1) != max_doses:
+            dose_tensor_expanded = dose_tensor_expanded[:, :1].repeat(1, max_doses)
+    
+    # **Remove the last singleton dimension** to make it 2D
+    dose_tensor_expanded = dose_tensor_expanded.to(x_padded.device)  # [batch, max_doses]
     
 
+    if repeat_factor > 1:
+        # Repeat batch-dependent tensors along dim=0
+        dose_mask = dose_mask.repeat_interleave(repeat_factor, dim=0)
+        dose_times_padded = dose_times_padded.repeat_interleave(repeat_factor, dim=0)
+        dose_times_mask = dose_times_mask.repeat_interleave(repeat_factor, dim=0)
+        dose_tensor_expanded = dose_tensor_expanded.repeat_interleave(repeat_factor, dim=0)
+    
+   
 
     # Create ODEWrapper with dose info
     ode_func = ODEWrapper(
@@ -279,40 +436,41 @@ def prepare_ode_input(
         dose_times_mask
     )
 
-    return x0, ode_func
+    return x0, ode_func, mu_x0, logvar_x0
 
 
 
 
 
 
-def make_predictions(t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std):
+def make_predictions(t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std, repeat_factor=1):
     """
     Runs ODE forward and interpolates predictions at given time points.
     Scales extreme predictions to keep gradients alive.
     """
+    # Expand t_padded if batch was repeated
+    if repeat_factor > 1:
+        t_padded = t_padded.repeat_interleave(repeat_factor, dim=0)
+
     batch_size = t_padded.size(0)
-
+    
     # Solve ODE
-    pred = odeint(ode_func, x0, t_dense, method="rk4")
-
-    # Replace NaN/Inf with zero temporarily (or any finite number) to avoid breaking graph
-    pred = torch.where(torch.isfinite(pred), pred, torch.zeros_like(pred))
+    pred = odeint(ode_func, x0, t_dense, method="rk4")  # [time, batch, latent_dim_total]
 
     # Smoothly scale down large values while preserving gradients
-
-    pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim]
-
+    pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim_total]
+  
     # Reduce dimension
     reduced = reducer(pred_batch[:, :, :latent_dim])
-
+    
     # Destandardize
     reduced = destandardize_concentration(reduced, global_mean, global_std)
-
+    
     # Interpolate back to padded time points
     t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
     pred_interp = batch_linear_interpolate_1d(reduced, t_dense_exp, t_padded)
 
     return pred_interp, reduced
+
 
 

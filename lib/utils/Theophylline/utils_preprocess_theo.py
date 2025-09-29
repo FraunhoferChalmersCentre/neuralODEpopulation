@@ -29,44 +29,6 @@ def pad_dose_times(dose_times_list, pad_value=-1.0):
 
 
 
-def truncate_time_series(t_batch, x_batch, truncation_time):
-    """
-    Truncate a batch of time series to a specified cutoff time, and also return
-    the values that were removed.
-
-    Args:
-        t_batch (list[torch.Tensor]): List of time tensors, each shaped [T_i].
-        x_batch (list[torch.Tensor]): List of value tensors corresponding to t_batch, each shaped [T_i, ...].
-        truncation_time (float): Time cutoff. All entries with time > cutoff are removed.
-
-    Returns:
-        tuple:
-            truncated_t (list[torch.Tensor]): Truncated time tensors.
-            truncated_x (list[torch.Tensor]): Truncated value tensors.
-            masks (list[torch.BoolTensor]): Boolean masks indicating kept indices.
-            removed_t (list[torch.Tensor]): Time tensors that were removed.
-            removed_x (list[torch.Tensor]): Value tensors that were removed.
-    """
-    truncated_t, truncated_x, masks = [], [], []
-    removed_t, removed_x = [], []
-
-    for t_i, x_i in zip(t_batch, x_batch):
-        # Boolean mask: True where time ≤ cutoff
-        mask = t_i <= truncation_time
-
-        # Keep only values within cutoff
-        truncated_t.append(t_i[mask])
-        truncated_x.append(x_i[mask])
-        masks.append(mask)
-
-        # Keep values that were removed (inverse mask)
-        inv_mask = ~mask
-        removed_t.append(t_i[inv_mask])
-        removed_x.append(x_i[inv_mask])
-
-    return truncated_t, truncated_x, masks, removed_t, removed_x
-
-
 
         
 def export_training_data(train_dataset, test_dataset, global_mean, global_std, global_max_time, i, base_dir, truncation):
@@ -517,7 +479,7 @@ def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, de
 
 
 
-def prepare_datasets_and_loaders_train(data_path,base_dir, all_ids, i,already_done, device, batch_fraction=0.05,truncation=1):
+def prepare_datasets_and_loaders_train(data_path,base_dir, all_ids, device, batch_fraction=0.05,truncation=1):
 
     """
     Splits the dataset into train/val/test, creates DataLoaders, and generates the combined time+dose tensor.
