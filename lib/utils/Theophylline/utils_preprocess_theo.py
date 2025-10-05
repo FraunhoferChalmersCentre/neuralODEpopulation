@@ -12,6 +12,9 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
+from lib.utils.Theophylline.utils_shared_theo import truncate_time_series, destandardize_concentration
+
+
 
 def pad_dose_times(dose_times_list, pad_value=-1.0):
     batch_size = len(dose_times_list)
@@ -708,8 +711,7 @@ def load_existing_metrics(filepath, expected_columns):
 
 
 
-def standardize_concentration(conc, mean, std): return (conc - mean) / std
-def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
+
 
 
 

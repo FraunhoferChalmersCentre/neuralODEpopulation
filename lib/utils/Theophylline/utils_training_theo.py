@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import norm
 
-from lib.utils.Theophylline.utils_preprocess_theo import destandardize_concentration, collate_fn, append_metrics, export_all_metrics_and_residuals
+from lib.utils.Theophylline.utils_preprocess_theo import  collate_fn, append_metrics, export_all_metrics_and_residuals
 from lib.utils.Theophylline.utils_post_processing_theo import vpc_true, vpc, plot_individual_fits, compute_residuals
-from lib.utils.Theophylline.utils_shared_theo import encode_latent, preprocess_batch, prepare_ode_input, make_predictions, prepare_ode_input_eval, truncate_time_series
+from lib.utils.Theophylline.utils_shared_theo import destandardize_concentration, encode_latent, preprocess_batch, prepare_ode_input, make_predictions, truncate_time_series
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -205,81 +205,87 @@ def pad_dose_times(dose_times_list, pad_value=-1.0):
 
 
 
-def compute_loss_and_metrics(
+def compute_loss_and_metrics(encoder, dose_labels,
     x_padded, mask, pred_interp,
-    mu_q, logvar_q, log_det, mu_IC, logvar_IC,
+    mu_q, logvar_q,
+    mu_x0, logvar_x0,
     epoch, warmup_epochs_iiv, free_bits,
-    enable_ae, enable_nf,
-    noise, global_mean, global_std
+    enable_ae, enable_vae,
+    noise, global_mean, global_std,
+    only_median_training=False,
+    replace_mask=None, repeat_factor=1  # shape [batch_size]
 ):
     """
     Computes reconstruction + KL/NF losses and metrics.
     Returns:
-        loss, recon_loss, mse, KL_loss, log_det_sum, log_det_penalty, kl_gauss
+        loss, recon_loss, error_value, KL_loss, log_det_sum, log_det_penalty, kl_gauss
+        - error_value = per-individual mixture: MSE (default) or L1 (if only_median_training or replace_mask)
     """
-    # --- Reconstruction loss ---
+    device = pred_interp.device
+    if repeat_factor > 1:
+        mask = mask.repeat_interleave(repeat_factor, dim=0)
+        x_padded = x_padded.repeat_interleave(repeat_factor, dim=0)
+
+        
+  
+    # === Reconstruction loss from error model ===
     recon_loss_noise, mse = noise.nll(
         destandardize_concentration(x_padded, global_mean, global_std),
-        pred_interp,
-        mask
+        pred_interp,replace_mask,mask
+    )
+    
+    
+   
+    # mask: [batch_size, seq_len], True for valid points
+   
 
+
+    
+  #  === KL Loss ===
+    mu_std =  torch.zeros_like(mu_q)
+    logvar_std = torch.zeros_like(logvar_q)
+
+    mu_std_x0=torch.zeros_like(mu_x0)
+    logvar_std_x0=torch.zeros_like(logvar_x0)
+   
+
+
+    free_bits_on = (
+        0 if epoch + 1 >= warmup_epochs_iiv
+        else free_bits * (1 - min(1.0, epoch / warmup_epochs_iiv))
+    )
+    kl_weight = (
+        1.0 if epoch + 1 >= warmup_epochs_iiv
+        else min(1.0, epoch / warmup_epochs_iiv)
     )
     
  
-
-    mu_std = torch.zeros_like(mu_q)
-    logvar_std = torch.zeros_like(logvar_q)
+    KL_loss_k,denom = kl_divergence_gaussians(mu_q, logvar_q, mu_std, logvar_std, free_bits_on)
+    KL_loss_x0,denom = kl_divergence_gaussians(mu_x0, logvar_std_x0, mu_std_x0,logvar_x0 , free_bits_on)
+    KL_loss= KL_loss_k  + KL_loss_x0
+   # KL_loss = KL_loss
     
-    mu_std_IC = torch.zeros_like(mu_IC)
-    logvar_std_IC = torch.zeros_like(logvar_IC)
-    
-    
-    if enable_ae:
-        KL_loss = torch.tensor(0.0)
-        kl_gauss = torch.tensor(0.0)
-        log_det_sum = torch.tensor(0.0)
-        log_det_penalty = torch.tensor(0.0)
-        kl_weight = 0.0
-    else:
-        free_bits_on = (
-            0 if epoch + 1 >= warmup_epochs_iiv
-            else free_bits * (1 - min(1.0, epoch / warmup_epochs_iiv))
-        )
-        kl_weight = (
-            1.0 if epoch + 1 >= warmup_epochs_iiv
-            else min(1.0, epoch / warmup_epochs_iiv)
-        )
+    loss = kl_weight * KL_loss + recon_loss_noise #+ mu_q_loss.sum()
 
-        if enable_nf:
-            KL_loss, log_det_sum, kl_gauss, log_det_penalty = kl_divergence_NF(
-                epoch, warmup_epochs_iiv, mu_q, logvar_q, mu_std, logvar_std, log_det,
-                free_bits=free_bits_on, log_det_penalty_lambda=1,
-            )
-        else:
-            KL_loss =kl_divergence_gaussians(mu_q, logvar_q, mu_std, logvar_std, free_bits_on) + kl_divergence_gaussians(mu_IC, logvar_IC, mu_std_IC, logvar_std_IC, free_bits_on)
-            kl_gauss = KL_loss
-            log_det_sum = torch.tensor(0.0)
-            log_det_penalty = torch.tensor(0.0)
 
-    # --- Total loss ---
-    loss = recon_loss_noise + kl_weight * KL_loss + log_det_penalty
+    return loss, recon_loss_noise, mse, KL_loss, KL_loss
 
-    
-    return loss, recon_loss_noise, mse, KL_loss, log_det_sum, log_det_penalty, kl_gauss
+
+
+
 
 
 
 
 def accumulate_epoch_metrics(
-    total_transform, total_loss, total_mse, total_kl, total_recon,
-    log_det_sum, loss, mse, kl_gauss, recon_loss_noise, enable_ae
+    total_loss, total_mse, total_kl, total_recon,
+     loss, mse, kl_gauss, recon_loss_noise, enable_ae
 ):
-    total_transform += log_det_sum.item()
     total_loss += loss.item()
     total_mse += mse.item()
     total_kl += kl_gauss.item() if not enable_ae else 0.0
     total_recon += recon_loss_noise.item()
-    return total_transform, total_loss, total_mse, total_kl, total_recon
+    return  total_loss, total_mse, total_kl, total_recon
 
 
 def run_backprop_step(loss, main_params, optimizer):
@@ -425,106 +431,106 @@ def log_training_epoch(end_time, epoch, total_mse, total_loss, total_recon, tota
 
 
 
-def evaluate_on_val(
-    global_mean,
-    global_std,
-    global_max_time,
-    global_max_dose,
-    enable_nf,
-    enable_ae,
-    enable_vae,
-    enable_onlymedian,
-    truncation,
-    func,
-    noise,
-    reducer,
-    dataloader_val,
-    device,
-    encoder,
-    initial_encoder,
-    t_dense
-):
-    """
-    Evaluate model on a validation dataset by computing total MSE and NLL.
-    Reuses preprocess, encode_latent, and prepare_ode_input functions.
-    """
+# def evaluate_on_val(
+#     global_mean,
+#     global_std,
+#     global_max_time,
+#     global_max_dose,
+#     enable_nf,
+#     enable_ae,
+#     enable_vae,
+#     enable_onlymedian,
+#     truncation,
+#     func,
+#     noise,
+#     reducer,
+#     dataloader_val,
+#     device,
+#     encoder,
+#     initial_encoder,
+#     t_dense
+# ):
+#     """
+#     Evaluate model on a validation dataset by computing total MSE and NLL.
+#     Reuses preprocess, encode_latent, and prepare_ode_input functions.
+#     """
    
 
 
-    device = next(func.parameters()).device
-    latent_dim = func.dim_latent
+#     device = next(func.parameters()).device
+#     latent_dim = func.dim_latent
 
-    total_mse = 0.0
-    total_LL = 0.0
-    total_loss = 0.0
+#     total_mse = 0.0
+#     total_LL = 0.0
+#     total_loss = 0.0
 
-    num_batches=len(dataloader_val)
+#     num_batches=len(dataloader_val)
     
-    for batch in dataloader_val:
-        id_list, t_padded, x_padded,t_encoder, x_encoder,t_cut, x_cut,  mask, dose_tensor, dose_times_list, masks_list = preprocess_batch(
-    batch, device, truncation=truncation
-)
+#     for batch in dataloader_val:
+#         id_list, t_padded, x_padded,t_encoder, x_encoder,t_cut, x_cut,  mask, dose_tensor, dose_times_list, masks_list = preprocess_batch(
+#     batch, device, truncation=truncation
+# )
    
-        # --- Encode latent ---
-        z_refined, mu_q, logvar_q, log_det = encode_latent(
-        encoder,
-        t_encoder,
-        x_encoder,
-        enable_nf=enable_nf,
-        enable_ae=enable_ae,
-        enable_onlymedian=enable_onlymedian
-        )
+#         # --- Encode latent ---
+#         z_refined, mu_q, logvar_q, log_det = encode_latent(
+#         encoder,
+#         t_encoder,
+#         x_encoder,
+#         enable_nf=enable_nf,
+#         enable_ae=enable_ae,
+#         enable_onlymedian=enable_onlymedian
+#         )
         
-        # --- Prepare ODE input ---
-        x0, ode_func, mu_IC, logvar_IC = prepare_ode_input_eval(
-            initial_encoder,
-            x_padded,
-            z_refined,
-            func,
-            dose_tensor,
-            dose_times_list
+#         # --- Prepare ODE input ---
+#         x0, ode_func, mu_IC, logvar_IC = prepare_ode_input_eval(
+#             initial_encoder,
+#             x_padded,
+#             z_refined,
+#             func,
+#             dose_tensor,
+#             dose_times_list
 
-        )
+#         )
         
         
         
         
-        # --- Compute predictions ---
+#         # --- Compute predictions ---
     
 
-        # --- Compute loss and metrics ---
-        pred_interp, pred_batch = make_predictions(
-            t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std
-        )
+#         # --- Compute loss and metrics ---
+#         pred_interp, pred_batch = make_predictions(
+#             t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std
+#         )
         
         
-        # --- Debug prints ---
+#         # --- Debug prints ---
        
-        # --- Compute reconstruction loss ---
-        recon_loss_noise, mse = noise.nll(
-        destandardize_concentration(x_padded, global_mean, global_std),
-        pred_interp
-        )
+#         # --- Compute reconstruction loss ---
+#         recon_loss_noise, mse = noise.nll(
+#         destandardize_concentration(x_padded, global_mean, global_std),
+#         pred_interp
+#         )
     
-        inverted = torch.stack([~m for m in masks_list])
+#         inverted = torch.stack([~m for m in masks_list])
 
 
   
-        loss, recon_loss_noise, mse, KL_loss, log_det_sum, log_det_penalty, kl_gauss = compute_loss_and_metrics(
-            x_padded, mask, pred_interp,
-            mu_q, logvar_q, log_det,mu_IC, logvar_IC,
-            10, 0, 0,
-            enable_ae, enable_nf,
-            noise, global_mean, global_std
-        )
+#         loss, recon_loss_noise, mse, KL_loss, log_det_sum, log_det_penalty, kl_gauss = compute_loss_and_metrics(
+#             x_padded, mask, pred_interp,
+#             mu_q, logvar_q, log_det,mu_IC, logvar_IC,
+#             10, 0, 0,
+#             enable_ae, enable_nf,
+#             noise, global_mean, global_std
+#         )
         
         
-        # --- Accumulate metrics ---
-        total_mse += mse.item()
-        total_LL += recon_loss_noise.item()
-        total_loss += loss.item()
+#         # --- Accumulate metrics ---
+#         total_mse += mse.item()
+#         total_LL += recon_loss_noise.item()
+#         total_loss += loss.item()
 
-    return total_mse/num_batches, total_LL/num_batches, total_loss/num_batches
+#     return total_mse/num_batches, total_LL/num_batches, total_loss/num_batches
 
 
 
@@ -588,56 +594,65 @@ def train_loop_model(
         
          
       
-            z_refined, mu_q, logvar_q, log_det = encode_latent(
+            k_param, mu_q, logvar_q, repeat_factor = encode_latent(
                 encoder,
                 t_encoder,
                 x_encoder,
-                enable_nf=enable_nf,
+                
+                enable_vae=enable_vae,
                 enable_ae=enable_ae,
-                enable_onlymedian=enable_onlymedian
-            
+                enable_onlymedian=enable_onlymedian, 
+                warmup_epochs_iiv=warmup_epochs_iiv, 
+                epoch=epoch,
+                augment=True
+                
             )
             
             
-      
-          
+            
+
           
             
-            x01, ode_func1, mu_IC, logvar_IC = prepare_ode_input(
+            x0, ode_func, mu_x0, logvar_x0 = prepare_ode_input(
                 initial_encoder,
                 x_padded,
-                z_refined,
+                k_param,
                 func,
                 dose_tensor,
                 dose_times_list,
-                enable_vae=enable_vae
-    
+                enable_ae,
+                enable_onlymedian,
+                repeat_factor
+                
             )
+   
             
-            
-            
+          
             pred_interp, pred_batch = make_predictions(
-                t_padded, t_dense, x01, ode_func1, reducer, latent_dim,global_mean,global_std
+                t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std,repeat_factor
             )
        
         
         
             
             # 2. Compute losses
-            loss, recon_loss_noise, mse, KL_loss, log_det_sum, log_det_penalty, kl_gauss = compute_loss_and_metrics(
+            loss, recon_loss_noise, mse, KL_loss, kl_gauss = compute_loss_and_metrics(encoder,
+                dose_tensor, 
                 x_padded, mask, pred_interp,
-                mu_q, logvar_q, log_det,mu_IC, logvar_IC,
+                mu_q, logvar_q,
+                mu_x0, logvar_x0,
                 epoch, warmup_epochs_iiv, free_bits,
-                enable_ae, enable_nf,
-                noise, global_mean, global_std
+                enable_ae, enable_vae,
+                noise, global_mean, global_std, enable_onlymedian, None,repeat_factor
             )
        
             
              
-            total_transform, total_loss, total_mse, total_kl, total_recon = accumulate_epoch_metrics(
-                total_transform, total_loss, total_mse, total_kl, total_recon,
-                log_det_sum, loss , mse, kl_gauss, recon_loss_noise, enable_ae
+            total_loss, total_mse, total_kl, total_recon = accumulate_epoch_metrics(
+                 total_loss, total_mse, total_kl, total_recon,
+                 loss , mse, kl_gauss, recon_loss_noise, enable_ae
             )
+     
      
             
      
@@ -660,44 +675,27 @@ def train_loop_model(
         scheduler.step(total_mse)
         end_time = time.time()
         epoch_duration = end_time - start_time
-        for i in range(len(occ_list)):
-                # Use the original padded sequences
-                t_i = t_padded[i, :mask[i].sum()].detach()  # mask ensures only valid points
-                x_i = x_padded[i, :mask[i].sum()].detach()
-            
-                # Sort by time just in case
-                t_i_sorted, sort_idx = torch.sort(t_i)
-                x_i_sorted = x_i[sort_idx]
-            
-                trajectory_records.append((
-                    occ_list[i],
-                    t_i_sorted,
-                    x_i_sorted,
-                    dose_tensor[i].detach(),
-                    dose_times_list[i].detach() if isinstance(dose_times_list[i], torch.Tensor) else dose_times_list[i],
-                    z_refined[i].detach()
-                ))
-
+     
 
         # --- Validation and early stopping ---
         if traing_against_validation and epoch > warmup_epochs_iiv:
-       
+            1
             
-            val_mse, val_LL, val_loss = evaluate_on_val(
-                global_mean, global_std, global_max_time, global_max_dose,
-                enable_nf, enable_ae,enable_vae,enable_onlymedian, truncation,
-                func, noise, reducer, dataloader_val,
-                device, encoder, initial_encoder, t_dense
-            )
+            # val_mse, val_LL, val_loss = evaluate_on_val(
+            #     global_mean, global_std, global_max_time, global_max_dose,
+            #     enable_nf, enable_ae,enable_vae,enable_onlymedian, truncation,
+            #     func, noise, reducer, dataloader_val,
+            #     device, encoder, initial_encoder, t_dense
+            # )
             
-            best_val_mse, best_val_LL,best_val_loss, epochs_no_improve, stop_training, best_model_state = \
-                validate_and_update_early_stop(
-                    epoch, warmup_epochs_noise, traing_against_validation,
-                    val_mse, val_LL,val_loss, best_val_mse, best_val_LL,best_val_loss, epochs_no_improve,
-                    patience, models, enable_vae
-                )
-            if stop_training:
-                break
+            # best_val_mse, best_val_LL,best_val_loss, epochs_no_improve, stop_training, best_model_state = \
+            #     validate_and_update_early_stop(
+            #         epoch, warmup_epochs_noise, traing_against_validation,
+            #         val_mse, val_LL,val_loss, best_val_mse, best_val_LL,best_val_loss, epochs_no_improve,
+            #         patience, models, enable_vae
+            #     )
+            # if stop_training:
+            #     break
         else:
             val_mse=0
             val_LL=0
@@ -723,101 +721,101 @@ def train_loop_model(
 
 
 
-def compute_test_metrics(
-    latent_dim, dataset, models, device,
-    global_mean, global_std, global_max_time,
-    enable_nf, enable_ae, enable_onlymedian, t_dense,
-    truncation=0,
-    iteration=None  # allow passing iteration number
-):
-    """
-    Computes mean/median R² and MSE across subjects,
-    plus residuals on the cut (removed) values only.
+# def compute_test_metrics(
+#     latent_dim, dataset, models, device,
+#     global_mean, global_std, global_max_time,
+#     enable_nf, enable_ae, enable_onlymedian, t_dense,
+#     truncation=0,
+#     iteration=None  # allow passing iteration number
+# ):
+#     """
+#     Computes mean/median R² and MSE across subjects,
+#     plus residuals on the cut (removed) values only.
 
-    Returns:
-        r2_mean, r2_median, mse_mean, mse_median, residuals_df
-    """
-    encoder = models['encoder']
-    initial_encoder = models['initial_encoder']
-    func = models['func']
-    reducer = models['reducer']
+#     Returns:
+#         r2_mean, r2_median, mse_mean, mse_median, residuals_df
+#     """
+#     encoder = models['encoder']
+#     initial_encoder = models['initial_encoder']
+#     func = models['func']
+#     reducer = models['reducer']
 
-    all_targets, all_predictions, all_ids, all_iterations = [], [], [], []
-    per_subject_r2, per_subject_mse = [], []
+#     all_targets, all_predictions, all_ids, all_iterations = [], [], [], []
+#     per_subject_r2, per_subject_mse = [], []
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+#     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
-    for data in dataloader:
-        # Preprocess batch (single subject)
-        id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, list123 = preprocess_batch(
-            data, device, truncation=truncation
-        )
+#     for data in dataloader:
+#         # Preprocess batch (single subject)
+#         id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, list123 = preprocess_batch(
+#             data, device, truncation=truncation
+#         )
 
-        if t_cut.numel() == 0:
-            continue  # skip if no cut values
+#         if t_cut.numel() == 0:
+#             continue  # skip if no cut values
 
-        # Encode latent
-        z_refined, mu_q, logvar_q, log_det = encode_latent(
-            encoder,
-            t_encoder,
-            x_encoder,
-            enable_nf=enable_nf,
-            enable_ae=True,
-            enable_onlymedian=enable_onlymedian
-        )
+#         # Encode latent
+#         z_refined, mu_q, logvar_q, log_det = encode_latent(
+#             encoder,
+#             t_encoder,
+#             x_encoder,
+#             enable_nf=enable_nf,
+#             enable_ae=True,
+#             enable_onlymedian=enable_onlymedian
+#         )
 
-        # Prepare ODE input
-        x0, ode_func, _, _ = prepare_ode_input_eval(
-            initial_encoder,
-            x_padded,
-            z_refined,
-            func,
-            dose_tensor,
-            dose_times_list
-        )
+#         # Prepare ODE input
+#         x0, ode_func, _, _ = prepare_ode_input_eval(
+#             initial_encoder,
+#             x_padded,
+#             z_refined,
+#             func,
+#             dose_tensor,
+#             dose_times_list
+#         )
 
-        # Interpolate predictions at cut times
-        pred_interp, _ = make_predictions(
-            t_cut, t_dense, x0, ode_func, reducer,
-            latent_dim, global_mean, global_std
-        )
+#         # Interpolate predictions at cut times
+#         pred_interp, _ = make_predictions(
+#             t_cut, t_dense, x0, ode_func, reducer,
+#             latent_dim, global_mean, global_std
+#         )
 
-        # Denormalize true and predicted cut values
-        x_cut_true = (x_cut.squeeze(0).detach().cpu().numpy() * global_std + global_mean)
-        x_cut_pred = pred_interp.squeeze(0).detach().cpu().numpy()
+#         # Denormalize true and predicted cut values
+#         x_cut_true = (x_cut.squeeze(0).detach().cpu().numpy() * global_std + global_mean)
+#         x_cut_pred = pred_interp.squeeze(0).detach().cpu().numpy()
 
-        # Collect global arrays
-        all_targets.extend(x_cut_true.tolist())
-        all_predictions.extend(x_cut_pred.tolist())
-        all_ids.extend([id_list[0]] * len(x_cut_true))
-        all_iterations.extend([iteration if iteration is not None else -1] * len(x_cut_true))
+#         # Collect global arrays
+#         all_targets.extend(x_cut_true.tolist())
+#         all_predictions.extend(x_cut_pred.tolist())
+#         all_ids.extend([id_list[0]] * len(x_cut_true))
+#         all_iterations.extend([iteration if iteration is not None else -1] * len(x_cut_true))
 
-        # Per-subject metrics
-        if len(x_cut_true) > 1:  # avoid error on single points
-            per_subject_r2.append(r2_score(x_cut_true, x_cut_pred))
-            per_subject_mse.append(mean_squared_error(x_cut_true, x_cut_pred))
+#         # Per-subject metrics
+#         if len(x_cut_true) > 1:  # avoid error on single points
+#             per_subject_r2.append(r2_score(x_cut_true, x_cut_pred))
+#             per_subject_mse.append(mean_squared_error(x_cut_true, x_cut_pred))
 
-    # Compute aggregated metrics
-    if len(per_subject_r2) == 0:
-        return None, None, None, None, pd.DataFrame(
-            columns=["Prediction", "Observation", "Residual", "Iteration", "ID"]
-        )
+#     # Compute aggregated metrics
+#     if len(per_subject_r2) == 0:
+#         return None, None, None, None, pd.DataFrame(
+#             columns=["Prediction", "Observation", "Residual", "Iteration", "ID"]
+#         )
 
-    r2_mean = float(np.mean(per_subject_r2))
-    r2_median = float(np.median(per_subject_r2))
-    mse_mean = float(np.mean(per_subject_mse))
-    mse_median = float(np.median(per_subject_mse))
+#     r2_mean = float(np.mean(per_subject_r2))
+#     r2_median = float(np.median(per_subject_r2))
+#     mse_mean = float(np.mean(per_subject_mse))
+#     mse_median = float(np.median(per_subject_mse))
 
-    # Build residuals DataFrame
-    residuals_df = pd.DataFrame({
-        "Prediction": all_predictions,
-        "Observation": all_targets,
-        "Residual": np.array(all_targets) - np.array(all_predictions),
-        "Iteration": all_iterations,
-        "ID": all_ids
-    })
+#     # Build residuals DataFrame
+#     residuals_df = pd.DataFrame({
+#         "Prediction": all_predictions,
+#         "Observation": all_targets,
+#         "Residual": np.array(all_targets) - np.array(all_predictions),
+#         "Iteration": all_iterations,
+#         "ID": all_ids
+#     })
 
-    return r2_mean, r2_median, mse_mean, mse_median, residuals_df
+#     return r2_mean, r2_median, mse_mean, mse_median, residuals_df
 
 
 
@@ -832,7 +830,7 @@ def run_model_variant(dim_parameter_encoder, variant_name, dataset_train, datase
                       latent_dim, noise, encoder, func, reducer, initial_encoder,
                        metrics, residuals, iteration,
                       n_epochs, dataloader_val, train_loader,test_loader,  base_dir,
-                      warmup_noise, warmup_iiv, enable_ae, enable_vae, enable_nf,enable_onlymedian, plot_from_training_records_enable,traing_against_validation,
+                      warmup_noise, warmup_iiv, enable_ae, enable_vae, enable_nf,enable_onlymedian, plot_from_training_records_enable,
                       free_bits, truncation):
     """
     Train, evaluate, append metrics and residuals for a given model variant.
@@ -869,7 +867,7 @@ def run_model_variant(dim_parameter_encoder, variant_name, dataset_train, datase
     warmup_epochs_noise=warmup_noise,  # Epochs for noise warmup (gradual training)
     warmup_epochs_iiv=warmup_iiv,      # Epochs for inter-individual variability warmup
     smoothing_start_epoch=1000,         # Epoch to start smoothing loss (optional)
-    traing_against_validation=traing_against_validation,     # Whether to compute validation loss during training
+    traing_against_validation=False,     # Whether to compute validation loss during training
     enable_ae=enable_ae,  
     enable_vae=enable_vae,    # Whether to train autoencoder components
     enable_nf=enable_nf,      # Whether to train normalizing flows
@@ -929,105 +927,55 @@ def run_model_variant(dim_parameter_encoder, variant_name, dataset_train, datase
         global_mean, global_std, global_max_time,
         enable_nf, enable_ae, enable_vae, enable_onlymedian,
         truncation=truncation, max_plots=3, nr_row=1, nr_col=3,
-        num_simulated_total=100,  # instead of n_samples
+        num_simulated_total=1000,  # instead of n_samples
         ci_lower=0.05, ci_upper=0.95,
         add_noise_to_prediction=False
     )
        
     
-    total_mse, total_LL, _  = evaluate_on_val(
-        global_mean,
-        global_std,
-        global_max_time,
-        global_max_dose,
-        enable_nf,
-        enable_ae,
-        enable_vae,
-        enable_onlymedian,
-        truncation,
-        func,
-        noise,
-        reducer,
-        test_loader,
-        device,
-        encoder,
-        initial_encoder,
-        t_dense,
-    )
+    # total_mse, total_LL, _  = evaluate_on_val(
+    #     global_mean,
+    #     global_std,
+    #     global_max_time,
+    #     global_max_dose,
+    #     enable_nf,
+    #     enable_ae,
+    #     enable_vae,
+    #     enable_onlymedian,
+    #     truncation,
+    #     func,
+    #     noise,
+    #     reducer,
+    #     test_loader,
+    #     device,
+    #     encoder,
+    #     initial_encoder,
+    #     t_dense,
+    # )
     # print(total_mse)
 
-    r2_mean, r2_median, mse_mean, mse_median, res_df=compute_test_metrics(
-   latent_dim, dataset_test, models, device,
-   global_mean, global_std, global_max_time,
-   enable_nf, enable_ae, enable_onlymedian,t_dense,
-   truncation=truncation
-    )
+   #  r2_mean, r2_median, mse_mean, mse_median, res_df=compute_test_metrics(
+   # latent_dim, dataset_test, models, device,
+   # global_mean, global_std, global_max_time,
+   # enable_nf, enable_ae, enable_onlymedian,t_dense,
+   # truncation=truncation
+   #  )
     
-    print(f"R² (mean):   {r2_mean:.4f}")
-    print(f"R² (median): {r2_median:.4f}")
-    print(f"MSE (mean):  {mse_mean:.4f}")
-    print(f"MSE (median):{mse_median:.4f}")
+    # print(f"R² (mean):   {r2_mean:.4f}")
+    # print(f"R² (median): {r2_median:.4f}")
+    # print(f"MSE (mean):  {mse_mean:.4f}")
+    # print(f"MSE (median):{mse_median:.4f}")
 
     
     
-    # Append metrics and residuals
-    append_metrics(metrics, residuals, variant_name, mse_mean, r2_mean,
-                   mse_median, r2_median, mse_validation, res_df)
+    # # Append metrics and residuals
+    # append_metrics(metrics, residuals, variant_name, mse_mean, r2_mean,
+    #                mse_median, r2_median, mse_validation, res_df)
 
-    # Save metrics/residuals
-    export_all_metrics_and_residuals(metrics, residuals, base_dir)
+    # # Save metrics/residuals
+    # export_all_metrics_and_residuals(metrics, residuals, base_dir)
   #  return mse_train 
-def kl_divergence_NF(
-    epoch,
-    warmup_epochs_iiv,
-    mu_q,
-    logvar_q,
-    mu_p,
-    logvar_p,
-    log_det=None,
-    free_bits=0.0,
-    keep_mask=None,
-    log_det_penalty_lambda=0.0,  # new
-):
-    var_q = torch.exp(logvar_q)
-    var_p = torch.exp(logvar_p)
-
-    kl_per_dim = 0.5 * ((var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q)
-    kl_gauss = kl_per_dim.sum(dim=1)  # [B]
-
-    if log_det is not None:
-        kl = kl_gauss - log_det
-    else:
-        kl = kl_gauss
-
-    if free_bits > 0.0:
-        kl = torch.clamp(kl, min=free_bits)
-
-    kl = torch.clamp(kl, min=0.0)
-
-    if keep_mask is not None:
-        # Ensure shape is [B], not [B*D]
-        if keep_mask.dim() > 1:
-            keep_mask = keep_mask.any(dim=1)  # Collapse per-feature mask to per-sample mask
-    
-        keep_mask = keep_mask.view(-1)  # Now shape should be [B]
-        kl = kl * keep_mask
-        denom = keep_mask.sum().clamp(min=1.0)
-        if log_det is not None:
-            log_det = log_det * keep_mask
-    else:
-        denom = kl.size(0)
-
-    # Compute log_det penalty
-    if log_det is not None and log_det_penalty_lambda > 0:
-        log_det_penalty = log_det_penalty_lambda * torch.mean(log_det ** 2)
-    else:
-        log_det_penalty = torch.tensor(0.0, device=kl.device)
-
-    return kl.sum() / denom, log_det.sum() / denom if log_det is not None else None, kl_gauss.sum() / denom, log_det_penalty
-
-
-def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0, mask=None):
+def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
     """
     KL[q||p] between two diagonal Gaussians with optional mask and free bits.
     
@@ -1043,23 +991,18 @@ def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0, mask=
     var_q = torch.exp(logvar_q)
     var_p = torch.exp(logvar_p)
     
+    
     kl_per_dim = 0.5 * ((var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q)  # [B, D]
     kl=kl_per_dim.sum(dim=1)
     # Apply free bits per dim
     if free_bits > 0:
         kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)
-    if mask is not None:
-        # Flatten to [B], keep only valid samples
-        kl=kl_per_dim.sum(dim=1)
+   
+    denom = kl.shape[0]  # number of samples
 
-        mask = mask.view(mask.shape[0], -1).any(dim=1).float()
-        kl = kl * mask
-        denom = mask.sum().clamp(min=1.0)
-    else:
-        denom = kl.shape[0]  # number of samples
+    return kl.mean(), denom
 
 
-    return kl.sum() / denom
 
 
 

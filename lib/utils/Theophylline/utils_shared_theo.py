@@ -19,10 +19,11 @@ from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import norm
 
 import pandas as pd
-from lib.utils.Theophylline.utils_preprocess_theo import standardize_concentration, destandardize_concentration
 
 from torch.nn.utils.rnn import pad_sequence
 
+def standardize_concentration(conc, mean, std): return (conc - mean) / std
+def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
 
 def torch_linear_interpolate2(x_dense, y_dense, x_target):
     """
@@ -236,58 +237,211 @@ def preprocess_batch(batch, device, truncation=1, dose_pad_value=-1.0):
 
 
 
-   
 
-def encode_latent(encoder, t_encoder, x_normalized, 
-                  enable_nf, enable_ae, enable_onlymedian):
+
+
+def encode_latent(
+    encoder,
+    t_encoder,
+    x_normalized,
+    enable_vae,
+    enable_ae,
+    enable_onlymedian,
+    warmup_epochs_iiv=0,
+    epoch=0,
+    min_batch_size=50,
+    augment=False
+):
     """
-    Encodes input sequences into latent space, handling NF, AE, median-only, or VAE cases.
+    Encodes input sequences into latent space, handling AE, median-only, or VAE cases.
+    For VAE, ensures the total number of latent samples (k_param) is at least min_batch_size.
+    If below threshold, repeats each individual the same number of times.
 
     Args:
         encoder: torch module
-        t_encoder: padded time tensor [batch, seq_len]
-        x_normalized: normalized concentration [batch, seq_len]
-        enable_nf: whether to use normalizing flow
-        enable_ae: whether AE mode
+        t_encoder: [batch, seq_len] time tensor
+        x_normalized: [batch, seq_len] normalized concentration tensor
+        enable_vae: use VAE mode
+        enable_ae: use AE mode
         enable_onlymedian: zero latent
+        warmup_epochs_iiv: warmup epochs for KL annealing
+        epoch: current epoch
+        min_batch_size: minimum number of latent samples
 
     Returns:
-        z_refined, mu_q, logvar_q, log_det (log_det is 0 if not NF)
+        k_param: latent samples [batch_repeated, latent_dim]
+        mu_q: mean of latent [batch_repeated, latent_dim]
+        logvar_q: log variance [batch_repeated, latent_dim]
+        repeat_factor: how many times each individual was repeated
     """
-    # Remove first 4 measurements
-    t_encoder_trimmed = t_encoder #[:, 4:]
-    x_normalized_trimmed = x_normalized #[:, 4:]
 
-    if enable_nf:
-        _, z_refined, mu_q, logvar_q, log_det = encoder(t_encoder_trimmed, x_normalized_trimmed)
-    elif enable_ae:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
-        z_refined = mu_q
-        log_det = 0
+    B, T = t_encoder.size()
+    repeat_factor = 1  # default
+
+    # Remove first time step
+    t_encoder_trimmed = t_encoder[:, 1:]
+    x_normalized_trimmed = x_normalized[:, 1:]
+
+    # Handle empty sequence
+    if t_encoder_trimmed.size(1) == 0:
+        latent_dim = getattr(encoder, "latent_dim", 2)
+        k_param = torch.zeros(B, latent_dim, device=t_encoder.device)
+        mu_q = torch.zeros(B, latent_dim, device=t_encoder.device)
+        logvar_q = torch.zeros(B, latent_dim, device=t_encoder.device)
+        return k_param, mu_q, logvar_q, repeat_factor
+
+    # ----------------------------
+    # AE and median-only cases
+    # ----------------------------
+    if enable_ae:
+        _, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        k_param = mu_q
+
     elif enable_onlymedian:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
-        z_refined = torch.zeros_like(mu_q)
-        log_det = 0
-    else:
-        _, _, mu_q, logvar_q, _ = encoder(t_encoder_trimmed, x_normalized_trimmed)
-        std_q = torch.exp(0.5 * logvar_q)
-        z_refined = mu_q + std_q * torch.randn_like(mu_q)
-        log_det = 0
+        
+        k_param, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        k_param = torch.zeros_like(mu_q)
+        mu_q = torch.zeros_like(mu_q)
+        logvar_q = torch.zeros_like(logvar_q)
 
-    return z_refined, mu_q, logvar_q, log_det
+    # ----------------------------
+    # VAE case
+    # ----------------------------
+    elif enable_vae:
+        kl_weight = 1.0 if epoch + 1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
+
+        # Encode original batch
+        _, mu_q, logvar_q = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        std = torch.exp(0.5 * logvar_q)
+        eps = torch.randn_like(std)
+
+        B_current = mu_q.size(0)
+
+        # Repeat individuals if batch too small
+        if B_current < min_batch_size and augment:
+            repeat_factor = int(np.ceil(min_batch_size / B_current))
+            mu_q = mu_q.repeat_interleave(repeat_factor, dim=0)
+            logvar_q = logvar_q.repeat_interleave(repeat_factor, dim=0)
+            eps = eps.repeat_interleave(repeat_factor, dim=0)
+
+        # Compute latent
+        k_param = mu_q + kl_weight * eps * torch.exp(0.5 * logvar_q)
+
+    return k_param, mu_q, logvar_q, repeat_factor
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def use_ema(model):
+    """
+    Context manager to temporarily replace a model's parameters with EMA parameters.
+    Falls back to current parameters if EMA has never been updated.
+
+    Usage:
+        with use_ema(model):
+            y_pred = model(x)
+    """
+    # Check if EMA is available and has been updated
+    has_ema = hasattr(model, "iteration") and model.iteration.item() > 1
+
+    if not has_ema:
+        # Fail-safe: just use the current parameters
+        yield
+        return
+
+    ema_attrs = [
+        name for name, _ in model.named_parameters()
+        if hasattr(model, f"{name.replace('.', '_')}_ema")
+    ]
+    backup = {}
+
+    if ema_attrs:
+        # Backup and swap
+        for name, param in model.named_parameters():
+            backup[name] = param.data.clone()
+            ema_param = getattr(model, f"{name.replace('.', '_')}_ema", None)
+            if ema_param is not None:
+                # Ensure correct device
+                param.data.copy_(ema_param.to(param.device))
+    try:
+        yield
+    finally:
+        # Restore original params
+        for name, param in model.named_parameters():
+            if name in backup:
+                param.data.copy_(backup[name])
 
 
 
+
+
+def normalize_encoder_input(
+    x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list,
+    encoder_med, initial_encoder_med, func_med, reducer_med,
+    t_dense, latent_dim, global_mean, global_std
+):
+    """
+    Normalize encoder input using the median model (EMA weights).
+
+    Args:
+        x_encoder: original encoder input tensor [B, T, D]
+        t_encoder: corresponding time tensor [B, T]
+        x_padded: padded observations [B, T, D]
+        dose_tensor: tensor of dose amounts
+        dose_times_list: list of dose times per batch element
+        encoder_med, initial_encoder_med, func_med, reducer_med: median models
+        t_dense: dense time points for predictions
+        latent_dim: latent dimension size
+        global_mean, global_std: normalization constants
+
+    Returns:
+        x_encoder_norm: normalized encoder input
+    """
+
+    with use_ema(encoder_med):
+        k_param, mu_q_med, logvar_q_med, _ = encode_latent(
+            encoder_med,
+            t_encoder,
+            x_encoder,
+            enable_vae=False,
+            enable_ae=False,
+            enable_onlymedian=True
+        )
+
+    with use_ema(initial_encoder_med):
+        with use_ema(func_med):
+            x0_med, ode_func_med, _, _ = prepare_ode_input(
+                initial_encoder_med,
+                x_padded,
+                k_param,
+                func_med,
+                dose_tensor,
+                dose_times_list,
+                enable_ae=False,
+                enable_onlymedian=True
+            )
+        with use_ema(reducer_med):
+            with use_ema(ode_func_med):
+                pred_interp, pred_batch = make_predictions(
+                    t_encoder, t_dense, x0_med, ode_func_med, reducer_med,
+                    latent_dim, global_mean, global_std
+                )
+
+    # Normalize encoder input
+    x_encoder_norm = destandardize_concentration(x_encoder, global_mean, global_std) / pred_interp
+    x_encoder_norm=x_encoder_norm.detach()
+    return x_encoder_norm
 
 
 def prepare_ode_input(
     initial_encoder,
     x_padded,
-    z_refined,
+    k_param,
     func,
     dose_tensor,
     dose_times_list,
-    enable_vae
+    enable_ae,enable_onlymedian=False, repeat_factor=1
 ):
     """
     Prepare initial state and ODE function for the new TrajectoryDataset.
@@ -295,7 +449,7 @@ def prepare_ode_input(
     Args:
         initial_encoder : nn.Module, encoder for initial state
         x_padded        : (batch, max_len) DV sequences
-        z_refined       : latent refinement tensor
+        k_param       : latent refinement tensor
         func            : ODE function module
         dose_tensor     : (batch,) per-subject doses
         dose_times_list : list of per-subject dose times (tensors)
@@ -306,84 +460,43 @@ def prepare_ode_input(
     """
 
     # Encode initial state
-#    print(x_padded[:, 0])
-    z0, mu, logvar = initial_encoder(x_padded[:, 0].unsqueeze(1))
     
-
-    if enable_vae:
-        x0 = torch.cat([
-               z0 ,
-               z_refined
-           ], dim=1)
+    
+    if repeat_factor > 1:
+        x_padded_repeated = x_padded.repeat_interleave(repeat_factor, dim=0)
     else:
-        x0 = torch.cat([
-               mu + 0.01 * torch.randn_like(mu) ,
-               z_refined + 0.01 * torch.randn_like(z_refined) 
-           ], dim=1)
+        x_padded_repeated = x_padded
         
-
-    dose_mask = (dose_tensor != 0).float().unsqueeze(-1)  # [batch_size, 1]
-
-    # Pad dose_times to a tensor
-    max_doses = max([len(dt) for dt in dose_times_list])
-    dose_times_padded = torch.zeros((len(dose_times_list), max_doses), device=x_padded.device)
-    dose_times_mask = torch.zeros_like(dose_times_padded)
-    for i, dt in enumerate(dose_times_list):
-        if len(dt) > 0:
-            dose_times_padded[i, :len(dt)] = dt
-            dose_times_mask[i, :len(dt)] = 1
-
-    # Expand dose_tensor to match dose_times
-    dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, max_doses).unsqueeze(-1)
-    
-
-
-    # Create ODEWrapper with dose info
-    ode_func = ODEWrapper(
-        func,
-        dose_times_padded,
-        dose_tensor_expanded,
-        dose_mask,
-        dose_times_mask
-    )
-
-    return x0, ode_func, mu, logvar
-
-
-def prepare_ode_input_eval(
-    initial_encoder,
-    x_padded,
-    z_refined,
-    func,
-    dose_tensor,
-    dose_times_list,
-
-):
-    """
-    Prepare initial state and ODE function for the new TrajectoryDataset.
-
-    Args:
-        initial_encoder : nn.Module, encoder for initial state
-        x_padded        : (batch, max_len) DV sequences
-        z_refined       : latent refinement tensor
-        func            : ODE function module
-        dose_tensor     : (batch,) per-subject doses
-        dose_times_list : list of per-subject dose times (tensors)
-
-    Returns:
-        x0       : initial latent state
-        ode_func : ODEWrapper instance
-    """
-
-    # Encode initial state
-#    print(x_padded[:, 0])
-    z0, mu, logvar = initial_encoder(x_padded[:, 0].unsqueeze(1))
-    
-
   
-    x0 = torch.cat([mu ,z_refined], dim=1)
-        
+    x0_1, x0_mu ,logvar_x0 = initial_encoder(x_padded_repeated[:, 0].unsqueeze(1))
+   
+    
+   
 
+    if enable_ae:
+        x0 = torch.cat([
+            x0_mu, #+ 0.01 * torch.randn_like(x0_1),
+            k_param #+ 0.1 * torch.randn_like(k_param) 
+        ], dim=1)
+        
+        x0_mu=torch.zeros_like(x0_mu)
+        logvar_x0=torch.zeros_like(logvar_x0)
+    if enable_onlymedian:
+       x0 = torch.cat([
+           0*x0_mu, #+ 0.01 * torch.randn_like(x0_1),
+           0*k_param #+ 0.1 * torch.randn_like(k_param) 
+       ], dim=1)
+       
+       x0_mu=torch.zeros_like(x0_mu)
+       logvar_x0=torch.zeros_like(logvar_x0)
+        
+    else:    
+        x0 = torch.cat([
+            x0_1, # * torch.randn_like(x0_1),
+            k_param #+ 0.15 * torch.randn_like(k_param) 
+        ], dim=1)
+        
+    # Dose mask: 1 where dose exists, 0 otherwise
     dose_mask = (dose_tensor != 0).float().unsqueeze(-1)  # [batch_size, 1]
 
     # Pad dose_times to a tensor
@@ -396,9 +509,28 @@ def prepare_ode_input_eval(
             dose_times_mask[i, :len(dt)] = 1
 
     # Expand dose_tensor to match dose_times
-    dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, max_doses).unsqueeze(-1)
+    # Ensure dose_tensor is 2D: [batch, max_doses]
+    if dose_tensor.dim() == 0:  # scalar
+        dose_tensor_expanded = dose_tensor.unsqueeze(0).repeat(1, max_doses)
+    elif dose_tensor.dim() == 1:  # [batch]
+        dose_tensor_expanded = dose_tensor.unsqueeze(1).repeat(1, max_doses)
+    else:  # already 2D or more
+        dose_tensor_expanded = dose_tensor
+        if dose_tensor_expanded.size(1) != max_doses:
+            dose_tensor_expanded = dose_tensor_expanded[:, :1].repeat(1, max_doses)
+    
+    # **Remove the last singleton dimension** to make it 2D
+    dose_tensor_expanded = dose_tensor_expanded.to(x_padded.device)  # [batch, max_doses]
     
 
+    if repeat_factor > 1:
+        # Repeat batch-dependent tensors along dim=0
+        dose_mask = dose_mask.repeat_interleave(repeat_factor, dim=0)
+        dose_times_padded = dose_times_padded.repeat_interleave(repeat_factor, dim=0)
+        dose_times_mask = dose_times_mask.repeat_interleave(repeat_factor, dim=0)
+        dose_tensor_expanded = dose_tensor_expanded.repeat_interleave(repeat_factor, dim=0)
+    
+   
 
     # Create ODEWrapper with dose info
     ode_func = ODEWrapper(
@@ -409,32 +541,38 @@ def prepare_ode_input_eval(
         dose_times_mask
     )
 
-    return x0, ode_func, mu, logvar
+    return x0, ode_func, x0_mu, logvar_x0
 
 
 
-def make_predictions(t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std):
+
+
+
+def make_predictions(t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std, repeat_factor=1):
     """
     Runs ODE forward and interpolates predictions at given time points.
-    Returns:
-        pred_interp: interpolated predictions at t_padded
-        pred_batch: full ODE trajectory at dense time points
+    Scales extreme predictions to keep gradients alive.
     """
-    batch_size = t_padded.size(0)
+    # Expand t_padded if batch was repeated
+    if repeat_factor > 1:
+        t_padded = t_padded.repeat_interleave(repeat_factor, dim=0)
 
+    batch_size = t_padded.size(0)
+    
     # Solve ODE
-    pred = odeint(ode_func, x0, t_dense, method="rk4")
-    
-    pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim]
-    
-    
-    
-    # Reduce dimension and interpolate back to t_padded
-    t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
+    pred = odeint(ode_func, x0, t_dense, method="rk4")  # [time, batch, latent_dim_total]
+
+    # Smoothly scale down large values while preserving gradients
+    pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim_total]
+  
+    # Reduce dimension
     reduced = reducer(pred_batch[:, :, :latent_dim])
     
-    reduced= destandardize_concentration(reduced, global_mean, global_std)
+    # Destandardize
+    reduced = destandardize_concentration(reduced, global_mean, global_std)
     
+    # Interpolate back to padded time points
+    t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
     pred_interp = batch_linear_interpolate_1d(reduced, t_dense_exp, t_padded)
-    
+
     return pred_interp, reduced

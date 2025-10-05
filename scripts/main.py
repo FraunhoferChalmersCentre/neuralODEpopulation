@@ -40,8 +40,8 @@ if __name__ == "__main__":
     from lib.utils.utils_preprocess import load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset, collate_fn
     from lib.utils.utils_training import   train_loop_model
     from lib.utils.utils_shared import ODEWrapper
-    from lib.utils.utils_post_processing import plot_encoder_vs_samples, plot_encoder_histograms, generate_dose_percentiles2, build_dose_predictors_from_datasets, plot_individual_fits, plot_two_models_encoders_and_regression, vpc_2, vpc
-    from lib.models.NNmodels import InitialConditionVAEEncoder, DoseClassifier, Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
+    from lib.utils.utils_post_processing import plot_encoder_vs_samples, plot_encoder_histograms, plot_individual_fits, plot_two_models_encoders_and_regression, vpc
+    from lib.models.NNmodels import InitialConditionVAEEncoder, ODEFunc, SimpleDecoder, InitialConditionEncoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
     parser.add_argument("--data_path", type=str, required=True, help="Path to training CSV file")

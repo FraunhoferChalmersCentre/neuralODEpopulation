@@ -6,8 +6,11 @@ import torch
 
 
 from lib.utils.utils_preprocess import destandardize_concentration
-from lib.utils.utils_post_processing import compute_residuals, plot_individual_fits
-from lib.utils.utils_shared import encode_latent, preprocess_batch, prepare_ode_input, make_predictions
+from lib.utils.utils_post_processing import use_ema, compute_residuals, plot_individual_fits
+from lib.utils.utils_shared import use_ema, normalize_encoder_input, encode_latent, preprocess_batch, prepare_ode_input, make_predictions
+
+
+
 
 
 
@@ -177,7 +180,7 @@ def compute_loss_and_metrics(encoder, dose_labels,
     mu_x0, logvar_x0,
     epoch, warmup_epochs_iiv, free_bits,
     enable_ae, enable_vae,
-    noise, global_mean, global_min,
+    noise, global_mean, global_std,
     only_median_training=False,
     replace_mask=None, repeat_factor=1  # shape [batch_size]
 ):
@@ -196,9 +199,12 @@ def compute_loss_and_metrics(encoder, dose_labels,
   
     # === Reconstruction loss from error model ===
     recon_loss_noise, mse = noise.nll(
-        destandardize_concentration(x_padded, global_mean, global_min),
+        destandardize_concentration(x_padded, global_mean, global_std),
         pred_interp,replace_mask,mask
     )
+    
+    
+   
     # mask: [batch_size, seq_len], True for valid points
    
 
@@ -225,10 +231,10 @@ def compute_loss_and_metrics(encoder, dose_labels,
  
     KL_loss_k,denom = kl_divergence_gaussians(mu_q, logvar_q, mu_std, logvar_std, free_bits_on)
     KL_loss_x0,denom = kl_divergence_gaussians(mu_x0, logvar_std_x0, mu_std_x0,logvar_x0 , free_bits_on)
-    KL_loss= KL_loss_k# + KL_loss_x0
-    KL_loss = KL_loss.sum()/denom
+    KL_loss= KL_loss_k  + KL_loss_x0
+   # KL_loss = KL_loss
     
-    loss = 10*kl_weight * KL_loss + recon_loss_noise #+ mu_q_loss.sum()
+    loss = kl_weight * KL_loss + recon_loss_noise #+ mu_q_loss.sum()
 
 
     return loss, recon_loss_noise, mse, KL_loss, KL_loss
@@ -393,7 +399,7 @@ def log_training_epoch(end_time, epoch, total_mse, total_loss, total_recon, tota
 
 def evaluate_on_val(
     global_mean,
-    global_min,
+    global_std,
     global_max_time,
     global_max_dose,
     enable_ae,
@@ -460,7 +466,7 @@ def evaluate_on_val(
 
         # --- Compute loss and metrics ---
         pred_interp, pred_batch = make_predictions(
-            t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_min
+            t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std
         )
         
         
@@ -468,7 +474,7 @@ def evaluate_on_val(
        
         # --- Compute reconstruction loss ---
         recon_loss_noise, mse = noise.nll(
-        destandardize_concentration(x_padded, global_mean, global_min),
+        destandardize_concentration(x_padded, global_mean, global_std),
         pred_interp
         )
         
@@ -477,7 +483,7 @@ def evaluate_on_val(
             mu_q, logvar_q, log_det,
             10, 0, 0,
             enable_ae, enable_vae,
-            noise, global_mean, global_min
+            noise, global_mean, global_std
         )
         
         
@@ -525,13 +531,13 @@ def freeze_all_modules(*modules):
 
 def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, encoder_med, 
     dataset, dataset_val, global_max_time, global_max_dose,
-    global_mean, global_min, main_params, dataloader_val, dataloader, models,
+    global_mean, global_std, main_params, dataloader_val, dataloader, models,
     optimizer, scheduler, func, reducer, initial_encoder, encoder, noise, t_dense,
     n_epochs, warmup_epochs_noise, warmup_epochs_iiv, smoothing_start_epoch,
     traing_against_validation, enable_ae,enable_vae,
-    enable_onlymedian,normalization,  plot_training, free_bits,
+    enable_onlymedian,normalization,
     truncation, print_epoch=1, plot_epoch=1, max_plots=4,
-    nr_col=1, nr_row=5
+    nr_col=1, nr_row=5, free_bits=1
 ):
     # === Initialize training ===
     device, latent_dim, dim_parameter_encoder, best_val_mse, best_val_LL, best_val_loss, \
@@ -593,11 +599,13 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
             # Unpack batch
             (
              occ_list,          # id_list
+             treatment_list,
              t_padded,          # padded time
              x_global_padded,   # padded global features
              mask,              # time mask
              dose_tensor,       # dose amounts
              dose_times_list,   # dose start times
+             evid
        
 
          ) = batch
@@ -608,53 +616,16 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
             
             # --- Preprocess batch ---
             # --- Preprocess batch ---
-            id_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask_dose, dose_tensor, dose_times_list = preprocess_batch(
+            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask_dose, dose_tensor, dose_times_list, evid = preprocess_batch(
                 batch, device, truncation=truncation
             )
            
             
             
             if normalization:
-         
-                # --- Encode latent ---
-                k_param, _, _, = encode_latent(
-                    encoder_med,
-                    t_encoder,
-                    x_encoder,
-                    enable_vae=False,
-                    enable_ae=False,
-                    enable_onlymedian=True
-                )
-                
-                
-                x0, ode_func = prepare_ode_input(
-                    initial_encoder_med,
-                    x_padded,
-                    k_param,
-                    func_med,
-                    dose_tensor,
-                    dose_times_list,
-                    False
-                )
-                
-                
-                
-                pred_interp, _ = make_predictions(
-                    t_encoder, t_dense, x0, ode_func, reducer_med, latent_dim,global_mean,global_min
-                )
-                
-        
-          
-                
-               # pred_interp_clamped = torch.clamp(pred_interp, min=1.0)  # [num_subjects, seq_len]
-              #  subject_medians = pred_interp_clamped.median(dim=1, keepdim=True)[0]  # shape [num_subjects, 1]
-                
-                x_encoder = destandardize_concentration(x_encoder, global_mean, global_min)/pred_interp  #  / subject_medians
-                x_encoder=x_encoder.detach()
-                                
-       
-            
-                
+                x_encoder = normalize_encoder_input( x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
+                 encoder_med, initial_encoder_med, func_med, reducer_med,
+                 t_dense, latent_dim, global_mean, global_std)
             
             k_param, mu_q, logvar_q, repeat_factor = encode_latent(
                 encoder,
@@ -673,8 +644,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
             
             
             k_param, mask_dropout = replace_with_gaussian_noise(k_param,p_dropout)
-            if enable_onlymedian:
-                k_param = k_param*0
+
           
             
             x0, ode_func, mu_x0, logvar_x0 = prepare_ode_input(
@@ -684,16 +654,19 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
                 func,
                 dose_tensor,
                 dose_times_list,
+                evid,
                 enable_ae,
+                enable_onlymedian,
                 repeat_factor
                 
             )
+            if enable_onlymedian:
+                x0 = x0*0
             
-           # print(x0)
-            
+         
           
             pred_interp, pred_batch = make_predictions(
-                t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_min,repeat_factor
+                t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std,repeat_factor
             )
        
 
@@ -708,7 +681,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
                 mu_x0, logvar_x0,
                 epoch, warmup_epochs_iiv, free_bits,
                 enable_ae, enable_vae,
-                noise, global_mean, global_min, enable_onlymedian, mask_dropout,repeat_factor
+                noise, global_mean, global_std, enable_onlymedian, mask_dropout,repeat_factor
             )
        
             
@@ -742,20 +715,20 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
      
                 
                 
-        if plot_training and  epoch % print_epoch != 0:
-            plot_individual_fits(
-                latent_dim, t_dense, models, dataloader, device,
-                global_mean, global_min, global_max_time,
-                enable_vae, enable_ae, enable_onlymedian,
-                truncation=truncation, max_plots=max_plots, nr_row=nr_row, nr_col=nr_col, n_samples=10, ci_lower=0.05, ci_upper=0.95
-            )
+        # if plot_training and  epoch % print_epoch != 0:
+        #     plot_individual_fits(
+        #         latent_dim, t_dense, models, dataloader, device,
+        #         global_mean, global_std, global_max_time,
+        #         enable_vae, enable_ae, enable_onlymedian,
+        #         truncation=truncation, max_plots=max_plots, nr_row=nr_row, nr_col=nr_col, n_samples=10, ci_lower=0.05, ci_upper=0.95
+        #     )
 
         # --- Validation and early stopping ---
         if traing_against_validation and epoch > warmup_epochs_iiv:
        
             
             val_mse, val_LL, val_loss = evaluate_on_val(
-                global_mean, global_min, global_max_time, global_max_dose,
+                global_mean, global_std, global_max_time, global_max_dose,
                 enable_vae, enable_ae,enable_vae,enable_onlymedian, truncation,
                 func, noise, reducer, dataloader_val,
                 device, encoder, initial_encoder, t_dense
@@ -795,7 +768,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
 
 def run_model_variant(variant_name, train_dataset, val_dataset, test_dataset,
                       models, main_params, optimizer, scheduler, combined,
-                      global_max_dose, global_max_time, global_mean, global_min,
+                      global_max_dose, global_max_time, global_mean, global_std,
                       latent_dim, noise, encoder, func, reducer, initial_encoder,
                       ODEWrapper, device, metrics, residuals, iteration,
                       n_epochs, train_loader, val_loader,test_loader,  base_dir,
@@ -816,7 +789,7 @@ def run_model_variant(variant_name, train_dataset, val_dataset, test_dataset,
     global_max_time,                # Maximum time value for normalization/scaling
     global_max_dose,                # Maximum dose value for normalization/scaling
     global_mean,                    # Global mean of observations (for destandardization)
-    global_min,                     # Global standard deviation of observations
+    global_std,                     # Global standard deviation of observations
     main_params,                    # Dictionary of main training parameters (e.g., learning rate)
     val_loader,                     # Validation dataloader
     train_loader,                  # Training dataloader
@@ -852,14 +825,14 @@ def run_model_variant(variant_name, train_dataset, val_dataset, test_dataset,
    # # mse_mean, r2_mean, mse_median, r2_median, res_df = #
     plot_individual_fits(
        latent_dim, combined, models, test_loader, device,
-       global_mean, global_min, global_max_time,
+       global_mean, global_std, global_max_time,
        enable_vae, enable_ae, enable_onlymedian,
        truncation=truncation, max_plots=3, nr_row=1, nr_col=3, n_samples=1000, ci_lower=0.025, ci_upper=0.975)
        
     
     total_mse, total_LL = evaluate_on_val(
         global_mean,
-        global_min,
+        global_std,
         global_max_time,
         global_max_dose,
         enable_vae,
@@ -876,11 +849,11 @@ def run_model_variant(variant_name, train_dataset, val_dataset, test_dataset,
         combined,
     )
   # otal_mse)
-    compute_residuals(latent_dim, global_mean, global_min, func, encoder, reducer, initial_encoder, noise, train_loader, combined, device, 0.35)
+    compute_residuals(latent_dim, global_mean, global_std, func, encoder, reducer, initial_encoder, noise, train_loader, combined, device, 0.35)
 
    #  r2, mse=compute_test_loss(
    #     latent_dim, combined, models, test_dataset, device,
-   #     global_mean, global_min, global_max_time,
+   #     global_mean, global_std, global_max_time,
    #     enable_vae, enable_vae, enable_onlymedian,
    #     truncation=truncation, max_plots=25, nr_row=5, nr_col=5, n_samples=2, ci_lower=0.05, ci_upper=0.95
    # )
@@ -919,7 +892,7 @@ def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
    
     denom = kl.shape[0]  # number of samples
 
-    return kl, denom
+    return kl.mean(), denom
 
 
     

@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     from lib.utils.Theophylline.utils_preprocess_theo import prepare_optimizer, prepare_datasets_and_loaders, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset, collate_fn
     from lib.utils.Theophylline.utils_training_theo import run_model_variant
-    from lib.models.NNmodels import Encoder_Transformer_NF, ODEFunc, SimpleDecoder, InitialConditionVAEEncoder, TrainableNoise
+    from lib.models.NNmodels import Encoder_Transformer, ODEFunc, SimpleDecoder, InitialConditionVAEEncoder, TrainableNoise
     
  
     # Define your parser
@@ -87,7 +87,7 @@ if __name__ == "__main__":
 
 
     for i in range(n_repeats):    
-        dataset_train, dataset_test, train_loader,test_loader, combined, global_max_dose, global_max_time, global_mean, global_std, global_max_value = prepare_datasets_and_loaders(
+        dataset_train, dataset_test, train_loader,test_loader, t_dense, global_max_dose, global_max_time, global_mean, global_std, global_max_value = prepare_datasets_and_loaders(
     args.data_path, args.base_dir, all_ids, i,already_done, device, batch_fraction=0.3, truncation=0.3)
 
         
@@ -98,14 +98,14 @@ if __name__ == "__main__":
         
   
     
-        encoder = Encoder_Transformer_NF(
+        encoder = Encoder_Transformer(
             dim_parameter_encoder, input_dim=2, model_dim=64, hidden_dim=64,
-            hidden_flow_dim=16, num_heads=4, num_layers=2, num_flow_layers=3, dropout=0.1).to(device)
+            num_heads=4, num_layers=2, dropout=0.1).to(device)
     
         func = ODEFunc(latent_dim, dim_parameter_encoder, hid_dim).to(device)
         reducer = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
         initial_encoder = InitialConditionVAEEncoder(latent_dim, hidden_dim=32).to(device)
-        noise = TrainableNoise(size=1, init_add_std=0.3, init_prop_std=0.02).to(device)
+        noise = TrainableNoise(size=1, init_add_std=0.3, init_prop_std=0).to(device)
     
         models = {
             "func": func,
@@ -130,7 +130,7 @@ if __name__ == "__main__":
             main_params=main_params,
             optimizer=optimizer,
             scheduler=scheduler,
-            combined=combined,
+            t_dense=t_dense,
             global_max_dose=global_max_dose,
             global_max_time=global_max_time,
             global_mean=global_mean,
@@ -175,7 +175,7 @@ if __name__ == "__main__":
             main_params=main_params,
             optimizer=optimizer,
             scheduler=scheduler,
-            combined=combined,
+            t_dense=t_dense,
             global_max_dose=global_max_dose,
             global_max_time=global_max_time,
             global_mean=global_mean,
@@ -218,7 +218,7 @@ if __name__ == "__main__":
             main_params=main_params,
             optimizer=optimizer,
             scheduler=scheduler,
-            combined=combined,
+            t_dense=t_dense,
             global_max_dose=global_max_dose,
             global_max_time=global_max_time,
             global_mean=global_mean,
@@ -232,13 +232,13 @@ if __name__ == "__main__":
             metrics=metrics,
             residuals=residuals,
             iteration=i,
-            n_epochs=n_epochs,
+            n_epochs=1,
             dataloader_val=train_loader,
             train_loader=train_loader,
             test_loader=test_loader,
             base_dir=args.base_dir,
-            warmup_noise=1000,
-            warmup_iiv=20,
+            warmup_noise=0,
+            warmup_iiv=0,
             enable_ae=False,
             enable_vae=True,
             enable_nf=False,

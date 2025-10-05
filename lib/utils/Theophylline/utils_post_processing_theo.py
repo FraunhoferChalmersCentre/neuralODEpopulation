@@ -18,18 +18,22 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import norm
 
-from lib.utils.Theophylline.utils_preprocess_theo import standardize_concentration, destandardize_concentration, collate_fn
-from lib.utils.Theophylline.utils_shared_theo import encode_latent, preprocess_batch, prepare_ode_input, make_predictions, prepare_ode_input_eval
+from lib.utils.Theophylline.utils_preprocess_theo import  collate_fn
+from lib.utils.Theophylline.utils_shared_theo import standardize_concentration, destandardize_concentration, encode_latent, preprocess_batch, prepare_ode_input, make_predictions
 from torch.nn.utils.rnn import pad_sequence
 
 from contextlib import contextmanager
 import pandas as pd
 
 
-def plot_individual_fits(dataset,
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+def plot_individual_fits(
+    dataset,
     latent_dim, t_dense, models, dataloader, device,
     global_mean, global_std, global_max_time,
-    enable_nf, enable_ae,enable_vae, enable_onlymedian,
+    enable_nf, enable_ae, enable_vae, enable_onlymedian,
     truncation, max_plots=25, nr_row=5, nr_col=5,
     num_simulated_total=200,  # instead of n_samples
     ci_lower=0.05, ci_upper=0.95,
@@ -39,12 +43,23 @@ def plot_individual_fits(dataset,
     Plots individual predictions with median and confidence intervals for a trained model.
     Uses simulation-based sampling (like generate_plot_data) for uncertainty estimates.
     """
+
+    # ---- STYLE VARIABLES ----
+    TITLE_SIZE   = 22   # subplot title font size
+    LABEL_SIZE   = 20   # x/y axis label font size
+    TICK_SIZE    = 18   # tick font size
+    LEGEND_SIZE  = 20   # legend font size
+    LEGEND_NCOLS = 4    # number of legend columns
+    LEGEND_Y_POS = -0.15  # smaller = lower outside the figure
+
+    # ---- MODELS ----
     encoder = models['encoder']
     initial_encoder = models['initial_encoder']
     func = models['func']
     reducer = models['reducer']
     noise = models.get('noise', None)
 
+    # ---- FIGURE ----
     fig, axes = plt.subplots(nr_row, nr_col, figsize=(5*nr_col, 4*nr_row))
     axes = axes.flatten() if nr_row*nr_col > 1 else [axes]
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
@@ -53,27 +68,24 @@ def plot_individual_fits(dataset,
         if i >= max_plots:
             break
 
-        # Preprocess batch (single subject)
+        # ---- DATA PREP ----
         id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, masks_list = preprocess_batch(
             data, device, truncation=truncation
         )
 
-        # Repeat the same subject num_simulated_total times
         t_padded_exp = t_padded.expand(num_simulated_total, *t_padded.shape[1:])
         x_padded_exp = x_padded.expand(num_simulated_total, *x_padded.shape[1:])
         dose_tensor_exp = dose_tensor.expand(num_simulated_total, *dose_tensor.shape[1:])
 
-        # Encode latent (resample)
-        z_refined, mu_q, logvar_q, log_det = encode_latent(
+        z_refined, mu_q, logvar_q, _ = encode_latent(
             encoder,
             t_encoder,
             x_encoder,
-            enable_nf=enable_nf,
+            enable_vae=True,
             enable_ae=enable_ae,
             enable_onlymedian=enable_onlymedian
         )
 
-        # If VAE mode, resample latent codes
         if enable_vae:
             eps = torch.randn(num_simulated_total, z_refined.size(-1), device=z_refined.device)
             z_refined = mu_q + eps * torch.exp(0.5 * logvar_q)
@@ -81,78 +93,71 @@ def plot_individual_fits(dataset,
             eps = torch.randn(num_simulated_total, z_refined.size(-1), device=z_refined.device)
             z_refined = mu_q + 0*eps * torch.exp(0.5 * logvar_q)
 
-        # Prepare ODE input
-        x0, ode_func,mu_IC,logvar_IC = prepare_ode_input(
+        x0, ode_func, mu_IC, logvar_IC = prepare_ode_input(
             initial_encoder,
             x_padded_exp,
             z_refined,
             func,
             dose_tensor_exp,
-            dose_times_list, # * num_simulated_total,  # repeat dose_times list
+            dose_times_list,
             enable_vae
         )
-        
-        
+
         if enable_vae:
-            eps = torch.randn_like(mu_IC, device=z_refined.device)  # shape [batch_size, latent_dim]
-            x0_new = mu_IC + eps * torch.exp(0.5 * logvar_IC)          # shape [batch_size, latent_dim]
+            eps = torch.randn_like(mu_IC, device=z_refined.device)
+            x0_new = mu_IC + eps * torch.exp(0.5 * logvar_IC)
             x0[:, :x0_new.size(1)] = x0_new
 
-            
-       
-        
-      #  print(x0)
-
-        # Make predictions
         pred_interp, pred_batch = make_predictions(
             t_padded_exp, t_dense, x0, ode_func,
             reducer, latent_dim, global_mean, global_std
         )
-        
-        # for k in range(100):
-        #     plt.plot(
-        #         t_dense.detach().cpu().numpy(),
-        #         pred_batch[k].detach().cpu().numpy(),
-        #         alpha=0.5
-        #     )
-
-        
-     
 
         if add_noise_to_prediction and noise is not None:
             mask = pred_batch > 0
             pred_batch = torch.where(mask, noise.sample(pred_batch, n_samples=1).squeeze(0), pred_batch)
             pred_batch = torch.clamp(pred_batch, min=0)
 
-        # Compute quantiles across simulations
+        # ---- QUANTILES ----
         pred_lower = torch.quantile(pred_batch, ci_lower, dim=0).detach().cpu().numpy()
         pred_median = torch.quantile(pred_batch, 0.5, dim=0).detach().cpu().numpy()
         pred_upper = torch.quantile(pred_batch, ci_upper, dim=0).detach().cpu().numpy()
         t_dense_np = t_dense.detach().cpu().numpy() * global_max_time
 
-        # Observed values
         t_encoder_np = t_encoder.squeeze(0).detach().cpu().numpy() * global_max_time
         x_encoder_np = (x_encoder.squeeze(0).detach().cpu().numpy() * global_std + global_mean)
 
         t_cut_np = t_cut.squeeze(0).detach().cpu().numpy() * global_max_time
-       # print(t_cut_np)
         x_cut_np = (x_cut.squeeze(0).detach().cpu().numpy() * global_std + global_mean)
 
-        # Plot
+        # ---- PLOT ----
         ax = axes[i]
         ax.plot(t_encoder_np, x_encoder_np, 'o', color='blue', label='Observed (used)')
         if len(t_cut_np) > 0:
             ax.plot(t_cut_np, x_cut_np, 'o', color='red', label='Removed')
         ax.plot(t_dense_np, pred_median, '-', color='green', label='Predicted median')
-        ax.fill_between(t_dense_np, pred_lower, pred_upper, color='green', alpha=0.3, label=f'{int((ci_upper-ci_lower)*100)}% CI')
+        ax.fill_between(t_dense_np, pred_lower, pred_upper, color='green', alpha=0.3, label='90 % CI')
 
-        ax.set_title(f'Individual {id_list}')
-        ax.set_xlabel('Time (hours)')
-        ax.set_ylabel('Concentration')
-        ax.legend()
+        # ---- STYLES ----
+        ax.set_title(f'Individual {id_list}', fontsize=TITLE_SIZE)
+        ax.set_xlabel('Time (hours)', fontsize=LABEL_SIZE)
+        ax.set_ylabel('Concentration', fontsize=LABEL_SIZE)
+        ax.tick_params(axis='both', which='major', labelsize=TICK_SIZE)
 
-    plt.tight_layout()
+    # ---- SINGLE LEGEND ----
+    custom_lines = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', label='Observed (used)', markersize=10),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', label='Removed', markersize=10),
+        Line2D([0], [0], color='green', lw=3, label='Predicted median'),
+        Line2D([0], [0], color='green', lw=10, alpha=0.3, label='90 % CI')
+    ]
+    fig.legend(handles=custom_lines, loc='lower center',
+               fontsize=LEGEND_SIZE, ncol=LEGEND_NCOLS,
+               bbox_to_anchor=(0.5, LEGEND_Y_POS))
+
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
     plt.show()
+
 
 
 
@@ -258,8 +263,8 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
                             
                             
                             # Encode latent
-                            z_refined, mu_q, logvar_q, log_det = encode_latent(
-                                encoder, t_encoder, x_encoder, enable_nf=enable_nf, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
+                            z_refined, mu_q, logvar_q, _ = encode_latent(
+                                encoder, t_encoder, x_encoder, enable_vae=True, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
                             )
                             
                             if enable_vae:
@@ -432,18 +437,19 @@ def compute_residuals(dataset, latent_dim, global_mean, global_std,global_max_ti
             )
     
             # Encode latent
-            z_refined, mu_q, logvar_q, log_det = encode_latent(
-                encoder, t_encoder, x_encoder, enable_nf=False, enable_ae=True, enable_onlymedian=False
+            z_refined, mu_q, logvar_q, _ = encode_latent(
+                encoder, t_encoder, x_encoder, enable_vae=False, enable_ae=True, enable_onlymedian=False
             )
     
             # Prepare ODE input
-            x0, ode_func, _, _ = prepare_ode_input_eval(
+            x0, ode_func, _, _ = prepare_ode_input(
                 initial_encoder,
                 x_padded,
                 z_refined,
                 func,
                 dose_tensor,
-                dose_times_list
+                dose_times_list,
+                enable_ae=True,
             )
             
     
@@ -692,12 +698,12 @@ def analyze_model_with_vpc(
                 batch, device, truncation=truncation
             )
 
-            z_refined, mu_q, logvar_q, log_det = encode_latent(
+            z_refined, mu_q, logvar_q, _ = encode_latent(
                 encoder, t_encoder, x_encoder,
                 enable_nf=False, enable_ae=True, enable_onlymedian=False
             )
 
-            x0, ode_func, _, _ = prepare_ode_input_eval(
+            x0, ode_func, _, _ = prepare_ode_input(
                 initial_encoder, x_padded, z_refined, func, dose_tensor, dose_times_list
             )
 

@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+Created on Sat Oct  4 14:22:45 2025
+
+@author: Baaz
+"""
+
+# -*- coding: utf-8 -*-
+"""
 Created on Thu Sep 25 20:10:26 2025
 
 @author: Baaz
@@ -33,9 +40,9 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-                '--data_validation_path', 'lib/data/tumor_data_val.csv', 
-                '--data_test_path', 'lib/data/tumor_data.csv', 
-                '--data_path', 'lib/data/tumor_data.csv',
+                '--data_validation_path', 'lib/data/Simulated_ODE2_validation.csv', 
+                '--data_test_path', 'lib/data/Simulated_ODE2_test.csv', 
+                '--data_path', 'lib/data/Simulated_ODE2.csv',
                 '--save_dir', 'models',
                 '--load_dir', 'models']
     
@@ -78,7 +85,7 @@ if __name__ == "__main__":
     
     
     global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df)
-    dataset_train, dataset_val, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, t_dense, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders_simulated(args.data_path, args.data_validation_path, args.data_test_path, global_mean, global_max_dose, global_max_time, global_mean,global_std, global_std, device, batch_fraction=0.1,time_points=12)
+    dataset_train, dataset_val, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, t_dense, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders_simulated(args.data_path, args.data_validation_path, args.data_test_path, global_mean, global_max_dose, global_max_time, global_mean,global_std, global_std, device, batch_fraction=0.1,time_points=120)
 
     
     
@@ -88,7 +95,7 @@ if __name__ == "__main__":
 
 
     latent_dim=2
-    dim_parameter_encoder=1
+    dim_parameter_encoder=2
     hid_dim=512
  
     
@@ -190,13 +197,13 @@ if __name__ == "__main__":
 
 
 
-    truncation=0.5
+    truncation=0.7
   #  save_models(models, save_dir, "test1")
     encoder_ae = Encoder_Transformer(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
     func_ae = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim,number_drugs ).to(device)
     reducer_ae = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
     initial_encoder_ae = InitialConditionVAEEncoder(latent_dim, hidden_dim=8).to(device)
-    noise_ae = TrainableNoise(size=1, init_add_std=30, init_prop_std=0).to(device)
+    noise_ae = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
 
     models = {
     "func": func_ae,
@@ -237,7 +244,7 @@ if __name__ == "__main__":
        noise=noise_ae,
        t_dense=t_dense,
        n_epochs=10000,
-       warmup_epochs_noise=1500,
+       warmup_epochs_noise=100,
        warmup_epochs_iiv=0,
        smoothing_start_epoch=0,
        traing_against_validation=False,
@@ -245,8 +252,6 @@ if __name__ == "__main__":
        enable_vae=True,
        enable_onlymedian=False,
        normalization=True,
-       plot_training=False,
-       free_bits=1,
        truncation=truncation,
        print_epoch=1
  
@@ -303,7 +308,29 @@ if __name__ == "__main__":
     
     
     
-    
+    plot_individual_fits(
+         models,
+         encoder_med, initial_encoder_med, func_med, reducer_med,
+         dataset_train,
+         device,
+         t_dense,
+         global_mean,
+         global_std,
+         truncation=0,
+         max_plots=200,
+         n_samples=10,
+         ci_lower=0.05,
+         ci_upper=0.95,
+         nr_row=20,
+         nr_col=10,
+         enable_vae=True,
+         enable_ae=False,
+         enable_onlymedian=False,
+         add_noise=True,
+         use_ema_models=False,
+         normalization=True,
+         fontsize=14  # Added a parameter to control font size
+       ) 
     
     
   ##################################### Not working function below  
@@ -317,27 +344,7 @@ if __name__ == "__main__":
  
     
   
-#     plot_individual_fits(
-#       models,
-#       dataset_train,
-#       device,
-#       t_dense,
-#       global_mean,
-#       global_std,
-#       truncation=1,
-#       max_plots=6,
-#       n_samples=100,
-#       ci_lower=0.05,
-#       ci_upper=0.95,
-#       nr_row=2,
-#       nr_col=3,
-#       enable_vae=True,
-#       enable_ae=False,
-#       enable_onlymedian=False,
-#       add_noise=True,
-#       use_ema_models=False,
-#       fontsize=14  # Added a parameter to control font size
-#     )
+
     
     
 #     estimate_coverage(

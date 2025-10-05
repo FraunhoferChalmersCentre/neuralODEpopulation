@@ -18,41 +18,31 @@ Created on Fri Jun 27 10:09:53 2025
 
 @author: Baaz
 """
-#import ast
-#import numpy as np
-#import pandas as pd
-#import matplotlib.pyplot as plt
-#import matplotlib.patches as mpatches
 
 import torch
 import torch.nn as nn
-#from torch.utils.data import Dataset, DataLoader
-#from torch.nn.utils.rnn import pad_sequence
-#from torchdiffeq import odeint_adjoint as odeint
 
-
-#from sklearn.decomposition import PCA
-#from sklearn.ensemble import RandomForestRegressor
-#from sklearn.metrics import r2_score
 import math
-#import os
 
-#import torch.nn.functional as F
 
 
 
 class ODEFunc(nn.Module):
     """
     ODE function with optional EMA for parameters, dose handling, and skip connection.
+    Supports multiple event types via `evid` (bolus=1, infusion=2, observation=0).
     """
-    def __init__(self, latent_dim, dim_parameter_encoder, hid_dim):
+    def __init__(self, latent_dim, dim_parameter_encoder, hid_dim, drug_dim):
         super().__init__()
+        self.drug_dim=drug_dim
         self.dim_latent = latent_dim
         self.dim_parameter_encoder = dim_parameter_encoder
 
         # Deep network
         self.net = nn.Sequential(
-            nn.Linear(latent_dim + dim_parameter_encoder + 1, hid_dim),
+            nn.Linear(latent_dim + dim_parameter_encoder + drug_dim, hid_dim),
+            nn.SELU(),
+            nn.Linear(hid_dim, hid_dim),
             nn.SELU(),
             nn.Linear(hid_dim, hid_dim),
             nn.SELU(),
@@ -61,7 +51,7 @@ class ODEFunc(nn.Module):
 
         # Skip connection
         self.skip = nn.Sequential(
-            nn.Linear(latent_dim + dim_parameter_encoder + 1, latent_dim)
+            nn.Linear(latent_dim + dim_parameter_encoder + drug_dim, latent_dim)
         )
 
         # Noise parameter for dose pulses
@@ -86,45 +76,75 @@ class ODEFunc(nn.Module):
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
 
-    # === Sigma getter ===
     def get_sigma(self):
         return torch.exp(self.log_sigma)
+    
 
-    # === Dose pulse computation ===
-    def dirac_pulse(self, t, dose_times, dose_amounts, dose_mask):
+    def make_drug_masks(self, evid, n_drugs):
         """
-        Compute Gaussian-smoothed dose pulses at given time points.
+        Create one mask per drug based on EVID.
         """
-        sigma = self.get_sigma()
-        diff = t - dose_times  # [batch_size, num_doses]
+        n_drugs = int(n_drugs)
+        masks = []
+        for drug_id in range(1, n_drugs + 1):
+            mask = (evid.long() == drug_id).float()
+            masks.append(mask)
+        return masks
 
-        # Only past doses
-        mask = (diff >= 0).float() * dose_mask.float()
-        gauss = torch.exp(-0.5 * (diff / sigma) ** 2) * mask
-
-        if dose_amounts.dim() == 3:
-            dose_amounts = dose_amounts.squeeze(-1)
-
-        weighted = gauss * dose_amounts
-        dose_signal = weighted.sum(dim=1, keepdim=True)  # [batch_size, 1]
-        # if t.item() == 0:
-        #     dose_signal = torch.ones_like(dose_amounts)
-        # else:
-        #     dose_signal = torch.zeros_like(dose_amounts)
+    def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
+        """
+        Compute dose signal per drug using interleaved dose arrays and EVID codes.
+        """
+        sigma=self.get_sigma()
+        batch_size = evid.size(0)
+        device = t.device
+        dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+    
+        for drug_id in range(1, n_drugs + 1):
+            # --- Select only the doses for this drug ---
+            mask = (evid == drug_id)           # [batch, num_doses]
+            mask=mask.squeeze(-1)
+            
+            
+            
+            masked_times = dose_times * mask.float()
+            
+            masked_amounts = dose_amounts * mask.float()
+    
+            # Optional: remove zeros for proper summation
+            valid = mask.bool()
+            if valid.sum() > 0:
+                # Compute pulse contribution for this drug
+                diff = t.unsqueeze(-1) - masked_times  # [batch, num_times, num_doses]
+                gauss = torch.exp(-0.5 * (diff / sigma)**2) * masked_amounts
+                dose_signal[:, drug_id - 1] = gauss.sum(dim=1)
+    
         return dose_signal
+        
+              
+                
+                    
+            
+        
+
 
     # === Forward pass ===
-    def forward(self, t, x, dose_times, dose_amounts, dose_mask, keep_mask=None):
+    def forward(self, t, x, dose_times, dose_amounts, evid, dose_mask, keep_mask=None):
         batch_size = x.size(0)
         device = x.device
-
+        
+     
+        
         if keep_mask is None:
             keep_mask = torch.ones(batch_size, 1, device=device)
 
-        # Compute dose input
-        dose_input = self.dirac_pulse(t, dose_times, dose_amounts, dose_mask)
+        # Compute dose input (bolus + infusion)
+        bolus_signal = self.bolus_pulse(t, dose_times, dose_amounts, dose_mask, evid,self.drug_dim)
+        dose_input = bolus_signal
 
         # Concatenate latent state and dose
+        
+     #   print(dose_input)
         inp = torch.cat([x, dose_input], dim=1)
 
         # Deep network + skip connection
@@ -303,10 +323,10 @@ class Encoder_Transformer(nn.Module):
 
         self.fc_logvar1 = nn.Linear(model_dim, hidden_dim)
         self.fc_logvar2 = nn.Linear(hidden_dim, latent_dim)
-        nn.init.zeros_(self.fc_mu2.weight)
-        nn.init.zeros_(self.fc_mu2.bias)
-        nn.init.zeros_(self.fc_logvar2.weight)
-        nn.init.zeros_(self.fc_logvar2.bias)
+        # nn.init.zeros_(self.fc_mu2.bias)
+        # nn.init.zeros_(self.fc_logvar2.bias)
+        # nn.init.normal_(self.fc_mu2.weight, mean=0.0, std=1e-3)  # small Gaussian noise
+        # nn.init.normal_(self.fc_logvar2.weight, mean=0.0, std=1e-3)
 
    
 
@@ -491,7 +511,17 @@ class InitialConditionVAEEncoder(nn.Module):
         # Two separate layers for mean and log variance
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
+
+        # ---- Custom initialization ----
+        # fc_mu and fc_logvar biases set to zero
+        # nn.init.zeros_(self.fc_mu.bias)
+        # nn.init.zeros_(self.fc_logvar.bias)
+
+        # # Small non-zero weights
+        # nn.init.normal_(self.fc_mu.weight, mean=0.0, std=1e-3)
+        # nn.init.normal_(self.fc_logvar.weight, mean=0.0, std=1e-3)
+        # (fc1 is left with PyTorch’s default unless you also want to tweak it)
+
         # EMA buffers
         for name, param in self.named_parameters():
             self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
@@ -523,4 +553,3 @@ class InitialConditionVAEEncoder(nn.Module):
             for name, param in self.named_parameters():
                 ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
                 param.data.copy_(ema_param)
- 
