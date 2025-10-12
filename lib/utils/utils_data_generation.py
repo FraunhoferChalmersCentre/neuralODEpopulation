@@ -519,6 +519,7 @@ def simulate_single_drug_concentration(
     ka_sd=0.3,
     ke_sd=0.3,
     v_sd=0.25,
+    corr_matrix=None,  # New: correlation matrix between ka, ke, v
     add_e=0,
     prop_e=0,
     t_interval=(0, 24),
@@ -528,34 +529,20 @@ def simulate_single_drug_concentration(
 ):
     """
     Simulate plasma concentration (DV) for a single oral drug
-    following a standard 1-compartment PK model with first-order absorption.
-
-    Parameters
-    ----------
-    n_individuals : int
-        Number of simulated individuals.
-    dose_amounts : list[float]
-        Dose amounts (mg) for each dosing time.
-    dose_times : list[float]
-        Corresponding dosing times (hours).
-    ka_mean, ke_mean, v_mean : float
-        Mean absorption rate, elimination rate, and volume of distribution.
-    ka_sd, ke_sd, v_sd : float
-        Lognormal standard deviations for individual variability.
-    add_e, prop_e : float
-        Additive and proportional noise levels.
-    t_interval : tuple(float, float)
-        Start and end time of simulation (hours).
-    sample_frequency : float
-        Sampling interval (hours).
-    save_path : str
-        CSV output path.
-    plot : bool
-        Whether to plot individual concentration-time profiles.
+    following a standard 1-compartment PK model with first-order absorption,
+    with optional correlation between PK parameters.
     """
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
+
+    # Default: no correlation
+    if corr_matrix is None:
+        corr_matrix = np.eye(3)
+
+    # Convert SDs to covariance matrix
+    sd_vector = np.array([ka_sd, ke_sd, v_sd])
+    cov_matrix = np.outer(sd_vector, sd_vector) * corr_matrix
 
     # Construct evaluation grid with extra resolution around doses
     window = 0.3
@@ -575,10 +562,10 @@ def simulate_single_drug_concentration(
     id_counter = 1
 
     for ind in range(n_individuals):
-        # Sample individual PK parameters (lognormal)
-        ka = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd)
-        ke = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd)
-        v  = np.random.lognormal(mean=np.log(v_mean), sigma=v_sd)
+        # Sample correlated PK parameters (lognormal)
+        mean_vector = np.log([ka_mean, ke_mean, v_mean])
+        normal_sample = np.random.multivariate_normal(mean_vector, cov_matrix)
+        ka, ke, v = np.exp(normal_sample)
 
         param_names = ['ka', 'ke', 'v']
         param_values = [ka, ke, v]
@@ -655,6 +642,7 @@ def simulate_single_drug_concentration(
 
     print(f"Saved simulated concentration data to {save_path}")
     return df
+
 
 
 

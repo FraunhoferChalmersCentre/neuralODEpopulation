@@ -233,7 +233,7 @@ def estimate_coverage(
 
 def plot_individual_fits(
     models,
-    encoder_med, initial_encoder_med, func_med, reducer_med,
+    encoder_med, func_med, reducer_med,
     dataset,
     device,
     t_dense,
@@ -265,7 +265,7 @@ def plot_individual_fits(
     })
 
     encoder = models['encoder']
-    initial_encoder = models['initial_encoder']
+
     func = models['func']
     reducer = models['reducer']
     noise = models['noise']
@@ -276,7 +276,7 @@ def plot_individual_fits(
     axes = axes.flatten() if nr_row*nr_col > 1 else [axes]
 
     encoder.eval()
-    initial_encoder.eval()
+
     func.eval()
 
     population_preds = []
@@ -300,12 +300,12 @@ def plot_individual_fits(
      
         if normalization:
             x_encoder_norm = normalize_encoder_input( x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list,evid,
-             encoder_med, initial_encoder_med, func_med, reducer_med,
-             t_dense, latent_dim, global_mean, global_std)
+             encoder_med, func_med, reducer_med,
+             t_dense, global_mean, global_std)
         
         with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():  
             for _ in range(n_samples):
-                k_param_samples, _, _, _ = encode_latent(
+                k_param_samples, _, _, _,_,_ = encode_latent(
                     encoder, t_encoder, x_encoder_norm,
                     enable_vae=enable_vae,
                     enable_ae=enable_ae,
@@ -315,39 +315,41 @@ def plot_individual_fits(
                 
 
         k_param_samples = torch.stack(k_param_samples_list, dim=1)
-        k_param_flat = k_param_samples.view(-1, dim_parameter_encoder)
+        k_param_flat = k_param_samples.view(-1, dim_parameter_encoder+latent_dim)
         x_padded_exp = x_padded.repeat(n_samples, 1)
         t_padded_exp = t_padded.repeat(n_samples, 1)
         dose_tensor_exp = dose_tensor.unsqueeze(0).repeat(n_samples, *([1]*dose_tensor.dim()))
         
-        dose_tensor_exp = dose_tensor.unsqueeze(0).repeat(n_samples, *([1]*dose_tensor.dim()))  # [n_samples, batch, features?]
-
-        # Remove the middle dimension (singleton) if exists
-        if dose_tensor_exp.dim() == 3 and dose_tensor_exp.size(1) == 1:
-            dose_tensor_exp = dose_tensor_exp.squeeze(1)  # [batch*n_samples, features]
-    
-
+        dose_tensor_exp = dose_tensor.repeat(n_samples, 1)      # [n_samples, num_features]
+        evid_exp = evid.repeat(n_samples, 1)                    # [n_samples, num_doses]
+       
+        
+      
         dose_times_list_exp = []
         for dt in dose_times_list:
             dose_times_list_exp.extend([dt]*n_samples)
+            
+        dose_times_tensor = torch.stack(dose_times_list_exp, dim=0)  # [n_samples, num_doses]
+    
+
 
         with use_ema(func) if use_ema_models else contextmanager(lambda: (yield))():
-            with use_ema(initial_encoder) if use_ema_models else contextmanager(lambda: (yield))():
-                x0, ode_func, _, _ = prepare_ode_input(
-                    initial_encoder,
+
+                ode_func= prepare_ode_input(
+
                     x_padded_exp,
                     k_param_flat,
                     func,
                     dose_tensor_exp,
                     dose_times_list_exp,
-                    evid,
+                    evid_exp,
                     enable_ae
                 )
                 
         with use_ema(reducer) if use_ema_models else contextmanager(lambda: (yield))():
             pred_interp, pred_batch = make_predictions(
-                t_padded_exp, t_dense, x0, ode_func, reducer,
-                latent_dim=latent_dim,
+                t_padded_exp, t_dense, k_param_flat, ode_func, reducer,
+
                 global_mean=global_mean,
                 global_std=global_std
             )
@@ -402,7 +404,15 @@ def plot_individual_fits(
 
     # --- Common legend ---
     handles, labels = axes[-1].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=len(labels), bbox_to_anchor=(0.5, 0.1))
+    if len(handles) > 0:  # only create legend if there are plotted lines
+        fig.legend(
+            handles, 
+            labels, 
+            loc='lower center', 
+            ncol=max(1, len(labels)),  # ensure at least 1 column
+            bbox_to_anchor=(0.5, 0.1)
+        )
+
     plt.tight_layout(rect=[0, 0.15, 1, 1])  # more space at bottom for legend
     plt.show()
 
@@ -581,17 +591,16 @@ def split_dataloader_by_treatment(dataloader, dataset):
 
 
 def plot_encoder_histograms(
-    encoder_med, initial_encoder_med, func_med, reducer_med,
+    encoder_med, func_med, reducer_med,
     t_dense, global_mean, global_std,
-    dataset, dataloader, encoder, latent_dim,
+    dataset, dataloader, encoder,
     device=None, truncation=None, normalization=True
 ):
     """
-    Flexible plotting of encoder latent outputs.
-    - Histograms of mu and sigma for each latent dimension, grouped by treatment.
-    - Pairwise scatter plots of latent dimensions (all combinations), colored by treatment.
-    - Handles any latent_dim and variable sequence lengths.
-    - Uses EMA weights if available.
+    Plots encoder latent outputs:
+    - Histograms of μ and σ for each latent dimension, grouped by treatment.
+    - Pairwise scatter plots of latent dimensions, colored by treatment.
+    - Shows prior and empirical posterior correlations as text on scatter plots.
     """
 
     import torch
@@ -613,7 +622,7 @@ def plot_encoder_histograms(
                 # --- Unpack batch ---
                 id_tensor, treatment_tensor, t_padded, x_padded, mask, dose_tensor, dose_times_padded, evid = batch
 
-                # Move to device
+                # Move all tensors to device
                 id_tensor = id_tensor.to(device)
                 treatment_tensor = treatment_tensor.to(device)
                 t_padded = t_padded.to(device)
@@ -624,36 +633,60 @@ def plot_encoder_histograms(
                 evid = evid.to(device)
 
                 # Preprocess batch
-                id_list, treatment_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask_dose, dose_tensor, dose_times_list, evid = preprocess_batch(
+                _, treatment_list, t_encoder, x_encoder, *_ = preprocess_batch(
                     batch, device, truncation=truncation
                 )
 
                 # Optional normalization
                 if normalization:
                     x_encoder = normalize_encoder_input(
-                        x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
-                        encoder_med, initial_encoder_med, func_med, reducer_med,
-                        t_dense, latent_dim, global_mean, global_std
+                        x_encoder, t_encoder, x_padded, dose_tensor, dose_times_padded, evid,
+                        encoder_med, func_med, reducer_med,
+                        t_dense, global_mean, global_std
                     )
 
-                # Encode latent with EMA encoder
+                # Encode latent with EMA weights
                 with use_ema(encoder):
-                    _, mu_q, logvar_q, _ = encode_latent(
+                    _, mu_q, L_q, _, _, _ = encode_latent(
                         encoder, t_encoder, x_encoder,
                         enable_vae=True, enable_ae=False, enable_onlymedian=False
                     )
 
-                mu_list.append(mu_q.cpu().numpy())
-                sigma_list.append(torch.exp(0.5 * logvar_q).cpu().numpy())
-                treatment_list_all.append(treatment_list.cpu().numpy())
+                    # Full covariance and σ
+                    Sigma_q = torch.bmm(L_q, L_q.transpose(1, 2))
+                    sigma_q = torch.sqrt(torch.diagonal(Sigma_q, dim1=1, dim2=2))
 
-    # Aggregate across batches
-    mu_array = np.vstack(mu_list)       # shape: (n_individuals, latent_dim)
-    sigma_array = np.vstack(sigma_list) # shape: (n_individuals, latent_dim)
+                    mu_list.append(mu_q.cpu().numpy())
+                    sigma_list.append(sigma_q.cpu().numpy())
+                    treatment_list_all.append(treatment_list.cpu().numpy())
+
+    # Aggregate
+    mu_array = np.vstack(mu_list)        # [n_samples, D]
+    sigma_array = np.vstack(sigma_list)  # [n_samples, D]
     treatment_array = np.concatenate(treatment_list_all).ravel()
-
-    # --- 1. Histograms per latent dimension, grouped by treatment ---
     n_dims = mu_array.shape[1]
+
+    # Empirical posterior correlation
+    emp_corr = np.corrcoef(mu_array, rowvar=False)
+
+    # Prior correlation
+    with torch.no_grad():
+        mu_p, L_p = encoder.get_prior()
+        L_p = L_p.to(device)  # [1, D, D] or [B, D, D]
+    
+        if L_p.dim() == 3 and L_p.shape[0] == 1:
+            Sigma_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [1, D, D]
+            Sigma_p = Sigma_p[0]  # remove batch dim
+        else:
+            Sigma_p = L_p @ L_p.T  # fallback
+        Sigma_p = Sigma_p.detach().cpu().numpy()
+
+        prior_corr = np.zeros((n_dims, n_dims))
+        for i in range(n_dims):
+            for j in range(n_dims):
+                prior_corr[i, j] = Sigma_p[i, j] / np.sqrt(Sigma_p[i, i] * Sigma_p[j, j])
+
+    # --- 1. Histograms ---
     fig, axes = plt.subplots(n_dims, 2, figsize=(16, 6*n_dims)) if n_dims > 1 else plt.subplots(1, 2, figsize=(16,6))
     if n_dims == 1:
         axes = np.expand_dims(axes, axis=0)
@@ -664,10 +697,9 @@ def plot_encoder_histograms(
         for t_val in np.unique(treatment_array):
             idx = treatment_array == t_val
             ax_mu.hist(mu_array[idx, i], bins=30, alpha=0.5, label=f"Treatment {t_val}")
-        ax_mu.set_title(f"μ dim {i}", fontsize=16)
-        ax_mu.set_xlabel("μ value", fontsize=14)
-        ax_mu.set_ylabel("Frequency", fontsize=14)
-        ax_mu.tick_params(axis='both', which='major', labelsize=12)
+        ax_mu.set_title(f"μ dim {i}")
+        ax_mu.set_xlabel("μ value")
+        ax_mu.set_ylabel("Frequency")
         ax_mu.grid(True, linestyle="--", alpha=0.6)
         ax_mu.legend()
 
@@ -676,51 +708,48 @@ def plot_encoder_histograms(
         for t_val in np.unique(treatment_array):
             idx = treatment_array == t_val
             ax_sigma.hist(sigma_array[idx, i], bins=30, alpha=0.5, label=f"Treatment {t_val}")
-        ax_sigma.set_title(f"σ dim {i}", fontsize=16)
-        ax_sigma.set_xlabel("σ value", fontsize=14)
-        ax_sigma.set_ylabel("Frequency", fontsize=14)
-        ax_sigma.tick_params(axis='both', which='major', labelsize=12)
+        ax_sigma.set_title(f"σ dim {i}")
+        ax_sigma.set_xlabel("σ value")
+        ax_sigma.set_ylabel("Frequency")
         ax_sigma.grid(True, linestyle="--", alpha=0.6)
         ax_sigma.legend()
 
     plt.tight_layout()
     plt.show()
 
-    # --- 2. Pairwise scatter plots of μ ---
+    # --- 2. Pairwise scatter plots of μ with correlations ---
     pairs = list(combinations(range(n_dims), 2))
     n_pairs = len(pairs)
-    if n_pairs == 0:
-        print("Latent dimension is 1: skipping pairwise scatter plots.")
-        return
+    if n_pairs > 0:
+        ncols = 2
+        nrows = (n_pairs + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(16, 6*nrows))
+        axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
 
-    ncols = 2
-    nrows = (n_pairs + ncols - 1) // ncols
+        for idx, (d1, d2) in enumerate(pairs):
+            ax = axes[idx]
+            for t_val in np.unique(treatment_array):
+                idx_t = treatment_array == t_val
+                ax.scatter(mu_array[idx_t, d1], mu_array[idx_t, d2], alpha=0.6, label=f"Treatment {t_val}", s=50)
+            ax.set_xlabel(f"μ{d1}")
+            ax.set_ylabel(f"μ{d2}")
+            ax.set_title(f"μ{d1} vs μ{d2}")
+            ax.grid(True, linestyle="--", alpha=0.6)
+            ax.legend()
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(16, 6*nrows))
-    # Flatten axes to a list for consistent indexing
-    if isinstance(axes, np.ndarray):
-        axes = axes.flatten()
-    else:
-        axes = [axes]
+            # Add correlation text
+            ax.text(0.05, 0.95, f"Emp. corr: {emp_corr[d1,d2]:.2f}\nPrior corr: {prior_corr[d1,d2]:.2f}",
+                    transform=ax.transAxes, fontsize=10,
+                    verticalalignment='top', bbox=dict(facecolor='white', alpha=0.7))
 
-    for idx, (d1, d2) in enumerate(pairs):
-        ax = axes[idx]
-        for t_val in np.unique(treatment_array):
-            idx_t = treatment_array == t_val
-            ax.scatter(mu_array[idx_t, d1], mu_array[idx_t, d2], alpha=0.6, label=f"Treatment {t_val}", s=50)
-        ax.set_xlabel(f"μ{d1}", fontsize=14)
-        ax.set_ylabel(f"μ{d2}", fontsize=14)
-        ax.set_title(f"μ{d1} vs μ{d2}", fontsize=16)
-        ax.tick_params(axis='both', which='major', labelsize=12)
-        ax.grid(True, linestyle="--", alpha=0.6)
-        ax.legend()
+        for j in range(idx+1, len(axes)):
+            axes[j].axis('off')
 
-    # Hide any unused subplots
-    for j in range(idx+1, len(axes)):
-        axes[j].axis('off')
+        plt.tight_layout()
+        plt.show()
 
-    plt.tight_layout()
-    plt.show()
+
+
 
 
 
@@ -1264,10 +1293,10 @@ def plot_one_model_encoders_and_regression2(
 
 def plot_single_model_encoders_and_regression(
     df_train, df_val, dataset_train, dataset_val,
-    encoder1, initial_encoder1, func1, reducer1,
-    encoder_med, initial_encoder_med, func_med, reducer_med,
-    latent_dim, global_mean, global_std, t_dense,
-    device=None, truncation=0, use_ema_models=False, normalization=False
+    encoder1, func1, reducer1,
+    encoder_med, func_med, reducer_med,
+     global_mean, global_std, t_dense,
+    device=None, truncation=0, use_ema_models=False, normalization=False, dim_parameter_encoder=2
 ):
     """
     Plot regression and encoder outputs using μ for regression,
@@ -1279,7 +1308,8 @@ def plot_single_model_encoders_and_regression(
     torch.cuda.empty_cache()
     if device is None:
         device = next(encoder1.parameters()).device
-
+    latent_dim=encoder1.latent_dim# + encoder1.parameter_dim
+  
     # ---------------- Extract latents helper ----------------
     def extract_latents(df, dataset, encoder):
         mus, param_values_list, id_list_all, treatment_list_all = [], [], [], []
@@ -1312,11 +1342,11 @@ def plot_single_model_encoders_and_regression(
                     if normalization:
                         x_padded = normalize_encoder_input(
                             x_padded, t_padded, x_padded, dose_tensor, dose_times_padded, evid_padded,
-                            encoder_med, initial_encoder_med, func_med, reducer_med,
-                            t_dense, latent_dim, global_mean, global_std
+                            encoder_med, func_med, reducer_med,
+                            t_dense, global_mean, global_std
                         )
 
-                    _, mu_q, logvar_q, _ = encode_latent(
+                    _, mu_q, logvar_q, _,_,_ = encode_latent(
                         encoder, t_padded, x_padded,
                         enable_vae=False, enable_ae=True, enable_onlymedian=False
                     )
@@ -1871,13 +1901,22 @@ def split_dataloader_by_treatment(dataloader, dataset):
         )
     return loaders_by_treatment
 
+def sample_from_prior(encoder, batch_size, device):
+    """
+    Draw latent samples z ~ N(mu_p, L_p L_p^T) from the learned prior.
+    """
+    with torch.no_grad():
+        mu_p, L_p = encoder.get_prior(batch_size=batch_size)
+        eps = torch.randn(batch_size, mu_p.size(1), device=device)
+        z = mu_p + torch.einsum('bij,bj->bi', L_p, eps)
+    return z
 
 
 def generate_plot_data(
-    func_med, reducer_med, initial_encoder_med, encoder_med, noise_med,
+    func_med, reducer_med,  encoder_med, noise_med,
     models, dataloader, dataset, t_dense, global_mean_time, global_mean_dose,
     global_mean, global_std, latent_dim, dim_parameters,
-    initial_encoder, encoder, func, reducer, noise,
+     encoder, func, reducer, noise,
     ODEWrapper, num_simulated_total, add_noise_to_prediction,
     enable_onlymedian, enable_ae, enable_vae, normalization, truncation,
     use_ema_models=True
@@ -1894,9 +1933,9 @@ def generate_plot_data(
         gc.collect()
 
         # Put models in eval mode
-        encoder.eval(); initial_encoder.eval()
+        encoder.eval(); 
         reducer.eval(); func.eval()
-        encoder_med.eval(); initial_encoder_med.eval()
+        encoder_med.eval();
         reducer_med.eval(); func_med.eval()
 
         for treatment_value, treatment_loader in loaders_by_treatment.items():
@@ -1926,23 +1965,35 @@ def generate_plot_data(
                         evid = torch.stack(evid, dim=0).to(device)  # shape: [batch, n_doses]
                     x_encoder = normalize_encoder_input(
                         x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list,evid,
-                        encoder_med, initial_encoder_med, func_med, reducer_med,
-                        t_dense, latent_dim, global_mean, global_std
+                        encoder_med,  func_med, reducer_med,
+                        t_dense, global_mean, global_std
                     )
 
                 # === Encode latent ===
                 with use_ema(encoder):
-                    k_param, mu_q, logvar_q, _ = encode_latent(
+                    k_param, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
                         encoder, t_encoder, x_encoder,
                         enable_vae=enable_vae,
                         enable_ae=enable_ae,
                         enable_onlymedian=enable_onlymedian
                     )
-
-                with use_ema(initial_encoder):
-                    with use_ema(func):
-                        x0, ode_func, _, _ = prepare_ode_input(
-                            initial_encoder,
+                    
+                if enable_vae:
+                     with use_ema(encoder):
+                             B, D = mu_p.shape
+                             eps = torch.randn(B, D, device=mu_p.device)
+                             k_param = mu_p + torch.einsum('bij,bj->bi', L_p, eps) 
+                             cov_p = L_p @ L_p.transpose(-1, -2)
+                           #  print(cov_p)
+                             std = torch.sqrt(torch.diagonal(cov_p, dim1=-2, dim2=-1))  # [B, D]
+                             corr_p = cov_p / std.unsqueeze(-1) / std.unsqueeze(-2)
+                            
+                            # Print first batch
+                        #     print(corr_p[0])
+                                                 
+                
+                with use_ema(func):
+                        ode_func= prepare_ode_input(
                             x_padded,
                             k_param,
                             func,
@@ -1952,19 +2003,17 @@ def generate_plot_data(
                             enable_ae,
                             enable_onlymedian
                         )
+              
+               
 
-                if enable_vae:
-                    k_param = torch.randn_like(k_param)
-             
-
-                    x0 = torch.randn_like(x0)
+                      
                 if enable_onlymedian:
-                    x0 = torch.zeros_like(x0)
+                    k_param = torch.zeros_like(k_param)
                 # === Predict ===
                 with use_ema(reducer):
                     pred_interp, pred_batch = make_predictions(
-                        t_padded, t_dense, x0, ode_func,
-                        reducer, latent_dim, global_mean, global_std
+                        t_padded, t_dense, k_param, ode_func,
+                        reducer, global_mean, global_std
                     )
 
                 if add_noise_to_prediction:
@@ -2452,7 +2501,6 @@ def vpc_4(
 
 def vpc(func_med,
         reducer_med,
-        initial_encoder_med,
         encoder_med,
         noise_med,
         models,
@@ -2464,7 +2512,6 @@ def vpc(func_med,
         dataset,
         latent_dim,
         dim_parameters,
-        initial_encoder,
         encoder,
         func,
         reducer,
@@ -2484,7 +2531,6 @@ def vpc(func_med,
     plot_data = generate_plot_data(
         func_med,
         reducer_med,
-        initial_encoder_med,
         encoder_med,
         noise_med,
         models=models,
@@ -2497,7 +2543,6 @@ def vpc(func_med,
         global_std=global_std,
         latent_dim=latent_dim,
         dim_parameters=dim_parameters,
-        initial_encoder=initial_encoder,
         encoder=encoder,
         func=func,
         reducer=reducer,
@@ -2563,16 +2608,26 @@ def vpc(func_med,
 
 
     
-def vpc_true(
-    models, dataset, t_dense, global_max_time, global_mean, global_std,
-    initial_encoder, encoder, func, reducer, noise,
+def vpc_true(latent_dim,dim_parameters,
+    ODEWrapper,
+    models, dataset, t_dense, global_max_time, global_mean, global_std, global_mean_dose,
+    encoder, func, reducer, noise,
+    func_med, reducer_med, encoder_med, noise_med,
     add_noise_to_prediction=False,
     enable_onlymedian=True, enable_ae=False,
     enable_vae=False, truncation=1, num_repeats=100,
     use_ema_models=False,
-    fontsize=14
+    fontsize=14,
+    show_confidence_intervals=True   # toggle all CI shading
 ):
- 
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+    from torch.utils.data import DataLoader
+    import gc
+    import torch
+    import numpy as np
+    import math
+
     gc.collect()
 
     # --- Font sizes ---
@@ -2586,134 +2641,157 @@ def vpc_true(
 
     device = next(func.parameters()).device
     encoder.eval()
-    initial_encoder.eval()
     func.eval()
     reducer.eval()
+
     dataloader = DataLoader(dataset, batch_size=12, shuffle=False, collate_fn=collate_fn)
 
-    # --- Collect observed data points and interpolated values ---
-    all_x_interp, all_x_points, all_t_points = [], [], []
-    for batch in dataloader:
-        _, t_padded, x_padded, _, _, _, _, mask, _, _ = preprocess_batch(batch, device, truncation=truncation)
-        for i in range(x_padded.shape[0]):
-            x_obs = destandardize_concentration(x_padded[i, :mask[i].sum()], global_mean, global_std).detach().cpu().numpy()
-            t_obs = t_padded[i, :mask[i].sum()].detach().cpu().numpy()
-            x_interp = np.interp(t_dense.detach().cpu().numpy(), t_obs, x_obs)
-            all_x_interp.append(x_interp)
-            all_x_points.append(x_obs)
-            all_t_points.append(t_obs)
+    # ============================================================
+    # --- Run generate_plot_data num_repeats times and collect ---
+    # ============================================================
+    all_repeats_data = []
+    for r in range(num_repeats):
+        plot_data_r = generate_plot_data(
+            func_med=func_med, reducer_med=reducer_med, encoder_med=encoder_med, noise_med=noise_med,
+            models=models, dataloader=dataloader, dataset=dataset, t_dense=t_dense,
+            global_mean_time=global_max_time, global_mean_dose=global_mean_dose,
+            global_mean=global_mean, global_std=global_std, latent_dim=latent_dim,
+            dim_parameters=dim_parameters, encoder=encoder, func=func, reducer=reducer, noise=noise,
+            ODEWrapper=ODEWrapper, num_simulated_total=1,
+            add_noise_to_prediction=add_noise_to_prediction,
+            enable_onlymedian=enable_onlymedian, enable_ae=enable_ae,
+            enable_vae=enable_vae, normalization=True, truncation=truncation,
+            use_ema_models=use_ema_models
+        )
+        all_repeats_data.append(plot_data_r)
 
-    all_x_interp = np.stack(all_x_interp, axis=0)
-    obs_perc10 = np.percentile(all_x_interp, 10, axis=0)
-    obs_perc50 = np.percentile(all_x_interp, 50, axis=0)
-    obs_perc90 = np.percentile(all_x_interp, 90, axis=0)
+    # ============================================================
+    # --- Group repeats by treatment ---
+    # ============================================================
+    treatments = sorted(set(d["treatment"] for d in all_repeats_data[0]))
+    plot_by_treat = {t: [] for t in treatments}
+    for t in treatments:
+        plot_by_treat[t] = [
+            next(d for d in repeat if d["treatment"] == t) for repeat in all_repeats_data
+        ]
 
-    # --- Simulate repeats per batch ---
-    perc10_batches, perc50_batches, perc90_batches = [], [], []
-    for repeat in range(num_repeats):
-        batch_perc10, batch_perc50, batch_perc90 = [], [], []
-        for batch in dataloader:
-            id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list = preprocess_batch(
-                batch, device, truncation=truncation
-            )
+    # ============================================================
+    # --- Create subplots ---
+    # ============================================================
+    n_plots = len(treatments)
+    n_cols = 2
+    n_rows = math.ceil(n_plots / n_cols)
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(24, 8 * n_rows),
+        sharex=True, sharey=True
+    )
+    axes = axes.flatten()
 
-            # --- Encode latent ---
-            with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():
-                k_param, _, _, _ = encode_latent(
-                    encoder, t_encoder, x_encoder,
-                    enable_vae=enable_vae, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
-                )
+    color_pred = "blue"
+    color_obs = "orange"
 
-            with use_ema(initial_encoder) if use_ema_models else contextmanager(lambda: (yield))():
-                x0, ode_func, _, _ = prepare_ode_input(
-                    initial_encoder, x_padded, k_param, func,
-                    dose_tensor, dose_times_list, enable_ae
-                )
+    # ============================================================
+    # --- Loop over treatments ---
+    # ============================================================
+    for i, (treat, repeat_dicts) in enumerate(plot_by_treat.items()):
+        ax = axes[i]
+        times = repeat_dicts[0]["time_hours"]
 
-            if enable_vae:
-                k_param = torch.randn_like(k_param)
-                x0 = torch.randn_like(x0)
+        # Percentiles to track
+        percentile_keys = [
+            "perc5_sim", "perc10_sim", "perc25_sim", "median_sim",
+            "perc75_sim", "perc90_sim", "perc95_sim"
+        ]
+        available_keys = [k for k in percentile_keys if k in repeat_dicts[0]]
 
-            with use_ema(func) if use_ema_models else contextmanager(lambda: (yield))():
-                
-                with use_ema(reducer) if use_ema_models else contextmanager(lambda: (yield))():
-                    _, pred_batch = make_predictions(
-                        t_padded, t_dense, x0, ode_func, reducer,
-                        latent_dim=k_param.shape[-1],
-                        global_mean=global_mean, global_std=global_std
-                    )
+        # --- Stack across repeats for each percentile ---
+        sim_stats = {}
+        for k in available_keys:
+            arr = np.stack([d[k] for d in repeat_dicts], axis=0)  # (num_repeats, time)
+            sim_stats[k] = {
+                "median": np.median(arr, axis=0)
+            }
+            if show_confidence_intervals:
+                sim_stats[k]["lower"] = np.percentile(arr, 2.5, axis=0)
+                sim_stats[k]["upper"] = np.percentile(arr, 97.5, axis=0)
 
-            if add_noise_to_prediction:
-                mask_pred = pred_batch > 0
-                pred_batch = torch.where(mask_pred, noise.sample(pred_batch, n_samples=1).squeeze(0), pred_batch)
-                pred_batch = torch.clamp(pred_batch, min=0)
+        # --- Observed data ---
+        obs = repeat_dicts[0]
+        ax.plot(obs["time_hours_data"], obs["median_data"],
+                color=color_obs, linewidth=2.5, label="Observed median")
+        ax.plot(obs["time_hours_data"], obs["perc10_data"],
+                color=color_obs, linestyle="--", linewidth=2, label="Observed 10th")
+        ax.plot(obs["time_hours_data"], obs["perc90_data"],
+                color=color_obs, linestyle="--", linewidth=2, label="Observed 90th")
 
-            batch_preds = pred_batch.detach().cpu().numpy()
-            batch_perc10.append(np.percentile(batch_preds, 10, axis=0))
-            batch_perc50.append(np.percentile(batch_preds, 50, axis=0))
-            batch_perc90.append(np.percentile(batch_preds, 90, axis=0))
+        # --- Helper to plot percentile lines + CI ---
+        def plot_with_ci(x, median, lower, upper, label, alpha, style="-", width=2):
+            if show_confidence_intervals and lower is not None and upper is not None:
+                ax.fill_between(x, lower, upper, color=color_pred, alpha=alpha, linewidth=0)
+            ax.plot(x, median, color=color_pred, linestyle=style, linewidth=width, label=label)
 
-            del batch_preds, x0, k_param
-            torch.cuda.empty_cache()
-            gc.collect()
+        # --- Plot each percentile with distinct styles and alphas ---
+        style_map = {
+            "perc5_sim": (":", 1.5, 0.10),
+            "perc10_sim": ("--", 2, 0.12),
+            "perc25_sim": ("-.", 2, 0.15),
+            "median_sim": ("-", 2.5, 0.20),
+            "perc75_sim": ("-.", 2, 0.15),
+            "perc90_sim": ("--", 2, 0.12),
+            "perc95_sim": (":", 1.5, 0.10),
+        }
 
-        perc10_batches.append(np.stack(batch_perc10, axis=0))
-        perc50_batches.append(np.stack(batch_perc50, axis=0))
-        perc90_batches.append(np.stack(batch_perc90, axis=0))
+        for k, (style, width, alpha) in style_map.items():
+            if k in sim_stats:
+                plot_with_ci(times,
+                             sim_stats[k]["median"],
+                             sim_stats[k].get("lower"),
+                             sim_stats[k].get("upper"),
+                             f"Predicted {k.replace('_sim', '').replace('perc', '')}th",
+                             alpha,
+                             style=style,
+                             width=width)
 
-    perc10_batches = np.stack(perc10_batches, axis=0)
-    perc50_batches = np.stack(perc50_batches, axis=0)
-    perc90_batches = np.stack(perc90_batches, axis=0)
+        # --- Formatting ---
+        ax.set_xlim(0, global_max_time)
+        ax.set_title(f"Treatment {treat}", fontsize=28, fontweight="bold")
+        ax.set_xlabel("Time (hours)", fontsize=22)
+        ax.set_ylabel("Concentration", fontsize=22)
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.tick_params(axis='both', which='major', labelsize=18, width=1.5)
 
-    # --- Compute median and 95% CI of percentiles across repeats ---
-    perc10_ci_lower = np.percentile(perc10_batches, 2.5, axis=(0,1))
-    perc10_ci_upper = np.percentile(perc10_batches, 97.5, axis=(0,1))
-    perc50_ci_lower = np.percentile(perc50_batches, 2.5, axis=(0,1))
-    perc50_ci_upper = np.percentile(perc50_batches, 97.5, axis=(0,1))
-    perc90_ci_lower = np.percentile(perc90_batches, 2.5, axis=(0,1))
-    perc90_ci_upper = np.percentile(perc90_batches, 97.5, axis=(0,1))
+    # --- Remove unused axes ---
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
 
-    perc10_median = np.median(perc10_batches, axis=(0,1))
-    perc50_median = np.median(perc50_batches, axis=(0,1))
-    perc90_median = np.median(perc90_batches, axis=(0,1))
+    # --- Legend ---
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="lower center",
+        ncol=4,
+        fontsize=22,
+        frameon=False,
+        bbox_to_anchor=(0.5, -0.12)
+    )
 
-    # --- Plot ---
-    fig, ax = plt.subplots(figsize=(12,6))
-    t_dense_np = global_max_time * t_dense.detach().cpu().numpy()
-
-    # Scatter observed points
-    scatter_handle = ax.scatter([], [], color='gray', s=10, alpha=0.4, label='Observed points')
-    for i in range(len(all_x_points)):
-        ax.scatter(global_max_time*all_t_points[i], all_x_points[i], color='gray', s=10, alpha=0.4)
-    scatter_handle = ax.scatter([], [], color='gray', s=10, alpha=0.4, label='Observed points')  # dummy handle for legend
-    
-    # Observed percentiles
-    line_median, = ax.plot(t_dense_np, obs_perc50, color='black', label='Median observed')
-    line_10, = ax.plot(t_dense_np, obs_perc10, color='black', linestyle='--', label='10th percentile observed')
-    line_90, = ax.plot(t_dense_np, obs_perc90, color='black', linestyle='--', label='90th percentile observed')
-    
-    # 95% CI from simulations
-    ci_median = ax.fill_between(t_dense_np, perc50_ci_lower, perc50_ci_upper, color='red', alpha=0.3, label='95% CI median')
-    ci_10 = ax.fill_between(t_dense_np, perc10_ci_lower, perc10_ci_upper, color='blue', alpha=0.2, label='95% CI 10th percentile')
-    ci_90 = ax.fill_between(t_dense_np, perc90_ci_lower, perc90_ci_upper, color='blue', alpha=0.2, label='95% CI 90th percentile')
-    
-    # --- Legend: top row (lines + points) ---
-    top_handles = [scatter_handle, line_median, line_10, line_90]
-    top_labels  = ['Observed points', 'Median observed', '10th / 90th percentile observed']
-    leg_top = ax.legend(handles=top_handles, labels=top_labels, loc='lower center',
-                        bbox_to_anchor=(0.5, -0.22), ncol=4, frameon=False)
-    ax.add_artist(leg_top)
-    
-    # --- Legend: bottom row (CIs) ---
-    bottom_handles = [ci_median, ci_10, ci_90]
-    bottom_labels  = ['95% CI of median prediction', '95% CI of 10th / 90th percentile prediction']
-    leg_bottom = ax.legend(handles=bottom_handles, labels=bottom_labels, loc='lower center',
-                           bbox_to_anchor=(0.5, -0.30), ncol=3, frameon=False)
-    
-    ax.set_xlabel('Time')
-    ax.set_ylabel('Concentration')
-    ax.set_title('Population Simulations')
+    plt.tight_layout(rect=[0, 0.12, 1, 1])
     plt.show()
+
+
+
+    
+    
+        
+
+    
+
+    
+    
+    
+
+
         
         
     

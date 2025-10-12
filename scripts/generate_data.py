@@ -13,7 +13,7 @@ from lib.utils.utils_data_generation import simulate_tumor_volume, simulate_sing
 def main():
     base_dir = os.getcwd()
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "tumor_data_val.csv")
+    default_save_path = os.path.join(default_save_dir, "tumor_data_test.csv")
     os.makedirs(default_save_dir, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Simulate tumor volume under drug treatments.")
@@ -144,7 +144,7 @@ from lib.utils.utils_data_generation import simulate_single_drug_concentration
 def main():
     base_dir = os.getcwd()
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "Simulated_ODE2.csv")
+    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_corr_test.csv")
     os.makedirs(default_save_dir, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Simulate single-drug concentration for 2 groups.")
@@ -161,18 +161,36 @@ def main():
     )
     args, _ = parser.parse_known_args()
 
-    # ----- Define dose times -----
-    dose_times = [0, 8, 16, 24]
-
-    # ----- Define groups -----
+   #  # ----- Define dose times -----
+   
+    
+   # ----- Define groups -----
+    # dose_times = [0, 8, 16, 24]
+    # groups = [
+    #     {"name": "Low Dose",  "n_individuals": 100, "dose_amounts": [400, 400, 400,400]},
+    #     {"name": "High Dose",  "n_individuals": 100, "dose_amounts": [800, 800, 800,800]}
+    # ]
+    
+    dose_times = [0, 3, 8]
     groups = [
-        {"name": "Low Dose",  "n_individuals": 100, "dose_amounts": [100, 100, 100, 100]},
-        {"name": "High Dose", "n_individuals": 100, "dose_amounts": [300, 300, 300, 300]}
+        {"name": "Dose 200",  "n_individuals": 100, "dose_amounts": [350, 350, 350]},
+        {"name": "Dose 600", "n_individuals": 100, "dose_amounts": [600, 600, 600]},
+        {"name": "Dose 400",  "n_individuals": 100, "dose_amounts": [400, 400, 400]},
+        {"name": "Dose 800", "n_individuals": 100, "dose_amounts": [800, 800, 800]},
+        {"name": "Dose 1000",  "n_individuals": 100, "dose_amounts": [850, 850, 850]}
     ]
+
 
     combined_data = []
     id_offset = 0
-
+    corr_matrix = np.array([
+        [1.0, 0.3, 0.2], #ka, ke, v
+        [0.3, 1.0, 0.15],
+        [0.2, 0.15, 1.0]
+    ])
+    
+    
+    
     for group_idx, group in enumerate(groups, start=1):
         temp_save_path = os.path.join(default_save_dir, f"temp_group_{group_idx}.csv")
     
@@ -180,12 +198,14 @@ def main():
             n_individuals=group["n_individuals"],
             dose_amounts=group["dose_amounts"],
             dose_times=dose_times,
-            ka_mean=0.6, ke_mean=0.5, v_mean=50,
-            ka_sd=0.3, ke_sd=0.3, v_sd=0.25,
-            add_e=0.1, prop_e=0.05,
-            t_interval=(0,32), sample_frequency=0.5,
+            ka_mean=0.4, ke_mean=0.6, v_mean=50,
+            ka_sd=0.5, ke_sd=0.5, v_sd=0.5,
+            add_e=5, prop_e=0.0001,
+            t_interval=(0,48), sample_frequency=0.5,
             save_path=temp_save_path,
-            plot=args.plot
+            plot=args.plot,
+            corr_matrix=corr_matrix  # <-- Add correlation here
+
         )
 
         df_group.columns = df_group.columns.str.strip().str.upper()

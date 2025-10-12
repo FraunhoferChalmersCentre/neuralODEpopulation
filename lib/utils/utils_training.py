@@ -174,51 +174,99 @@ def pad_dose_times(dose_times_list, pad_value=-1.0):
 
 
 
-def compute_loss_and_metrics(encoder, dose_labels,
+# def compute_loss_and_metrics(encoder,
+#     x_padded, mask, pred_interp,
+#     mu_q, logvar_q,
+#     epoch, warmup_epochs_iiv, free_bits,
+#     enable_ae, enable_vae,
+#     noise, global_mean, global_std,
+#     only_median_training=False,
+#     replace_mask=None, repeat_factor=1  # shape [batch_size]
+# ):
+#     """
+#     Computes reconstruction + KL/NF losses and metrics.
+#     Returns:
+#         loss, recon_loss, error_value, KL_loss, log_det_sum, log_det_penalty, kl_gauss
+#         - error_value = per-individual mixture: MSE (default) or L1 (if only_median_training or replace_mask)
+#     """
+#     device = pred_interp.device
+#     if repeat_factor > 1:
+#         mask = mask.repeat_interleave(repeat_factor, dim=0)
+#         x_padded = x_padded.repeat_interleave(repeat_factor, dim=0)
+
+        
+  
+#     # === Reconstruction loss from error model ===
+#     recon_loss_noise, mse = noise.nll(
+#         destandardize_concentration(x_padded, global_mean, global_std),
+#         pred_interp,replace_mask,mask
+#     )
+    
+    
+   
+#     # mask: [batch_size, seq_len], True for valid points
+   
+
+
+    
+#   #  === KL Loss ===
+#     mu_prior =  encoder.prior_mu + torch.zeros_like(mu_q)
+#     logvar_prior = torch.zeros_like(logvar_q)
+
+
+
+
+#     free_bits_on = (
+#         0 if epoch + 1 >= warmup_epochs_iiv
+#         else free_bits * (1 - min(1.0, epoch / warmup_epochs_iiv))
+#     )
+#     kl_weight = (
+#         1.0 if epoch + 1 >= warmup_epochs_iiv
+#         else min(1.0, epoch / warmup_epochs_iiv)
+#     )
+    
+ 
+#     KL_loss,denom = kl_divergence_gaussians(mu_q, logvar_q, mu_prior, logvar_prior, free_bits_on)
+
+#    # KL_loss = KL_loss
+    
+#     loss = kl_weight * KL_loss + recon_loss_noise #+ mu_q_loss.sum()
+
+
+#     return loss, recon_loss_noise, mse, KL_loss
+
+
+def compute_loss_and_metrics(
+    encoder,
     x_padded, mask, pred_interp,
-    mu_q, logvar_q,
-    mu_x0, logvar_x0,
+    mu_q, L_q,    # full-covariance outputs
+    mu_p, L_p,    # from encoder.get_prior(batch_size)
     epoch, warmup_epochs_iiv, free_bits,
     enable_ae, enable_vae,
     noise, global_mean, global_std,
     only_median_training=False,
-    replace_mask=None, repeat_factor=1  # shape [batch_size]
+    replace_mask=None, repeat_factor=1
 ):
     """
-    Computes reconstruction + KL/NF losses and metrics.
-    Returns:
-        loss, recon_loss, error_value, KL_loss, log_det_sum, log_det_penalty, kl_gauss
-        - error_value = per-individual mixture: MSE (default) or L1 (if only_median_training or replace_mask)
+    Computes reconstruction + KL losses and metrics for full-covariance encoder.
+    Now uses a correlated prior p(z) = N(mu_p, L_p L_p^T)
+    and posterior q(z|x) = N(mu_q, L_q L_q^T).
     """
-    device = pred_interp.device
+
+    device = x_padded.device
+
+    # === Repeat data if needed ===
     if repeat_factor > 1:
         mask = mask.repeat_interleave(repeat_factor, dim=0)
         x_padded = x_padded.repeat_interleave(repeat_factor, dim=0)
 
-        
-  
-    # === Reconstruction loss from error model ===
+    # === Reconstruction loss ===
     recon_loss_noise, mse = noise.nll(
         destandardize_concentration(x_padded, global_mean, global_std),
-        pred_interp,replace_mask,mask
+        pred_interp, replace_mask, mask
     )
-    
-    
-   
-    # mask: [batch_size, seq_len], True for valid points
-   
 
-
-    
-  #  === KL Loss ===
-    mu_std =  torch.zeros_like(mu_q)
-    logvar_std = torch.zeros_like(logvar_q)
-
-    mu_std_x0=torch.zeros_like(mu_x0)
-    logvar_std_x0=torch.zeros_like(logvar_x0)
-   
-
-
+    # === KL warmup and free bits ===
     free_bits_on = (
         0 if epoch + 1 >= warmup_epochs_iiv
         else free_bits * (1 - min(1.0, epoch / warmup_epochs_iiv))
@@ -228,18 +276,16 @@ def compute_loss_and_metrics(encoder, dose_labels,
         else min(1.0, epoch / warmup_epochs_iiv)
     )
     
- 
-    KL_loss_k,denom = kl_divergence_gaussians(mu_q, logvar_q, mu_std, logvar_std, free_bits_on)
-    KL_loss_x0,denom = kl_divergence_gaussians(mu_x0, logvar_std_x0, mu_std_x0,logvar_x0 , free_bits_on)
-    KL_loss= KL_loss_k  + KL_loss_x0
-   # KL_loss = KL_loss
-    
-    loss = kl_weight * KL_loss + recon_loss_noise #+ mu_q_loss.sum()
+  #  mu_p = torch.zeros_like(mu_q)
+  #  logvar_p = torch.zeros_like(L_q)  # since exp(0) = 1 ⇒ σ² = 1
 
+    # === Full-covariance KL ===
+    KL_loss, denom = kl_divergence_gaussians(mu_q, L_q, mu_p, L_p, free_bits_on)
+    #KL_loss=kl_divergence(mu_q,L_q,mu_p,logvar_p, free_bits_on)
+    # === Combine losses ===
+    loss = KL_loss + recon_loss_noise
 
-    return loss, recon_loss_noise, mse, KL_loss, KL_loss
-
-
+    return loss, recon_loss_noise, mse, KL_loss
 
 
 
@@ -380,7 +426,7 @@ def log_training_epoch(end_time, epoch, total_mse, total_loss, total_recon, tota
                   f"-LL: {total_recon/num_batches:.1f}, "
                   f"KL: {total_kl/num_batches:.8f}, "
                   f"Add. error: {add_error:.2f}, "
-                  f"lr: {main_lr:.3f}, "
+                  f"lr: {main_lr:.6f}, "
                   f"{end_time:.1f} seconds")
         else:
             print(f"Epoch {epoch}, "
@@ -529,12 +575,12 @@ def freeze_all_modules(*modules):
             param.requires_grad = False
 
 
-def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, encoder_med, 
+def train_loop_model(p_dropout, func_med, reducer_med, encoder_med, 
     dataset, dataset_val, global_max_time, global_max_dose,
     global_mean, global_std, main_params, dataloader_val, dataloader, models,
-    optimizer, scheduler, func, reducer, initial_encoder, encoder, noise, t_dense,
+    optimizer, scheduler, func, reducer, encoder, noise, t_dense,
     n_epochs, warmup_epochs_noise, warmup_epochs_iiv, smoothing_start_epoch,
-    traing_against_validation, enable_ae,enable_vae,
+     enable_ae,enable_vae,
     enable_onlymedian,normalization,
     truncation, print_epoch=1, plot_epoch=1, max_plots=4,
     nr_col=1, nr_row=5, free_bits=1
@@ -545,37 +591,20 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
         models, func, dataloader, t_dense, global_max_time
     )
 
-    def list_live_cuda_tensors():
-         tensors = []
-         for obj in gc.get_objects():
-             try:
-                 if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                     if obj.is_cuda:
-                         tensors.append((type(obj), tuple(obj.shape), obj.dtype, obj.device, obj.requires_grad))
-             except:
-                 pass
-         return tensors
 
-
-     # Delete all tensors from global variables that are on the GPU
-    for name, obj in globals().copy().items():
-         if isinstance(obj, torch.Tensor) and obj.is_cuda:
-             del globals()[name]
-
-     # Force garbage collection to free CPU memory
     gc.collect()
 
      # Free unused GPU memory
     torch.cuda.empty_cache()
-
+ 
     
     encoder_med.eval()
-    initial_encoder_med.eval()
     reducer_med.eval()
     func_med.eval()
     set_all_train(models)
-    encoder.eval()
     num_batches = len(dataloader)
+    
+
 
     
     for epoch in range(n_epochs):
@@ -612,11 +641,11 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
             
        
             
-            mask=mask.to(device)
+            #mask=mask.to(device)
             
             # --- Preprocess batch ---
             # --- Preprocess batch ---
-            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask_dose, dose_tensor, dose_times_list, evid = preprocess_batch(
+            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask, dose_tensor, dose_times_list, evid = preprocess_batch(
                 batch, device, truncation=truncation
             )
            
@@ -624,10 +653,10 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
             
             if normalization:
                 x_encoder = normalize_encoder_input( x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
-                 encoder_med, initial_encoder_med, func_med, reducer_med,
-                 t_dense, latent_dim, global_mean, global_std)
+                 encoder_med, func_med, reducer_med,
+                 t_dense, global_mean, global_std)
             
-            k_param, mu_q, logvar_q, repeat_factor = encode_latent(
+            k_param, mu_q, logvar_q,mu_p,logvar_p, repeat_factor = encode_latent(
                 encoder,
                 t_encoder,
                 x_encoder,
@@ -641,14 +670,14 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
                 
             )
             
-            
+         
             
             k_param, mask_dropout = replace_with_gaussian_noise(k_param,p_dropout)
 
           
             
-            x0, ode_func, mu_x0, logvar_x0 = prepare_ode_input(
-                initial_encoder,
+            ode_func= prepare_ode_input(
+
                 x_padded,
                 k_param,
                 func,
@@ -661,12 +690,11 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
                 
             )
             if enable_onlymedian:
-                x0 = x0*0
+                k_param = k_param*0
             
-         
           
             pred_interp, pred_batch = make_predictions(
-                t_padded, t_dense, x0, ode_func, reducer, latent_dim,global_mean,global_std,repeat_factor
+                t_padded, t_dense, k_param, ode_func, reducer,global_mean,global_std,repeat_factor
             )
        
 
@@ -674,11 +702,11 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
          
             
             # 2. Compute losses
-            loss, recon_loss_noise, mse, KL_loss, kl_gauss = compute_loss_and_metrics(encoder,
-                dose_tensor, 
+            loss, recon_loss_noise, mse, KL_loss = compute_loss_and_metrics(encoder,
+                
                 x_padded, mask, pred_interp,
                 mu_q, logvar_q,
-                mu_x0, logvar_x0,
+                mu_p,logvar_p,
                 epoch, warmup_epochs_iiv, free_bits,
                 enable_ae, enable_vae,
                 noise, global_mean, global_std, enable_onlymedian, mask_dropout,repeat_factor
@@ -688,7 +716,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
              
             total_loss, total_mse, total_kl, total_recon = accumulate_epoch_metrics(
                  total_loss, total_mse, total_kl, total_recon,
-                 loss , mse, kl_gauss, recon_loss_noise, enable_ae
+                 loss , mse, KL_loss, recon_loss_noise, enable_ae
             )
      
             
@@ -703,7 +731,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
 
             first_batch = False
             if epoch >= smoothing_start_epoch:
-                for m in [models, encoder, initial_encoder, func, noise, reducer]:
+                for m in [models, encoder, func, noise, reducer]:
                     if hasattr(m, "update_ema"):
                         m.update_ema(alpha=0.05)
             
@@ -724,27 +752,27 @@ def train_loop_model(p_dropout, func_med, reducer_med, initial_encoder_med, enco
         #     )
 
         # --- Validation and early stopping ---
-        if traing_against_validation and epoch > warmup_epochs_iiv:
+        # if traing_against_validation and epoch > warmup_epochs_iiv:
        
             
-            val_mse, val_LL, val_loss = evaluate_on_val(
-                global_mean, global_std, global_max_time, global_max_dose,
-                enable_vae, enable_ae,enable_vae,enable_onlymedian, truncation,
-                func, noise, reducer, dataloader_val,
-                device, encoder, initial_encoder, t_dense
-            )
+        #     val_mse, val_LL, val_loss = evaluate_on_val(
+        #         global_mean, global_std, global_max_time, global_max_dose,
+        #         enable_vae, enable_ae,enable_vae,enable_onlymedian, truncation,
+        #         func, noise, reducer, dataloader_val,
+        #         device, encoder, initial_encoder, t_dense
+        #     )
             
-            best_val_mse, best_val_LL,best_val_loss, epochs_no_improve, stop_training, best_model_state = \
-                validate_and_update_early_stop(
-                    epoch, warmup_epochs_noise, traing_against_validation,
-                    val_mse, val_LL,val_loss, best_val_mse, best_val_LL,best_val_loss, epochs_no_improve,
-                    patience, models, enable_vae
-                )
-            if stop_training:
-                break
-        else:
-            val_mse=0
-            val_LL=0
+        #     best_val_mse, best_val_LL,best_val_loss, epochs_no_improve, stop_training, best_model_state = \
+        #         validate_and_update_early_stop(
+        #             epoch, warmup_epochs_noise, traing_against_validation,
+        #             val_mse, val_LL,val_loss, best_val_mse, best_val_LL,best_val_loss, epochs_no_improve,
+        #             patience, models, enable_vae
+        #         )
+        #     if stop_training:
+        #         break
+        # else:
+        val_mse=0
+        val_LL=0
         # --- Logging ---
         
         log_training_epoch(epoch_duration,
@@ -867,32 +895,205 @@ def run_model_variant(variant_name, train_dataset, val_dataset, test_dataset,
   #  return mse_train 
 
 
-def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
-    """
-    KL[q||p] between two diagonal Gaussians with optional mask and free bits.
+# def kl_divergence_gaussians(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
+#     """
+#     KL[q||p] between two diagonal Gaussians with optional mask and free bits.
     
-    Args:
-        mu_q, logvar_q: [B, D] approximate posterior
-        mu_p, logvar_p: [B, D] prior
-        free_bits: float, minimum KL per dim to prevent collapse
-        mask: optional tensor of shape [B], [B, 1], or [B, D] (1=keep, 0=drop)
+#     Args:
+#         mu_q, logvar_q: [B, D] approximate posterior
+#         mu_p, logvar_p: [B, D] prior
+#         free_bits: float, minimum KL per dim to prevent collapse
+#         mask: optional tensor of shape [B], [B, 1], or [B, D] (1=keep, 0=drop)
     
-    Returns:
-        Scalar: mean KL divergence with masking and free bits
-    """
-    var_q = torch.exp(logvar_q)
-    var_p = torch.exp(logvar_p)
+#     Returns:
+#         Scalar: mean KL divergence with masking and free bits
+#     """
+#     var_q = torch.exp(logvar_q)
+#     var_p = torch.exp(logvar_p)
     
     
-    kl_per_dim = 0.5 * ((var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q)  # [B, D]
-    kl=kl_per_dim.sum(dim=1)
-    # Apply free bits per dim
-    if free_bits > 0:
-        kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)
+#     kl_per_dim = 0.5 * ((var_q + (mu_q - mu_p) ** 2) / var_p - 1 + logvar_p - logvar_q)  # [B, D]
+#     kl=kl_per_dim.sum(dim=1)
+#     # Apply free bits per dim
+#     if free_bits > 0:
+#         kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)
    
-    denom = kl.shape[0]  # number of samples
+#     denom = kl.shape[0]  # number of samples
 
-    return kl.mean(), denom
+#     return kl.mean(), denom
+
+import torch
+import torch.nn.functional as F
+
+def make_cholesky(L_input, device=None):
+    """
+    Builds a valid Cholesky factor from either [B, D] or [B, D, D] input.
+    """
+    if L_input.dim() == 2:
+        # Diagonal covariance
+        return torch.diag_embed(F.softplus(L_input)).to(device or L_input.device)
+    elif L_input.dim() == 3:
+        # Full covariance
+        L = torch.tril(L_input)
+        diag = torch.diagonal(L, dim1=1, dim2=2)
+        diag_pos = F.softplus(diag) + 1e-6
+        L = L.clone()
+        L[:, torch.arange(L.shape[1]), torch.arange(L.shape[1])] = diag_pos
+        return L.to(device or L_input.device)
+    else:
+        raise ValueError("L_input must have shape [B, D] or [B, D, D]")
 
 
+
+
+# def kl_divergence_gaussians(mu_q, L_q, mu_p, L_p, free_bits=0.0, eps=1e-6):
+#     """
+#     Compute KL[q||p] between two full-covariance Gaussians:
+#         q = N(mu_q, Σ_q = L_q L_q^T)
+#         p = N(mu_p, Σ_p = L_p L_p^T)
+
+#     Supports batch_size B.
+
+#     Args:
+#         mu_q: [B, D]
+#         L_q: [B, D, D] or [D, D] (Cholesky of q)
+#         mu_p: [B, D] or [D] (mean of p)
+#         L_p: [B, D, D] or [D, D] (Cholesky of p)
+#         free_bits: minimum KL per dimension
+#         eps: numerical stability
+
+#     Returns:
+#         kl_mean: mean KL over batch
+#         B: batch size
+#     """
+#     B, D = mu_q.shape
+#     device = mu_q.device
+
+#     # Expand p to batch if needed
+#     if mu_p.dim() == 1:
+#         mu_p = mu_p.unsqueeze(0).expand(B, -1)
+#     if L_p.dim() == 2:
+#         L_p = L_p.unsqueeze(0).expand(B, -1, -1)
+
+#     # Covariance matrices
+#     Σ_q = torch.bmm(L_q, L_q.transpose(1, 2))  # [B, D, D]
+#     Σ_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [B, D, D]
+
+#     # Log determinant terms
+#     logdet_q = 2 * torch.sum(torch.log(torch.diagonal(L_q, dim1=1, dim2=2) + eps), dim=1)
+#     logdet_p = 2 * torch.sum(torch.log(torch.diagonal(L_p, dim1=1, dim2=2) + eps), dim=1)
+
+#     # Inverse of Σ_p using Cholesky solve for stability
+#     # Solve Σ_p x = Σ_q instead of explicit inversion
+#     trace_term = torch.zeros(B, device=device)
+#     quad_term = torch.zeros(B, device=device)
+#     diff = (mu_p - mu_q).unsqueeze(-1)  # [B, D, 1]
+
+#     for b in range(B):
+#         # Solve Σ_p x = Σ_q[b] -> x = Σ_p^-1 Σ_q
+#         Lp = L_p[b]  # [D, D]
+#         Σq = Σ_q[b]  # [D, D]
+#         x = torch.cholesky_solve(Σq, Lp)   # [D, D]
+#         trace_term[b] = torch.trace(x)
+
+#         # Solve Σ_p y = diff[b] -> y = Σ_p^-1 (mu_p - mu_q)
+#         y = torch.cholesky_solve(diff[b], Lp)  # [D, 1]
+#         quad_term[b] = (diff[b].transpose(0, 1) @ y).squeeze()  # scalar
+
+#     kl = 0.5 * (trace_term + quad_term - D + (logdet_p - logdet_q))
+
+#     if free_bits > 0:
+#         kl = torch.clamp(kl, min=free_bits * D)
+
+#     return kl.mean(), B
+
+def kl_divergence_gaussians(mu_q, L_q, mu_p, L_p, free_bits=0.0, eps=1e-6):
+    """
+    Compute KL[q||p] between two full-covariance Gaussians:
+        q = N(mu_q, Σ_q = L_q L_q^T)
+        p = N(mu_p, Σ_p = L_p L_p^T)
+
+    Supports batch of size B:
+        mu_q, mu_p: [B, D]
+        L_q, L_p: [B, D, D]
+    """
+    B, D = mu_q.shape
+    device = mu_q.device
+
+    # Ensure L_q and L_p are batch 3D
+    if L_q.dim() == 2:
+        L_q = L_q.unsqueeze(0).expand(B, D, D)
+    if L_p.dim() == 2:
+        L_p = L_p.unsqueeze(0).expand(B, D, D)
+
+    # Covariance matrices
+    Sigma_q = torch.bmm(L_q, L_q.transpose(1, 2))  # [B, D, D]
+    Sigma_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [B, D, D]
+
+    # Log-determinant terms
+    logdet_q = 2 * torch.sum(torch.log(torch.diagonal(L_q, dim1=1, dim2=2) + eps), dim=1)
+    logdet_p = 2 * torch.sum(torch.log(torch.diagonal(L_p, dim1=1, dim2=2) + eps), dim=1)
+
+    # Inverse of prior covariance
+    Sigma_p_inv = torch.linalg.inv(Sigma_p)
+
+    # Trace term
+    trace_term = torch.einsum('bij,bji->b', Sigma_p_inv, Sigma_q)
+
+    # Quadratic term
+    diff = (mu_p - mu_q).unsqueeze(-1)  # [B, D, 1]
+    quad_term = torch.einsum('bik,bkj,bji->b', diff.transpose(1, 2), Sigma_p_inv, diff)
+
+    # KL
+    kl = 0.5 * (trace_term + quad_term - D + (logdet_p - logdet_q))
+
+    # Free bits
+    if free_bits > 0:
+        kl = torch.clamp(kl, min=free_bits * D)
+
+    return kl.mean(), B
+
+
+
+# def kl_divergence_gaussians(mu_q, L_q, mu_p, L_p, free_bits=0.0):
+#     """
+#     Compute KL[q||p] between two full-covariance Gaussians:
+#         q = N(mu_q, Σ_q = L_q L_q^T)
+#         p = N(mu_p, Σ_p = L_p L_p^T)
+#     """
+#     B, D = mu_q.shape
+#     device = mu_q.device
+#     if L_q.dim() == 2:  # [B, D]
+#         L_q = make_cholesky(L_q, device=mu_q.device)  # now L_q: [B, D, D]
+ 
+   
+#     # Covariance matrices
+#     Σ_q = torch.bmm(L_q, L_q.transpose(1, 2))  # [B, D, D]
+#     Σ_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [B, D, D]
     
+#     # Log determinant terms
+#     logdet_q = 2 * torch.sum(torch.log(torch.diagonal(L_q, dim1=1, dim2=2)), dim=1)
+#     logdet_p = 2 * torch.sum(torch.log(torch.diagonal(L_p, dim1=1, dim2=2)), dim=1)
+
+#     Σ_p_inv = torch.inverse(Σ_p)
+
+#     diff = (mu_p - mu_q).unsqueeze(-1)
+#     trace_term = torch.einsum('bij,bji->b', Σ_p_inv, Σ_q)
+#     quad_term = torch.einsum('bik,bkj,bji->b', diff.transpose(1, 2), Σ_p_inv, diff)
+
+#     kl = 0.5 * (trace_term + quad_term - D + (logdet_p - logdet_q))
+
+#     if free_bits > 0:
+#         kl = torch.clamp(kl, min=free_bits * D)
+
+#     return kl.mean(), kl.shape[0]
+
+# def kl_divergence(mu_q, logvar_q, mu_p, logvar_p, free_bits=0.0):
+#     var_q = torch.exp(logvar_q)
+#     var_p = torch.exp(logvar_p)
+#     kl = 0.5 * torch.sum((var_q + (mu_q - mu_p)**2) / var_p - 1 + torch.log(var_p) - logvar_q, dim=1)
+#     if free_bits > 0:
+#         kl = torch.clamp(kl, min=free_bits*mu_q.size(1))
+#     return kl.mean()
+
+  
