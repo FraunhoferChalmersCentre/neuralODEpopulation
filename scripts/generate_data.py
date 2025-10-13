@@ -223,3 +223,129 @@ def main():
 
 if __name__ == "__main__":
     main()
+# %%
+
+import os
+import sys
+import argparse
+import numpy as np
+import pandas as pd
+
+# Add project root to path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(project_root)
+
+from lib.utils.utils_data_generation import simulate_tumor_volume_with_event
+
+def main():
+    base_dir = os.getcwd()
+    default_save_dir = os.path.join(base_dir, "lib", "data")
+    default_save_path = os.path.join(default_save_dir, "tumor_data.csv")
+    os.makedirs(default_save_dir, exist_ok=True)
+
+    parser = argparse.ArgumentParser(description="Simulate tumor volume and time-to-event data under drug treatments.")
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        default=default_save_path,
+        help="Path to save the simulated CSV file",
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Include this flag to show plots of tumor volume",
+    )
+    args, _ = parser.parse_known_args()
+
+    # ----- PK/PD parameters -----
+    a_drugs = [0.0003]     # Effect coefficients for each drug
+    add_e = 5
+    prop_e = 0.0001
+    ka_mean   = [0.6]
+    ke_mean   = [0.6]
+    v_mean    = [0]
+    ka_sd     = [0]
+    ke_sd     = [0]
+    v_sd      = [0]
+
+    # ----- Tumor parameters -----
+    k_growth_mean = 0.1
+    k_growth_sd   = 0.01
+    V0_mean       = 100.0
+    V0_sd         = 0.1
+
+    # ----- Event hazard parameters -----
+    alpha = 0.001
+    beta = 0.001
+
+    # ----- Groups: individuals and dosing -----
+    groups = [
+    {
+        'n_individuals': 100,
+        'dose_amounts_list': [[200, 200, 200, 200]],  # one inner list for the single drug
+        'dose_times_list': [[3, 8, 13, 18]]           # one inner list for the single drug
+    }
+]
+
+
+    combined_tumor_data = []
+    combined_tte_data = []
+    id_offset = 0
+
+    for treatment_idx, group in enumerate(groups, start=1):
+        temp_save_path = os.path.join(default_save_dir, f"temp_group_{treatment_idx}.csv")
+
+        simulate_tumor_volume_with_event(
+            n_individuals=group['n_individuals'],
+            dose_amounts_list=group['dose_amounts_list'],
+            dose_times_list=group['dose_times_list'],
+            a_drugs=a_drugs,
+            alpha=alpha,
+            beta=beta,
+            add_e=add_e,
+            prop_e=prop_e,
+            save_path=temp_save_path,
+            plot=args.plot,
+            t_interval=(0, 16),
+            sample_frequency=0.5,
+            ka_mean=ka_mean,
+            ke_mean=ke_mean,
+            v_mean=v_mean,
+            ka_sd=ka_sd,
+            ke_sd=ke_sd,
+            v_sd=v_sd,
+            k_growth_mean=k_growth_mean,
+            k_growth_sd=k_growth_sd,
+            V0_mean=V0_mean,
+            V0_sd=V0_sd
+        )
+
+        # Load simulated tumor data
+        df_tumor = pd.read_csv(temp_save_path, sep=';')
+        df_tumor.columns = df_tumor.columns.str.strip().str.upper()
+        df_tumor['ID'] += id_offset
+        df_tumor['TREATMENT'] = treatment_idx
+        combined_tumor_data.append(df_tumor)
+
+        # Load simulated TTE data
+        tte_path = os.path.join(os.path.dirname(temp_save_path), "tte_" + os.path.basename(temp_save_path))
+        df_tte = pd.read_csv(tte_path, sep=';')
+        df_tte.columns = df_tte.columns.str.strip().str.upper()
+        df_tte['ID'] += id_offset
+        df_tte['TREATMENT'] = treatment_idx
+        combined_tte_data.append(df_tte)
+
+        id_offset = df_tumor['ID'].max()
+
+    # Combine all groups and save
+    df_all_tumor = pd.concat(combined_tumor_data, ignore_index=True).sort_values(['ID','TIME'])
+    df_all_tumor.to_csv(args.save_path, index=False, sep=';')
+    print(f"Saved combined tumor volume dataset to {args.save_path}")
+
+    tte_save_path = os.path.splitext(args.save_path)[0] + "_tte.csv"
+    df_all_tte = pd.concat(combined_tte_data, ignore_index=True).sort_values(['ID'])
+    df_all_tte.to_csv(tte_save_path, index=False, sep=';')
+    print(f"Saved combined time-to-event dataset to {tte_save_path}")
+
+if __name__ == "__main__":
+    main()
