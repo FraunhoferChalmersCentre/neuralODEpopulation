@@ -507,7 +507,6 @@ def simulate_tumor_volume(
 
     print(f"Saved simulated tumor data to {save_path}")
 import os
-
 def simulate_tumor_volume_with_event(
     n_individuals,
     dose_amounts_list,
@@ -531,11 +530,20 @@ def simulate_tumor_volume_with_event(
     ke_sd=0.5,
     v_sd=0.25,
     max_tumor_size=2000,
+    use_deterministic_event=True,
     plot=False
 ):
     """
-    Simulate tumor volume under multiple drugs and generate time-to-event data
-    with individual-specific hazard: h(t) = max(0, alpha + beta * V)
+    Simulate tumor volume under multiple drugs and generate time-to-event data.
+
+    Event mechanisms:
+      - Stochastic: hazard h(t) = max(0, alpha + beta * V)
+      - Deterministic (optional): trigger when V >= 1.2 * V0
+
+    Parameters
+    ----------
+    use_deterministic_event : bool, default=True
+        Whether to include the deterministic event mechanism (V >= 1.2 * V0).
     """
     import numpy as np
     import pandas as pd
@@ -546,6 +554,7 @@ def simulate_tumor_volume_with_event(
     sampled_data = []
     tte_data = []
     id_counter = 1
+    deterministic_count = 0  # counter for deterministic events
 
     # Fine evaluation times
     extra_points = []
@@ -553,9 +562,11 @@ def simulate_tumor_volume_with_event(
     for dt_list in dose_times_list:
         for dt in dt_list:
             extra_points.extend(np.linspace(dt - window, dt + window, 20))
-    t_eval = np.unique(np.concatenate([np.linspace(t_interval[0], t_interval[1], 120),
-                                       *dose_times_list,
-                                       extra_points]))
+    t_eval = np.unique(np.concatenate([
+        np.linspace(t_interval[0], t_interval[1], 120),
+        *dose_times_list,
+        extra_points
+    ]))
     t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
 
     for ind in range(n_individuals):
@@ -568,8 +579,9 @@ def simulate_tumor_volume_with_event(
         # Sample tumor parameters
         k_growth = np.random.normal(k_growth_mean, k_growth_sd)
         V = np.random.normal(V0_mean, V0_sd)
+        V_baseline = V  # store baseline tumor volume
 
-        # Store parameters for saving
+        # Store parameters
         param_names = []
         param_values = []
         for d in range(n_drugs):
@@ -584,17 +596,24 @@ def simulate_tumor_volume_with_event(
 
         V_out = []
         hazard_cumsum = 0
-        event_occurred = False
         dt_prev = 0.01
 
-        # Draw a uniform random for event simulation
-        # Draw a uniform random for event simulation
+        # Random number for stochastic event
         u_event = np.random.uniform()
-        event_occurred = False  # has event happened yet?
-        
+        event_occurred = False
+        event_type = "CENSORED"
+
+        # Default TTE record (censored)
+        tte_recorded = {
+            'ID': id_counter,
+            'TIME_TO_EVENT': t_sample[-1],
+            'EVENT': 0,
+            'EVENT_TYPE': event_type
+        }
+
         for i, t in enumerate(t_eval):
             dt = t_eval[i] - t_eval[i-1] if i > 0 else dt_prev
-        
+
             # Dosing
             for d in range(n_drugs):
                 doses = np.array(dose_amounts_list[d])
@@ -612,42 +631,60 @@ def simulate_tumor_volume_with_event(
                         'PARAM_NAMES': param_names,
                         'PARAM_VALUES': param_values
                     })
-        
+
             # PK update
             dC1 = -ka * C1
             dC2 = ka * C1 - ke * C2
             C1 += dC1 * dt
             C2 += dC2 * dt
             C2 = np.maximum(0, C2)
-        
+
             # Tumor dynamics
             effect = np.sum(a * C2)
             dV = V * (k_growth - effect)
             V += dV * dt
             V_out.append(V)
-        
-            # Hazard and event (directly from V)
+
+            # Prevent runaway growth
+            if V > max_tumor_size:
+                V = max_tumor_size
+
+            # Hazard accumulation
             hazard = max(0, alpha + beta * V)
             hazard_cumsum += hazard * dt
-        
-            # Record the first event only
-            if (not event_occurred) and (1 - np.exp(-hazard_cumsum) >= u_event):
-                tte = t
+
+            # --- Deterministic event (optional) ---
+            if use_deterministic_event and (not event_occurred) and (V >= 1.2 * V_baseline):
+                future_samples = t_sample[t_sample >= t]
+                tte_recorded['TIME_TO_EVENT'] = (
+                    future_samples[0] if len(future_samples) > 0 else t_sample[-1]
+                )
+                tte_recorded['EVENT'] = 1
+                tte_recorded['EVENT_TYPE'] = "DETERMINISTIC"
                 event_occurred = True
-                tte_data.append({
-                    'ID': id_counter,
-                    'TIME_TO_EVENT': tte,
-                    'EVENT': 1
-                })
-        
-        # Interpolate tumor volumes (after loop, uses all V_out including post-event)
+                deterministic_count += 1  # increment counter
+
+            # --- Stochastic event ---
+            elif (not event_occurred) and (1 - np.exp(-hazard_cumsum) >= u_event):
+                future_samples = t_sample[t_sample >= t]
+                tte_recorded['TIME_TO_EVENT'] = (
+                    future_samples[0] if len(future_samples) > 0 else t_sample[-1]
+                )
+                tte_recorded['EVENT'] = 1
+                tte_recorded['EVENT_TYPE'] = "STOCHASTIC"
+                event_occurred = True
+
+        # Save event data
+        tte_data.append(tte_recorded)
+
+        # Sample tumor volume data
         t_eval_recorded = t_eval[:len(V_out)]
         t_sample_recorded = t_sample[t_sample <= t_eval_recorded[-1]]
         V_sampled = np.interp(t_sample_recorded, t_eval_recorded, V_out)
         noise_add = np.random.normal(0, add_e, size=V_sampled.shape)
         noise_prop = np.random.normal(0, prop_e, size=V_sampled.shape)
         V_noisy = np.maximum(0, V_sampled * (1 + noise_prop) + noise_add)
-        
+
         for t_obs, dv in zip(t_sample_recorded, V_noisy):
             sampled_data.append({
                 'ID': id_counter,
@@ -660,14 +697,15 @@ def simulate_tumor_volume_with_event(
                 'PARAM_VALUES': param_values
             })
 
-
         id_counter += 1
 
         if plot and V_out:
-            plt.plot(t_sample_recorded, V_noisy)
+            plt.plot(t_sample_recorded, V_noisy, alpha=0.3, color='gray')
 
-    df_tumor = pd.DataFrame(sampled_data).sort_values(['ID','TIME'])
+    # Save outputs
+    df_tumor = pd.DataFrame(sampled_data).sort_values(['ID', 'TIME'])
     df_tumor.to_csv(save_path, index=False, sep=';')
+
     df_tte = pd.DataFrame(tte_data)
     tte_save_path = os.path.join(os.path.dirname(save_path), "tte_" + os.path.basename(save_path))
     os.makedirs(os.path.dirname(tte_save_path), exist_ok=True)
@@ -676,11 +714,212 @@ def simulate_tumor_volume_with_event(
     if plot:
         plt.xlabel("Time")
         plt.ylabel("Tumor Volume (DV)")
-        plt.title("Simulated Tumor Volume and Event Times")
+        plt.title("Simulated Tumor Volume")
         plt.show()
 
     print(f"Saved tumor volume data to {save_path}")
     print(f"Saved time-to-event data to {tte_save_path}")
+    print(f"Number of individuals with deterministic events: {deterministic_count} "
+          f"({deterministic_count / n_individuals * 100:.1f}%)")
+
+
+
+
+# def simulate_tumor_volume_with_event(
+#     n_individuals,
+#     dose_amounts_list,
+#     dose_times_list,
+#     a_drugs,
+#     alpha=0.01,
+#     beta=0.01,
+#     k_growth_mean=0.1,
+#     k_growth_sd=0.02,
+#     V0_mean=100.0,
+#     V0_sd=10.0,
+#     add_e=0,
+#     prop_e=0,
+#     save_path="tumor_sim_with_event.csv",
+#     t_interval=(0,16),
+#     sample_frequency=0.5,
+#     ka_mean=0.6,
+#     ke_mean=0.6,
+#     v_mean=50,
+#     ka_sd=0.5,
+#     ke_sd=0.5,
+#     v_sd=0.25,
+#     max_tumor_size=2000,
+#     plot=True,
+#     use_deterministic_cutoff=True  # <-- new flag
+# ):
+#     """
+#     Simulate tumor volume under multiple drugs and generate time-to-event data
+#     with individual-specific hazard: h(t) = max(0, alpha + beta * V).
+#     Deterministic event (tumor ≥ 1.2× baseline) is optional.
+#     """
+#     import numpy as np
+#     import pandas as pd
+#     import matplotlib.pyplot as plt
+#     import os
+
+#     n_drugs = len(dose_amounts_list)
+#     sampled_data = []
+#     tte_data = []
+#     id_counter = 1
+#     n_triggered_1p2 = 0  # counter for deterministic events
+
+#     # Fine evaluation times
+#     extra_points = []
+#     window = 0.3
+#     for dt_list in dose_times_list:
+#         for dt in dt_list:
+#             extra_points.extend(np.linspace(dt - window, dt + window, 20))
+#     t_eval = np.unique(np.concatenate([
+#         np.linspace(t_interval[0], t_interval[1], 120),
+#         *dose_times_list,
+#         extra_points
+#     ]))
+#     t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
+
+#     for ind in range(n_individuals):
+#         # Sample individual PK parameters
+#         ka = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_drugs)
+#         ke = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_drugs)
+#         v  = np.random.lognormal(mean=np.log(v_mean), sigma=v_sd, size=n_drugs)
+#         a  = np.array(a_drugs)
+
+#         # Sample tumor parameters
+#         k_growth = np.random.normal(k_growth_mean, k_growth_sd)
+#         V = np.random.normal(V0_mean, V0_sd)
+#         V0 = V  # store initial baseline
+
+#         # Store parameters
+#         param_names = []
+#         param_values = []
+#         for d in range(n_drugs):
+#             param_names.extend([f'ka_drug{d+1}', f'ke_drug{d+1}', f'v_drug{d+1}', f'a_drug{d+1}'])
+#             param_values.extend([ka[d], ke[d], v[d], a[d]])
+#         param_names.extend(['k_growth', 'V0', 'alpha', 'beta'])
+#         param_values.extend([k_growth, V0, alpha, beta])
+
+#         # Initialize PK compartments
+#         C1 = np.zeros(n_drugs)
+#         C2 = np.zeros(n_drugs)
+
+#         V_out = []
+#         hazard_cumsum = 0
+#         event_occurred = False
+#         event_triggered_by_threshold = False
+#         dt_prev = 0.01
+
+#         u_event = np.random.uniform()
+
+#         for i, t in enumerate(t_eval):
+#             dt = t_eval[i] - t_eval[i-1] if i > 0 else dt_prev
+
+#             # Dosing
+#             for d in range(n_drugs):
+#                 doses = np.array(dose_amounts_list[d])
+#                 times = np.array(dose_times_list[d])
+#                 mask = np.isclose(t, times, atol=1e-5)
+#                 if mask.any():
+#                     C1[d] += doses[mask][0]
+#                     sampled_data.append({
+#                         'ID': id_counter,
+#                         'TIME': t,
+#                         'DV': np.nan,
+#                         'AMT': doses[mask][0],
+#                         'EVID': 1,
+#                         'TREATMENT': None,
+#                         'PARAM_NAMES': param_names,
+#                         'PARAM_VALUES': param_values
+#                     })
+
+#             # PK update
+#             dC1 = -ka * C1
+#             dC2 = ka * C1 - ke * C2
+#             C1 += dC1 * dt
+#             C2 += dC2 * dt
+#             C2 = np.maximum(0, C2)
+
+#             # Tumor growth
+#             effect = np.sum(a * C2)
+#             dV = V * (k_growth - effect)
+#             V += dV * dt
+#             V_out.append(V)
+
+#             # Hazard process
+#             hazard = max(0, alpha + beta * V)
+#             hazard_cumsum += hazard * dt
+
+#             # Event check
+#             if not event_occurred:
+#                 event_probability = 1 - np.exp(-hazard_cumsum)
+#                 if event_probability >= u_event:
+#                     tte = t
+#                     event_occurred = True
+#                     event_triggered_by_threshold = False
+#                 elif use_deterministic_cutoff and V >= 1.2 * V0:
+#                     tte = t
+#                     event_occurred = True
+#                     event_triggered_by_threshold = True
+
+#                 if event_occurred:
+#                     tte_data.append({
+#                         'ID': id_counter,
+#                         'TIME_TO_EVENT': tte,
+#                         'EVENT': 1
+#                     })
+
+#         # Record if triggered by deterministic rule
+#         if event_triggered_by_threshold:
+#             n_triggered_1p2 += 1
+
+#         # Interpolate tumor volumes
+#         t_eval_recorded = t_eval[:len(V_out)]
+#         t_sample_recorded = t_sample[t_sample <= t_eval_recorded[-1]]
+#         V_sampled = np.interp(t_sample_recorded, t_eval_recorded, V_out)
+#         noise_add = np.random.normal(0, add_e, size=V_sampled.shape)
+#         noise_prop = np.random.normal(0, prop_e, size=V_sampled.shape)
+#         V_noisy = np.maximum(0, V_sampled * (1 + noise_prop) + noise_add)
+
+#         for t_obs, dv in zip(t_sample_recorded, V_noisy):
+#             sampled_data.append({
+#                 'ID': id_counter,
+#                 'TIME': t_obs,
+#                 'DV': dv,
+#                 'AMT': 0,
+#                 'EVID': 0,
+#                 'TREATMENT': None,
+#                 'PARAM_NAMES': param_names,
+#                 'PARAM_VALUES': param_values
+#             })
+
+#         id_counter += 1
+
+#         if plot and V_out:
+#             plt.plot(t_sample_recorded, V_noisy)
+
+#     # Save output files
+#     df_tumor = pd.DataFrame(sampled_data).sort_values(['ID','TIME'])
+#     df_tumor.to_csv(save_path, index=False, sep=';')
+#     df_tte = pd.DataFrame(tte_data)
+#     tte_save_path = os.path.join(os.path.dirname(save_path), "tte_" + os.path.basename(save_path))
+#     os.makedirs(os.path.dirname(tte_save_path), exist_ok=True)
+#     df_tte.to_csv(tte_save_path, index=False, sep=';')
+
+#     # Plot if needed
+#     if plot:
+#         plt.xlabel("Time")
+#         plt.ylabel("Tumor Volume (DV)")
+#         plt.title("Simulated Tumor Volume and Event Times")
+#         plt.show()
+
+#     if use_deterministic_cutoff:
+#         print(f"Number of individuals with deterministic (≥1.2×V0) events: {n_triggered_1p2} / {n_individuals}")
+#         print(f"({100 * n_triggered_1p2 / n_individuals:.1f}% of all subjects)")
+
+#     print(f"Saved tumor volume data to {save_path}")
+#     print(f"Saved time-to-event data to {tte_save_path}")
 
 
 

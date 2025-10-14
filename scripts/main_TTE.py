@@ -27,7 +27,8 @@ from lib.utils.utils_TTE import (
     compute_hazard,
     population_survival,
     extract_predictions,
-    fit_alpha_beta_to_KM
+    fit_alpha_beta_to_KM,
+    survival_loss
 )
 
 # Optional: Import lifelines KaplanMeierFitter for plotting alongside population survival
@@ -83,7 +84,7 @@ if __name__ == "__main__":
 
     # ---- Compute population survival with censoring
     dt = 0.1  # spacing between time points
-    S_pop, S_ind = population_survival(hazards, dt=dt)
+    S_pop, S_ind = population_survival(hazards, dt, V_pred)
     print("Population survival computed.")
 
     # ---- Plot Kaplan-Meier and population survival ----
@@ -138,6 +139,12 @@ if __name__ == "__main__":
 
 
     # Suppose V_pred, S_KM are torch tensors
-    alpha_fit, beta_fit, S_pred = fit_alpha_beta_to_KM(V_pred, S_KM_interp, dt=0.5, lr=0.001, n_epochs=1000)
+    alpha_fit, beta_fit, S_pred = fit_alpha_beta_to_KM(V_pred, S_KM_interp, dt=dt, lr=0.001, n_epochs=1000)
     print("Fitted alpha:", alpha_fit.item())
     print("Fitted beta:", beta_fit.item())
+    
+    
+    
+    survival_loss(0.001,0.001, V_pred, S_KM_interp, dt=0.1)
+    
+    

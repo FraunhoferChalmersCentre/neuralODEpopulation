@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Oct 13 22:20:00 2025
 
-@author: Baaz
-"""
 # libs/utils/TTE.py
 
 import pandas as pd
@@ -98,32 +93,96 @@ def compute_hazard(tumor_volume, alpha=None, beta=None):
 # lib/utils/utils_hazard.py
 import torch
 
-def population_survival(hazards, dt=None, observed_mask=None):
+import torch
+
+def population_survival(
+    hazards,
+    dt=None,
+    tumor_vol_pred=None,
+    deterministic_threshold=1.2
+):
+    """
+    Compute population and individual survival functions from hazard values,
+    optionally enforcing deterministic death (survival=0) when predicted
+    tumor volume exceeds a threshold.
+
+    Parameters
+    ----------
+    hazards : torch.Tensor
+        Tensor of shape (n_individuals, n_timepoints), hazard values.
+    dt : float, optional
+        Time step between hazard measurements (default 1.0).
+    observed_mask : torch.Tensor, optional
+        Mask tensor for observed timepoints (same shape as hazards).
+    tumor_vol_pred : torch.Tensor, optional
+        Predicted tumor volumes (same shape as hazards).
+    deterministic_threshold : float, default=1.2
+        Threshold multiplier of baseline tumor volume that triggers deterministic death.
+
+    Returns
+    -------
+    S_pop : torch.Tensor
+        Population survival function (mean of individual survival).
+    S_ind : torch.Tensor
+        Individual survival trajectories.
+    """
     if dt is None:
         dt = 1.0
 
     hazards = torch.nan_to_num(hazards)
 
-    # Compute cumulative hazard
+    # Compute cumulative hazard and survival
     cum_hazard = torch.cumsum(hazards * dt, dim=1)
+    
+    # Prepend zero and trim last value so length stays the same as hazards
+  #  zero_col = torch.zeros((cum_hazard.shape[0], 1), dtype=cum_hazard.dtype, device=cum_hazard.device)
+   # cum_hazard = torch.cat([zero_col, cum_hazard[:, :-1]], dim=1)
+
     S_ind = torch.exp(-cum_hazard)
 
-    # Avoid inplace: set first column to 1 by concatenation
+    # Ensure first column = 1.0 (initial survival)
     first_col = torch.ones((S_ind.shape[0], 1), dtype=S_ind.dtype, device=S_ind.device)
     S_ind = torch.cat([first_col, S_ind[:, 1:]], dim=1)
 
-    # Population survival
+    # === Apply deterministic survival override ===
+    if tumor_vol_pred is not None:
+        # Ensure same shape
+        assert tumor_vol_pred.shape == hazards.shape, \
+            f"tumor_vol_pred must match hazards shape: {hazards.shape}, got {tumor_vol_pred.shape}"
+
+        # Determine baseline per individual
+        baseline = tumor_vol_pred[:, 0:1]  # shape (N, 1)
+        threshold_values = deterministic_threshold * baseline
+
+        # Create mask where tumor volume exceeds threshold
+        exceed_mask = tumor_vol_pred >= threshold_values
+
+        # For each individual, find first exceedance index
+        exceed_idx = exceed_mask.float().argmax(dim=1)
+        ever_exceeded = exceed_mask.any(dim=1)
+
+        # Apply deterministic survival = 0 from exceedance onward
+        for i in range(S_ind.shape[0]):
+            if ever_exceeded[i]:
+                idx = exceed_idx[i].item()
+                # Set all subsequent survival to zero
+                S_ind[i, idx:] = 0.0
+
+    # Compute population survival as mean of individuals
     S_pop = S_ind.mean(dim=0)
 
-    # Avoid inplace: first element to 1
-    S_pop = torch.cat([torch.tensor([1.0], dtype=S_pop.dtype, device=S_pop.device), S_pop[1:]])
+    # Ensure first element = 1
+    first_val = torch.tensor([1.0], dtype=S_pop.dtype, device=S_pop.device)
+    S_pop = torch.cat([first_val, S_pop[1:]])
 
     return S_pop, S_ind
 
 
-def survival_loss(params, V_pred, S_KM, dt=0.5):
-    alpha, beta = params
-    S_pop = population_survival(V_pred, alpha, beta, dt)
+def survival_loss(alpha,beta, V_pred, S_KM, dt):
+
+    hazard, _, _ = compute_hazard(V_pred, alpha=alpha, beta=beta)
+
+    S_pop,_ = population_survival(hazard, dt, V_pred)
     loss = torch.mean((S_pop - S_KM)**2)
     return loss
 
@@ -223,10 +282,10 @@ def fit_alpha_beta_to_KM(V_pred, S_KM, dt=0.5, lr=0.01, n_epochs=500, verbose=Tr
         hazards, _, _ = compute_hazard(V_pred, alpha, beta)
 
         # Compute population survival
-        S_pred, _ = population_survival(hazards, dt=dt)
+        S_pred, _ = population_survival(hazards, dt, V_pred)
 
         # Compute MSE loss
-        loss = torch.mean((S_pred - S_KM)**2)
+        loss = torch.mean((S_pred - S_KM) ** 2)
         loss.backward()
         optimizer.step()
 
@@ -234,7 +293,7 @@ def fit_alpha_beta_to_KM(V_pred, S_KM, dt=0.5, lr=0.01, n_epochs=500, verbose=Tr
             print(f"Epoch {epoch:03d}: loss = {loss.item():.6f}, alpha={alpha.item():.4f}, beta={beta.item():.4f}")
 
     if plot_progress:
-        plt.figure(figsize=(6,4))
+        plt.figure(figsize=(6, 4))
         plt.plot(S_KM.numpy(), label="Kaplan-Meier")
         plt.plot(S_pred.detach().numpy(), label="Predicted Survival")
         plt.xlabel("Time index")
@@ -245,3 +304,4 @@ def fit_alpha_beta_to_KM(V_pred, S_KM, dt=0.5, lr=0.01, n_epochs=500, verbose=Tr
         plt.show()
 
     return alpha.detach(), beta.detach(), S_pred.detach()
+

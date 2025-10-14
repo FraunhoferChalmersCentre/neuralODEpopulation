@@ -258,9 +258,9 @@ def main():
     args, _ = parser.parse_known_args()
 
     # ----- PK/PD parameters -----
-    a_drugs = [0.0003]     # Effect coefficients for each drug
-    add_e = 5
-    prop_e = 0.0001
+    a_drugs = [0.0005]     # Effect coefficients for each drug
+    add_e = 0.00001
+    prop_e = 0.00001
     ka_mean   = [0.6]
     ke_mean   = [0.6]
     v_mean    = [0]
@@ -270,7 +270,7 @@ def main():
 
     # ----- Tumor parameters -----
     k_growth_mean = 0.1
-    k_growth_sd   = 0.01
+    k_growth_sd   = 0.05
     V0_mean       = 100.0
     V0_sd         = 0.1
 
@@ -281,9 +281,9 @@ def main():
     # ----- Groups: individuals and dosing -----
     groups = [
     {
-        'n_individuals': 100,
+        'n_individuals': 1000,
         'dose_amounts_list': [[200, 200, 200, 200]],  # one inner list for the single drug
-        'dose_times_list': [[3, 8, 13, 18]]           # one inner list for the single drug
+        'dose_times_list': [[1, 6, 11, 16]]           # one inner list for the single drug
     }
 ]
 
@@ -305,9 +305,8 @@ def main():
             add_e=add_e,
             prop_e=prop_e,
             save_path=temp_save_path,
-            plot=args.plot,
             t_interval=(0, 16),
-            sample_frequency=0.5,
+            sample_frequency=0.1,
             ka_mean=ka_mean,
             ke_mean=ke_mean,
             v_mean=v_mean,
@@ -317,7 +316,10 @@ def main():
             k_growth_mean=k_growth_mean,
             k_growth_sd=k_growth_sd,
             V0_mean=V0_mean,
-            V0_sd=V0_sd
+            V0_sd=V0_sd,
+            max_tumor_size=2000,
+            plot=False
+        
         )
 
         # Load simulated tumor data
