@@ -284,7 +284,6 @@ def compute_loss_and_metrics(
     #KL_loss=kl_divergence(mu_q,L_q,mu_p,logvar_p, free_bits_on)
     # === Combine losses ===
     loss = KL_loss + recon_loss_noise
-
     return loss, recon_loss_noise, mse, KL_loss
 
 

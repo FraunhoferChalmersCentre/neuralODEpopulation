@@ -374,7 +374,7 @@ def simulate_tumor_volume(
 ):
     """
     Simulate tumor volume under multiple drugs using simplified PK model.
-    Stops recording for an individual once tumor exceeds max_tumor_size.
+    Doses are now recorded at their actual scheduled times, including zeros.
     """
     import numpy as np
     import pandas as pd
@@ -384,29 +384,26 @@ def simulate_tumor_volume(
     sampled_data = []
     id_counter = 1
 
-    # Fine evaluation times
-    extra_points = []
-    window = 0.3
-    for dt_list in dose_times_list:
-        for dt in dt_list:
-            extra_points.extend(np.linspace(dt - window, dt + window, 20))
-    t_eval = np.unique(np.concatenate([np.linspace(t_interval[0], t_interval[1], 120),
-                                       *dose_times_list,
-                                       extra_points]))
+    # Time grid includes all dose times explicitly
+    all_dose_times = np.unique(np.concatenate(dose_times_list))
+    t_eval = np.unique(np.concatenate([
+        np.linspace(t_interval[0], t_interval[1], 120),
+        all_dose_times
+    ]))
+    t_eval.sort()
     t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
 
     for ind in range(n_individuals):
-        # Sample individual parameters
+        # Sample individual PK parameters
         ka = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_drugs)
         ke = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_drugs)
         v  = np.random.lognormal(mean=np.log(v_mean), sigma=v_sd, size=n_drugs)
         a  = np.array(a_drugs)
 
-        # Sample tumor parameters per individual
+        # Tumor growth parameters
         k_growth = np.random.normal(k_growth_mean, k_growth_sd)
         V = np.random.normal(V0_mean, V0_sd)
 
-        # Create parameter vectors
         param_names = []
         param_values = []
         for d in range(n_drugs):
@@ -415,69 +412,69 @@ def simulate_tumor_volume(
         param_names.extend(['k_growth', 'V0'])
         param_values.extend([k_growth, V])
 
-        # Initialize PK compartments
+        # PK compartments
         C1 = np.zeros(n_drugs)
         C2 = np.zeros(n_drugs)
 
         V_out = []
-
-        # Simulation loop
         stop_simulation = False
+
+        # --- Simulation loop ---
         for i, t in enumerate(t_eval):
             if stop_simulation:
                 break
 
-            dt = t_eval[i] - t_eval[i-1] if i > 0 else 0.01
+            dt = t_eval[i] - t_eval[i - 1] if i > 0 else 0.01
 
-            # Add doses to C1 and store dosing events
+            # Administer doses at the scheduled times
+            # Administer doses at scheduled times
             for d in range(n_drugs):
                 doses = np.array(dose_amounts_list[d])
                 times = np.array(dose_times_list[d])
-                mask = np.isclose(t, times, atol=1e-5)
+                mask = np.isclose(t, times, atol=1e-8)
                 if mask.any():
-                    C1[d] += doses[mask][0]
+                    amt = doses[mask][0]
+                    C1[d] += amt
                     sampled_data.append({
                         'ID': id_counter,
-                        'TIME': t,
+                        'TIME': times[mask][0],
                         'DV': np.nan,
-                        'AMT': doses[mask][0],
-                        'EVID': d+1,
-                        'TREATMENT': None,
+                        'AMT': amt,
+                        'EVID': d+1,  # Always use drug ID for dosing events
+                        'TREATMENT': f'Drug{d+1}',
                         'PARAM_NAMES': param_names,
                         'PARAM_VALUES': param_values
                     })
 
-            # Update PK compartments
+
+            # PK dynamics
             dC1 = -ka * C1
             dC2 = ka * C1 - ke * C2
             C1 += dC1 * dt
             C2 += dC2 * dt
             C2 = np.maximum(0, C2)
 
-            # Update tumor volume
+            # Tumor dynamics
             effect = np.sum(a * C2)
             dV = V * (k_growth - effect)
             V += dV * dt
 
-            # Stop recording if tumor exceeds threshold
             if V >= max_tumor_size:
                 stop_simulation = True
                 break
 
             V_out.append(V)
 
-        # Only interpolate recorded points
+        # Sample tumor volume at observation times
         if V_out:
             t_eval_recorded = t_eval[:len(V_out)]
             t_sample_recorded = t_sample[t_sample <= t_eval_recorded[-1]]
             V_sampled = np.interp(t_sample_recorded, t_eval_recorded, V_out)
 
-            # Add noise
             noise_add = np.random.normal(0, add_e, size=V_sampled.shape)
             noise_prop = np.random.normal(0, prop_e, size=V_sampled.shape)
             V_noisy = np.maximum(0, V_sampled * (1 + noise_prop) + noise_add)
 
-            # Observation rows
             for t_obs, dv in zip(t_sample_recorded, V_noisy):
                 sampled_data.append({
                     'ID': id_counter,
@@ -490,13 +487,17 @@ def simulate_tumor_volume(
                     'PARAM_VALUES': param_values
                 })
 
+        if plot and V_out:
+            plt.plot(t_sample_recorded, V_noisy)
+
         id_counter += 1
 
-        if plot and V_out:
-            plt.plot(t_sample_recorded, V_noisy)  # no legend
-
     df = pd.DataFrame(sampled_data)
-    df = df.sort_values(['ID','TIME'])
+    df = df.sort_values(['ID', 'TIME'])
+    df = df[~(df['DV'].isna() & (df['EVID'] == 0))]
+    df = df[~((df['DV'].isna() & (df['EVID'] == 0)) | ((df['AMT'] == 0) & (df['EVID'] != 0)))]
+
+
     df.to_csv(save_path, index=False, sep=';')
 
     if plot:
@@ -506,6 +507,8 @@ def simulate_tumor_volume(
         plt.show()
 
     print(f"Saved simulated tumor data to {save_path}")
+
+
 import os
 def simulate_tumor_volume_with_event(
     n_individuals,

@@ -108,6 +108,50 @@ class ODEFunc(nn.Module):
             masks.append(mask)
         return masks
 
+    def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
+        """
+        Compute dose signal per drug using Gaussian pulses.
+        Zero contribution if no doses exist for that individual/drug.
+        Output: [batch, n_drugs]
+        """
+        sigma = self.get_sigma()
+        batch_size = evid.size(0)
+        n_times = t.size(1) if t.dim() > 1 else 1
+        device = t.device
+        dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+    
+        # Ensure t has shape [batch, num_times]
+        if t.dim() == 1:
+            t = t.unsqueeze(0).repeat(batch_size, 1)  # [batch, num_times]
+    
+        for drug_id in range(1, n_drugs + 1):
+            # Mask doses for this drug
+            mask = (evid == drug_id)  # [batch, num_doses]
+            masked_times = dose_times * mask.float()
+            masked_amounts = dose_amounts * mask.float()
+    
+            # Identify which batch elements actually have doses
+            has_dose = mask.any(dim=1)  # [batch]
+    
+            if not has_dose.any():
+                continue
+    
+            # Compute Gaussian pulse
+            diff = t.unsqueeze(-1) - masked_times.unsqueeze(1)  # [batch, num_times, num_doses]
+            gauss = torch.exp(-(diff / sigma)**2) * masked_amounts.unsqueeze(1)
+            mask_nonnegative = diff >= 0
+            pulse = gauss * mask_nonnegative.float()
+    
+            # Zero out contributions for batches with no doses
+            pulse = pulse * has_dose.unsqueeze(-1).unsqueeze(-1).float()
+    
+            # Sum over doses
+            dose_signal[:, drug_id - 1] = pulse.sum(dim=-1).squeeze()
+         
+        return dose_signal
+
+
+        
     # def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
     #     """
     #     Compute dose signal per drug using interleaved dose arrays and EVID codes.
@@ -115,51 +159,20 @@ class ODEFunc(nn.Module):
     #     sigma=self.get_sigma()
     #     batch_size = evid.size(0)
     #     device = t.device
-    #     dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-    
-    #     for drug_id in range(1, n_drugs + 1):
-    #         # --- Select only the doses for this drug ---
-    #         mask = (evid == drug_id)           # [batch, num_doses]
-            
-    #         masked_times = dose_times * mask.float()
-            
-    #         masked_amounts = dose_amounts * mask.float()
-    
-    #         # Optional: remove zeros for proper summation
-    #         valid = mask.bool()
-    #         if valid.sum() > 0:
-    #             # Compute pulse contribution for this drug
-    #             diff = t.unsqueeze(-1) - masked_times  # [batch, num_times, num_doses]
-    #             gauss = torch.exp(-(diff / sigma)**2) * masked_amounts
-    #             mask_nonnegative = diff >= 0
-           
-    #             pulse=mask_nonnegative*gauss
-                
-    #             #dose_signal[:, drug_id - 1] = pulse.sum(dim=1)
-    #            # print(dose_signal, t)
-    #     return pulse.sum(dim=1)
+    #    # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
         
-    def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
-        """
-        Compute dose signal per drug using interleaved dose arrays and EVID codes.
-        """
-        sigma=self.get_sigma()
-        batch_size = evid.size(0)
-        device = t.device
-       # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-        
-        diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
-        mask_nonnegative = diff >= 0
+    #     diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
+    #     mask_nonnegative = diff >= 0
 
-        gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
+    #     gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
    
         
         
      
-        dose_signal=gauss*mask_nonnegative
-        #print(dose_signal.sum(1),t )
+    #     dose_signal=gauss*mask_nonnegative
+    #     #print(dose_signal.sum(1),t )
     
-        return dose_signal.sum(1)       
+    #     return dose_signal.sum(1)       
                 
                     
             
@@ -179,21 +192,21 @@ class ODEFunc(nn.Module):
         # Compute dose input (bolus + infusion)
         bolus_signal = self.bolus_pulse(t, dose_times, dose_amounts, dose_mask, evid,self.drug_dim)
         dose_input = bolus_signal
-
+        
         # Concatenate latent state and dose
       
         if dose_input.dim() == 1:
          dose_input = dose_input.unsqueeze(1)
-        dose_amounts_col0 = dose_amounts[:, 0].unsqueeze(1)
+       
 
         inp1 = torch.cat([x, self.drug (dose_input)], dim=1)
         inp2 = torch.cat([x, dose_input], dim=1)
-
+        
         # Deep network + skip connection
         dxdt_deep = self.net(inp1)
       #  dxdt_skip = self.skip(inp2)
         dxdt = dxdt_deep # + dxdt_skip
-
+       
         # Concatenate zeros for parameter dimensions
         zeros_param = torch.zeros(batch_size, self.dim_parameter_encoder, device=device)
         dxdt_concat = torch.cat([dxdt, zeros_param], dim=1)
@@ -263,8 +276,10 @@ class TrainableNoise(nn.Module):
         #noisy_mask[:, 0] = False  # first point is noiseless
 
         # Elementwise NLL (Gaussian)
+        
         nll_elementwise = 0.5 * ((x_true - x_pred) / sigma_total) ** 2 + torch.log(sigma_total)
         mse_elementwise = (x_true - x_pred) ** 2
+
         
         # L1 for masked/dropped points
         if replace_mask is not None:

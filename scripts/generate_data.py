@@ -47,30 +47,31 @@ def main():
     k_growth_sd   = 0.01
     V0_mean       = 100.0
     V0_sd         = 10.0
+    n=100
 
     # ----- Define groups: only number of individuals and dosing info -----
     groups = [
         # Group 1: Drug A only
         {
-            'n_individuals': 100,
+            'n_individuals': n,
             'dose_amounts_list': [[0, 0, 0, 0], [0, 0, 0, 0]],
             'dose_times_list':   [[0, 0, 0, 0], [0, 0, 0, 0]]
         },
         
         {
-            'n_individuals': 100,
+            'n_individuals': n,
             'dose_amounts_list': [[200, 200, 200, 200], [0, 0, 0, 0]],
             'dose_times_list':   [[0, 5, 10, 15], [0, 0, 0, 0]]
         },
         # Group 2: Drug B only
         {
-            'n_individuals': 100,
+            'n_individuals': n,
             'dose_amounts_list': [[0, 0, 0, 0], [150, 150, 150, 150]],
             'dose_times_list':   [[0, 0, 0, 0], [1, 6, 11, 16]]
         },
         
         {
-            'n_individuals': 100,
+            'n_individuals': n,
             'dose_amounts_list': [[200, 200, 200, 200], [150, 150, 150, 150]],
             'dose_times_list':   [[0, 5, 10, 15], [1, 6, 11, 16]]
         }
