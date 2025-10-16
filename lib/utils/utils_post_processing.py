@@ -37,7 +37,7 @@ from lib.utils.utils_shared import (
     prepare_ode_input,
     make_predictions,
 )
-from lib.utils.utils_preprocess import collate_fn
+from lib.utils.utils_preprocess import make_collate_fn
 
 def estimate_coverage(
     models,
@@ -88,6 +88,7 @@ def estimate_coverage(
     func = models['func']
     reducer = models['reducer']
     noise = models['noise']
+    collate_fn = make_collate_fn(dataset.global_max_len)
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
@@ -269,7 +270,7 @@ def plot_individual_fits(
     func = models['func']
     reducer = models['reducer']
     noise = models['noise']
-
+    collate_fn = make_collate_fn(dataset.global_max_len)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     fig, axes = plt.subplots(nr_row, nr_col, figsize=(5*nr_col, 4*nr_row))
@@ -774,7 +775,7 @@ def plot_encoder_vs_samples(
 
     if device is None:
         device = next(encoder.parameters()).device
-
+    collate_fn = make_collate_fn(dataset.global_max_len)
     # Use batch_size=1 to process individual by individual
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
@@ -894,6 +895,7 @@ def plot_two_models_encoders_and_regression(
         encoder_med.eval()
         initial_encoder_med.eval()
         func_med.eval()
+        collate_fn = make_collate_fn(dataset.global_max_len)
         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
 
         with torch.no_grad():
@@ -1125,7 +1127,7 @@ def plot_one_model_encoders_and_regression2(
         encoder_med.eval()
         initial_encoder_med.eval()
         func_med.eval()
-
+        collate_fn = make_collate_fn(dataset.global_max_len)
         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
         with torch.no_grad():
             for data in dataloader:
@@ -1313,7 +1315,7 @@ def plot_single_model_encoders_and_regression(
     # ---------------- Extract latents helper ----------------
     def extract_latents(df, dataset, encoder):
         mus, param_values_list, id_list_all, treatment_list_all = [], [], [], []
-
+        collate_fn = make_collate_fn(dataset.global_max_len)
         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
         param_names = ast.literal_eval(df["PARAM_NAMES"].iloc[0])
         n_params = len(param_names)
@@ -1478,7 +1480,7 @@ def plot_single_model_encoder_means(
     # ---------------- Extract latents helper ----------------
     def extract_latents_and_params(df, dataset, encoder, dim_parameter_encoder):
         mus_list, sigmas_list, ka_list, cl_list = [], [], [], []
-
+        collate_fn = make_collate_fn(dataset.global_max_len)
         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
 
         with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():
@@ -1570,7 +1572,7 @@ def plot_single_model_encoders_and_regression_combined(
     # ---------------- Extract latents helper ----------------
     def extract_latents(df, dataset, encoder, dim_parameter_encoder):
         mus, sigmas, ka_list, cl_list, id_list_all = [], [], [], [], []
-
+        collate_fn = make_collate_fn(dataset.global_max_len)
         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
 
         with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():
@@ -2033,20 +2035,38 @@ def generate_plot_data(
             pred_batch = torch.cat(all_preds, dim=0)
             t_padded = torch.cat(all_times, dim=0)
             data_matrix = torch.cat(all_data, dim=0)
+            unique_times = torch.unique(t_padded[t_padded > 0])
+            perc10_list, median_list, perc90_list = [], [], []
+
+            for t in unique_times:
+                mask = t_padded == t  # shape [N, T], True where subject has this time
+                values = destandardize_concentration(data_matrix[mask], global_mean, global_std)  # flatten all measurements at this time
+                if len(values) > 0:
+                    perc10_list.append(torch.quantile(values, 0.10))
+                    median_list.append(torch.quantile(values, 0.50))
+                    perc90_list.append(torch.quantile(values, 0.90))
+                else:
+                    perc10_list.append(torch.tensor(float('nan')))
+                    median_list.append(torch.tensor(float('nan')))
+                    perc90_list.append(torch.tensor(float('nan')))
+            perc10_data = torch.stack(perc10_list)
+            median_data = torch.stack(median_list)
+            perc90_data = torch.stack(perc90_list)
+                 
 
             perc10_sim = torch.quantile(pred_batch, 0.10, dim=0)
             median_sim = torch.quantile(pred_batch, 0.50, dim=0)
             perc90_sim = torch.quantile(pred_batch, 0.90, dim=0)
 
-            data_matrix_destd = destandardize_concentration(data_matrix, global_mean, global_std).T
-            perc10_data = torch.quantile(data_matrix_destd, 0.10, dim=1)
-            median_data = torch.quantile(data_matrix_destd, 0.50, dim=1)
-            perc90_data = torch.quantile(data_matrix_destd, 0.90, dim=1)
+            # data_matrix_destd = destandardize_concentration(data_matrix, global_mean, global_std).T
+            # perc10_data = torch.quantile(data_matrix_destd, 0.10, dim=1)
+            # median_data = torch.quantile(data_matrix_destd, 0.50, dim=1)
+            # perc90_data = torch.quantile(data_matrix_destd, 0.90, dim=1)
 
             plot_data_local.append({
                 "treatment": int(treatment_value),
                 "time_hours": t_dense.cpu().numpy() * global_mean_time,
-                "time_hours_data": torch.quantile(t_padded, 0.90, dim=0).cpu().numpy() * global_mean_time,
+                "time_hours_data": unique_times.cpu().numpy() * global_mean_time,
                 "perc10_sim": perc10_sim.numpy(),
                 "median_sim": median_sim.numpy(),
                 "perc90_sim": perc90_sim.numpy(),
@@ -2576,7 +2596,7 @@ def vpc(func_med,
         ax.plot(data["time_hours_data"], data["median_data"], label="Raw median", color="orange", linewidth=2)
         ax.plot(data["time_hours_data"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--", linewidth=2)
         
-        ax.set_xlim(0, global_mean_time)
+        ax.set_xlim(0, 50)
         # ax.set_ylim(0, 180)
         ax.set_title(f"Treatment {data['treatment']}", fontsize=32, fontweight='bold')
         ax.set_xlabel("Time (hours)", fontsize=24)
@@ -2643,6 +2663,7 @@ def vpc_true(latent_dim,dim_parameters,
     encoder.eval()
     func.eval()
     reducer.eval()
+    collate_fn = make_collate_fn(dataset.global_max_len)
 
     dataloader = DataLoader(dataset, batch_size=12, shuffle=False, collate_fn=collate_fn)
 

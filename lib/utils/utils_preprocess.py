@@ -201,6 +201,9 @@ class TrajectoryDataset(Dataset):
         # === Step 3: Extract trajectories ===
         self.trajectories = self._extract_trajectories()
         self.samples = self._augment_trajectories() if augment else self.trajectories
+        all_times = torch.cat([traj['t'] for traj in self.samples])
+        self.global_times, self.global_idx = torch.sort(torch.unique(all_times))
+        self.global_max_len = len(self.global_times)
 
     def _extract_trajectories(self):
         trajectories = []
@@ -266,46 +269,102 @@ class TrajectoryDataset(Dataset):
         return self.samples[idx]
 
 
+import torch
+from torch.nn.utils.rnn import pad_sequence
+
+def make_collate_fn(global_max_len, global_max_doses=None):
+    def collate_fn(batch):
+        t_list = [s['t'] for s in batch]
+        x_global_list = [s['x_global'] for s in batch]
+        dose_list = [s['amt'] for s in batch]
+        dose_times_list = [s['dose_times'] for s in batch]
+        evid_list = [s['evid'] for s in batch]
+        id_list = [s['subject_id'] for s in batch]
+        treatment_list = [s['treatment'] for s in batch]
+
+        # === Pad with batch-local max first ===
+        t_padded = pad_sequence(t_list, batch_first=True)
+        x_global_padded = pad_sequence(x_global_list, batch_first=True)
+
+        # === Then pad to global max length ===
+        pad_len = global_max_len - t_padded.size(1)
+        if pad_len > 0:
+            t_padded = torch.nn.functional.pad(t_padded, (0, pad_len))
+            x_global_padded = torch.nn.functional.pad(x_global_padded, (0, pad_len))
+
+        # === Build mask (True = valid entry) ===
+        mask = torch.zeros((len(batch), global_max_len), dtype=torch.bool)
+        for i, t in enumerate(t_list):
+            mask[i, :len(t)] = 1
+
+        # === Doses: handle separately (optionally global) ===
+        dose_tensor = pad_sequence(dose_list, batch_first=True)
+        dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
+        evid_padded = pad_sequence(evid_list, batch_first=True)
+
+        if global_max_doses is not None:
+            dose_pad = global_max_doses - dose_tensor.size(1)
+            if dose_pad > 0:
+                dose_tensor = torch.nn.functional.pad(dose_tensor, (0, dose_pad))
+                dose_times_padded = torch.nn.functional.pad(dose_times_padded, (0, dose_pad))
+                evid_padded = torch.nn.functional.pad(evid_padded, (0, dose_pad))
+
+        id_tensor = torch.tensor(id_list, dtype=torch.long)
+        treatment_tensor = torch.stack(treatment_list)
+
+        return (
+            id_tensor,
+            treatment_tensor,
+            t_padded,
+            x_global_padded,
+            mask,
+            dose_tensor,
+            dose_times_padded,
+            evid_padded,
+        )
+
+    return collate_fn
 
 
-def collate_fn(batch):
-    t_list = [s['t'] for s in batch]
-    x_global_list = [s['x_global'] for s in batch]
-    dose_list = [s['amt'] for s in batch]
-    dose_times_list = [s['dose_times'] for s in batch]
-    evid_list = [s['evid'] for s in batch]
-    id_list = [s['subject_id'] for s in batch]
-    treatment_list = [s['treatment'] for s in batch]
 
-    # Pad time & x_global
-    t_padded = pad_sequence(t_list, batch_first=True)
-    x_global_padded = pad_sequence(x_global_list, batch_first=True)
+# def collate_fn(batch):
+#     t_list = [s['t'] for s in batch]
+#     x_global_list = [s['x_global'] for s in batch]
+#     dose_list = [s['amt'] for s in batch]
+#     dose_times_list = [s['dose_times'] for s in batch]
+#     evid_list = [s['evid'] for s in batch]
+#     id_list = [s['subject_id'] for s in batch]
+#     treatment_list = [s['treatment'] for s in batch]
 
-    # Build mask
-    max_len = t_padded.size(1)
-    mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
-    for i, t in enumerate(t_list):
-        mask[i, :len(t)] = 1
+#     # Pad time & x_global
+#     t_padded = pad_sequence(t_list, batch_first=True)
+#     x_global_padded = pad_sequence(x_global_list, batch_first=True)
 
-    # Pad doses
-    dose_tensor = pad_sequence(dose_list, batch_first=True)
-    dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
-    evid_padded = pad_sequence(evid_list, batch_first=True)
+#     # Build mask
+#     max_len = t_padded.size(1)
+#     mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
+#     for i, t in enumerate(t_list):
+#         mask[i, :len(t)] = 1
 
-    # Convert subject IDs and treatments into tensors
-    id_tensor = torch.tensor(id_list, dtype=torch.long)
-    treatment_tensor = torch.stack(treatment_list)  # shape [batch]
+#     # Pad doses
+#     dose_tensor = pad_sequence(dose_list, batch_first=True)
+#     dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
+#     evid_padded = pad_sequence(evid_list, batch_first=True)
 
-    return (
-        id_tensor,          # subject ids
-        treatment_tensor,   # treatment class
-        t_padded,           # normalized time
-        x_global_padded,    # normalized observations
-        mask,               # mask for padded times
-        dose_tensor,        # dose amounts
-        dose_times_padded,  # dose times
-        evid_padded         # evid codes
-    )
+#     # Convert subject IDs and treatments into tensors
+#     id_tensor = torch.tensor(id_list, dtype=torch.long)
+#     treatment_tensor = torch.stack(treatment_list)  # shape [batch]
+
+#     return (
+#         id_tensor,          # subject ids
+#         treatment_tensor,   # treatment class
+#         t_padded,           # normalized time
+#         x_global_padded,    # normalized observations
+#         mask,               # mask for padded times
+#         dose_tensor,        # dose amounts
+#         dose_times_padded,  # dose times
+#         evid_padded         # evid codes
+#     )
 
 
 
@@ -389,118 +448,118 @@ def prepare_optimizer(models, device, lr, factor=0.8, patience=10, min_lr=1e-7, 
 
 
 
-def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, global_max_dose, global_max_time,
-                                 global_max,global_min_value, global_std, device, batch_fraction=0.05,truncation=1):
+# def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, global_max_dose, global_max_time,
+#                                  global_max,global_min_value, global_std, device, batch_fraction=0.05,truncation=1):
 
-    """
-    Splits the dataset into train/val/test, creates DataLoaders, and generates the combined time+dose tensor.
+#     """
+#     Splits the dataset into train/val/test, creates DataLoaders, and generates the combined time+dose tensor.
 
-    Returns:
-        train_dataset, val_dataset, test_dataset, train_loader, val_loader, combined
-    """
+#     Returns:
+#         train_dataset, val_dataset, test_dataset, train_loader, val_loader, combined
+#     """
 
-
-    n_ids = len(all_ids)
-    random.shuffle(all_ids)
-
-   # all_ids = list(range(n_ids))
-
-    test_frac = 0.3
-    val_frac = 0.1
-    train_frac = 1 - test_frac - val_frac  # 0.6
     
-    # Compute exact counts
-    n_test = 3 # int(12 * 0.3)   # 3
-    n_val  = 2 #int(12 * 0.1)   # 1
-    n_train =  7 #12 - n_test - n_val  # 8
+#     n_ids = len(all_ids)
+#     random.shuffle(all_ids)
+
+#    # all_ids = list(range(n_ids))
+
+#     test_frac = 0.3
+#     val_frac = 0.1
+#     train_frac = 1 - test_frac - val_frac  # 0.6
     
-    # Split IDs
-    train_ids = all_ids[:n_train]                 # first 7
-    val_ids   = all_ids[n_train:n_train + n_val] # next 2
-    test_ids  = all_ids[n_train + n_val:]        # last 3
+#     # Compute exact counts
+#     n_test = 3 # int(12 * 0.3)   # 3
+#     n_val  = 2 #int(12 * 0.1)   # 1
+#     n_train =  7 #12 - n_test - n_val  # 8
+    
+#     # Split IDs
+#     train_ids = all_ids[:n_train]                 # first 7
+#     val_ids   = all_ids[n_train:n_train + n_val] # next 2
+#     test_ids  = all_ids[n_train + n_val:]        # last 3
 
-    train_dataset = TrajectoryDataset(
-    data_path,  # <--- pass path, not df
+#     train_dataset = TrajectoryDataset(
+#     data_path,  # <--- pass path, not df
 
-    max_dose=global_max_dose,
-    max_time=global_max_time,
-        min_value=global_min_value,
-    global_mean=global_max,
-    global_std=global_std,
-    subset_ids=train_ids
-    )
+#     max_dose=global_max_dose,
+#     max_time=global_max_time,
+#         min_value=global_min_value,
+#     global_mean=global_max,
+#     global_std=global_std,
+#     subset_ids=train_ids
+#     )
     
     
-    train_export_dataset = TrajectoryDataset(
-    data_path,  # <--- pass path, not df
+#     train_export_dataset = TrajectoryDataset(
+#     data_path,  # <--- pass path, not df
 
-    max_dose=global_max_dose,
-    max_time=global_max_time,
-        min_value=global_min_value,
-    global_mean=global_max,
-    global_std=global_std,
-    subset_ids=train_ids
-    )
+#     max_dose=global_max_dose,
+#     max_time=global_max_time,
+#         min_value=global_min_value,
+#     global_mean=global_max,
+#     global_std=global_std,
+#     subset_ids=train_ids
+#     )
     
-    val_dataset = TrajectoryDataset(
-        data_path,
+#     val_dataset = TrajectoryDataset(
+#         data_path,
 
-        max_dose=global_max_dose,
-        max_time=global_max_time,
-        min_value=global_min_value,
-        global_mean=global_max,
-        global_std=global_std,
-        subset_ids=val_ids
-    )
-    test_dataset = TrajectoryDataset(
-        data_path,
+#         max_dose=global_max_dose,
+#         max_time=global_max_time,
+#         min_value=global_min_value,
+#         global_mean=global_max,
+#         global_std=global_std,
+#         subset_ids=val_ids
+#     )
+#     test_dataset = TrajectoryDataset(
+#         data_path,
 
-        max_dose=global_max_dose,
-        max_time=global_max_time,
-        min_value=global_min_value,
-        global_mean=global_max,
-        global_std=global_std,
-        subset_ids=test_ids
-    )
+#         max_dose=global_max_dose,
+#         max_time=global_max_time,
+#         min_value=global_min_value,
+#         global_mean=global_max,
+#         global_std=global_std,
+#         subset_ids=test_ids
+#     )
 
 
-  #  export_training_data(test_dataset, train_export_dataset, global_max, global_std, global_max_time, i+already_done, truncation, base_dir)
+#   #  export_training_data(test_dataset, train_export_dataset, global_max, global_std, global_max_time, i+already_done, truncation, base_dir)
 
-    # Create DataLoaders
-    batch_size = max(1, int(len(train_dataset) * batch_fraction))
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=False)
-    val_loader   = DataLoader(val_dataset, batch_size=max(1, int(len(val_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
-    test_loader  = DataLoader(test_dataset, batch_size=max(1, int(len(test_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
+#     # Create DataLoaders
+#     batch_size = max(1, int(len(train_dataset) * batch_fraction))
+#     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=False)
+#     val_loader   = DataLoader(val_dataset, batch_size=max(1, int(len(val_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
+#     test_loader  = DataLoader(test_dataset, batch_size=max(1, int(len(test_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
 
-    # Combined dose + time tensor
-    #doses = torch.tensor([3], dtype=torch.float32) / 24
-    time_points = torch.linspace(0, 1, steps=120)
+#     # Combined dose + time tensor
+#     #doses = torch.tensor([3], dtype=torch.float32) / 24
+#     time_points = torch.linspace(0, 1, steps=120)
 
-   # === Extract treatment schedule from train set ===
-    # Collect dose times from train_dataset
-    all_dose_times = []
+#    # === Extract treatment schedule from train set ===
+#     # Collect dose times from train_dataset
+#     all_dose_times = []
     
-    for traj in train_dataset.trajectories:
-        # Instead of 'DOSE TIME', get dose times from rows with EVID > 0
-        if hasattr(traj, 'df_group'):  # if you store raw group
-            dose_times = traj['df_group'].loc[traj['df_group']['EVID'] > 0, 'TIME'].values
-        else:
-            # if dose_times are already precomputed inside traj
-            dose_times = traj['dose_times'].numpy() if isinstance(traj['dose_times'], torch.Tensor) else traj['dose_times']
+#     for traj in train_dataset.trajectories:
+#         # Instead of 'DOSE TIME', get dose times from rows with EVID > 0
+#         if hasattr(traj, 'df_group'):  # if you store raw group
+#             dose_times = traj['df_group'].loc[traj['df_group']['EVID'] > 0, 'TIME'].values
+#         else:
+#             # if dose_times are already precomputed inside traj
+#             dose_times = traj['dose_times'].numpy() if isinstance(traj['dose_times'], torch.Tensor) else traj['dose_times']
     
-        if len(dose_times) > 0:
-            all_dose_times.append(torch.tensor(dose_times, dtype=torch.float32))
+#         if len(dose_times) > 0:
+#             all_dose_times.append(torch.tensor(dose_times, dtype=torch.float32))
     
-    if all_dose_times:
-        dose_times = torch.cat(all_dose_times).unique()
-        # merge with dense grid
-        t_dense = torch.cat([time_points, dose_times]).unique(sorted=True)
-    else:
-        t_dense = time_points
+#     if all_dose_times:
+#         dose_times = torch.cat(all_dose_times).unique()
+#         # merge with dense grid
+#         t_dense = torch.cat([time_points, dose_times]).unique(sorted=True)
+#     else:
+#         t_dense = time_points
 
 
-    return (train_dataset, val_dataset, test_dataset,
-           train_loader, val_loader, test_loader, t_dense)
+#     return (train_dataset, val_dataset, test_dataset,
+#            train_loader, val_loader, test_loader, t_dense)
 
 
 def create_balanced_loader(dataset, batch_size, dose_key='amt', dose_threshold=0.5, collate_fn=None):
@@ -599,7 +658,7 @@ def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_
     )
 
 
-
+    collate_fn = make_collate_fn(train_dataset.global_max_len)
     # --- Create DataLoaders ---
     batch_size_train = max(1, int(len(train_dataset) * batch_fraction))
     batch_size_val = max(1, int(len(val_dataset)))

@@ -40,13 +40,13 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-    '--data_validation_path', 'lib/data/simulated_ODE3_corr_val.csv', 
-    '--data_test_path', 'lib/data/simulated_ODE3_corr_test.csv', 
-    '--data_path', 'lib/data/simulated_ODE3_corr_train.csv',
+    '--data_validation_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv', 
+    '--data_test_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv', 
+    '--data_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv',
     '--save_dir', 'models',
     '--load_dir', 'models']
       
-    from lib.utils.utils_preprocess import load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset, collate_fn
+    from lib.utils.utils_preprocess import load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists
     from lib.utils.utils_training import   train_loop_model
     from lib.utils.utils_shared import ODEWrapper
     from lib.utils.utils_post_processing import vpc_true, estimate_coverage, plot_single_model_encoders_and_regression_combined, plot_single_model_encoders_and_regression , plot_encoder_vs_samples, plot_encoder_histograms, plot_individual_fits, vpc
