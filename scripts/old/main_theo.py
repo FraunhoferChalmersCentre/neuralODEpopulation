@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     from lib.utils.Theophylline.utils_preprocess_theo import prepare_optimizer, prepare_datasets_and_loaders, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists, TrajectoryDataset, collate_fn
     from lib.utils.Theophylline.utils_training_theo import run_model_variant
-    from lib.models.NNmodels import Encoder_Transformer, ODEFunc, SimpleDecoder, InitialConditionVAEEncoder, TrainableNoise
+    from lib.models.NNmodels import Encoder_Transformer_Full, ODEFunc, SimpleDecoder, TrainableNoise
     
  
     # Define your parser
@@ -74,11 +74,11 @@ if __name__ == "__main__":
     metrics, residuals, already_done = load_all_metrics_and_residuals_as_lists(args.base_dir)
     start = already_done  # continue training or evaluation from here
     
-    
+    number_drugs=1
     latent_dim=2
     dim_parameter_encoder=2
     hid_dim=512
-
+    p_dropout=0
 
 
 
@@ -88,7 +88,7 @@ if __name__ == "__main__":
 
     for i in range(n_repeats):    
         dataset_train, dataset_test, train_loader,test_loader, t_dense, global_max_dose, global_max_time, global_mean, global_std, global_max_value = prepare_datasets_and_loaders(
-    args.data_path, args.base_dir, all_ids, i,already_done, device, batch_fraction=0.3, truncation=0.3)
+    args.data_path, args.base_dir, all_ids, i,already_done, device, batch_fraction=1, truncation=0.3)
 
         
    
@@ -98,20 +98,18 @@ if __name__ == "__main__":
         
   
     
-        encoder = Encoder_Transformer(
-            dim_parameter_encoder, input_dim=2, model_dim=64, hidden_dim=64,
+        encoder = Encoder_Transformer_Full(
+            dim_parameter_encoder+latent_dim, input_dim=2, model_dim=64, hidden_dim=64,
             num_heads=4, num_layers=2, dropout=0.1).to(device)
     
-        func = ODEFunc(latent_dim, dim_parameter_encoder, hid_dim).to(device)
+        func = ODEFunc(latent_dim, dim_parameter_encoder, hid_dim,number_drugs).to(device)
         reducer = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
-        initial_encoder = InitialConditionVAEEncoder(latent_dim, hidden_dim=32).to(device)
         noise = TrainableNoise(size=1, init_add_std=0.3, init_prop_std=0).to(device)
     
         models = {
             "func": func,
             "encoder": encoder,
             "reducer": reducer,
-            "initial_encoder": initial_encoder,
             "noise": noise}
     
        
@@ -121,7 +119,8 @@ if __name__ == "__main__":
  
         
         
-        mse_train = run_model_variant(dim_parameter_encoder,
+        mse_train = run_model_variant(
+            p_dropout,
             variant_name="_ae",
             dataset_train=dataset_train,
             dataset_val=dataset_train,
@@ -135,16 +134,14 @@ if __name__ == "__main__":
             global_max_time=global_max_time,
             global_mean=global_mean,
             global_std=global_std,
-            latent_dim=latent_dim,
             noise=noise,
             encoder=encoder,
             func=func,
             reducer=reducer,
-            initial_encoder=initial_encoder,
             metrics=metrics,
             residuals=residuals,
-            iteration=i,
-            n_epochs=n_epochs,
+            iteration=1,
+            n_epochs=1,
             dataloader_val=train_loader,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -157,8 +154,7 @@ if __name__ == "__main__":
             enable_onlymedian=False,
             plot_from_training_records_enable=False,
             free_bits=1,
-            truncation=0.3
-        )
+            truncation=0.3)
             
 
         
@@ -185,7 +181,6 @@ if __name__ == "__main__":
             encoder=encoder,
             func=func,
             reducer=reducer,
-            initial_encoder=initial_encoder,
             metrics=metrics,
             residuals=residuals,
             iteration=i,
@@ -228,7 +223,6 @@ if __name__ == "__main__":
             encoder=encoder,
             func=func,
             reducer=reducer,
-            initial_encoder=initial_encoder,
             metrics=metrics,
             residuals=residuals,
             iteration=i,

@@ -32,6 +32,8 @@ def pad_dose_times(dose_times_list, pad_value=-1.0):
 
 
 
+def standardize_concentration(conc, mean, std): return (conc - mean) / std
+def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
 
         
 def export_training_data(train_dataset, test_dataset, global_mean, global_std, global_max_time, i, base_dir, truncation):
@@ -353,23 +355,39 @@ def collate_fn(batch):
 
 
 
-def prepare_optimizer(models,device, lr=0.001):
-    main_params = [
-        {"params": list(models["func"].parameters()) +
-                   list(models["reducer"].parameters()) +
-                   list(models["initial_encoder"].parameters()) +
-                   list(models["encoder"].parameters()), "lr": lr},
-        {"params": list(models["noise"].parameters()), "lr": 10*lr}
-    ]
-    optimizer = torch.optim.Adam(main_params, lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.8, patience=10, min_lr=1e-4
-    )
-    
+def prepare_optimizer(models, device, lr, factor=0.8, patience=10, min_lr=1e-7, prior_lr_factor=100.0):
+    # 1️⃣ Move models to device first
     for name, model in models.items():
-          model.to(device)
-          print(f"{name} is on {next(model.parameters()).device}")
-    
+        model.to(device)
+        print(f"{name} is on {next(model.parameters()).device}")
+
+    encoder = models["encoder"]
+
+    # 2️⃣ Collect parameters with separate groups
+    main_params = [
+    {
+        "params": list(models["func"].parameters())
+                + list(models["reducer"].parameters())
+                + [p for p in encoder.parameters() if p is not encoder.mu_p and p is not encoder.prior_A],
+        "lr": lr,
+    },
+    {
+        "params": list(models["noise"].parameters()),
+        "lr": 10 * lr,  # higher LR for noise model
+    },
+    {
+        "params": [encoder.mu_p, encoder.prior_A],
+        "lr": lr * prior_lr_factor,  # higher LR for prior
+    },
+]
+
+
+    # 3️⃣ Build optimizer & scheduler
+    optimizer = torch.optim.Adam(main_params)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=factor, patience=patience, min_lr=min_lr
+    )
+
     return optimizer, scheduler, main_params
 
 
@@ -464,7 +482,7 @@ def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, de
 
 
 
-    export_training_data(train_dataset, test_dataset, global_mean, global_std, global_max_time, i+already_done, base_dir, truncation)
+  #  export_training_data(train_dataset, test_dataset, global_mean, global_std, global_max_time, i+already_done, base_dir, truncation)
 
     # Create DataLoaders
     batch_size = 2# max(1, int(len(train_dataset) * batch_fraction))

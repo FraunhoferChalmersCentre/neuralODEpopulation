@@ -222,10 +222,10 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
         t_enc_list, x_enc_list, masks_list = t_batch, x_batch, [torch.ones_like(xi, dtype=torch.bool) for xi in x_batch]
         t_cut_list, x_cut_list = [torch.zeros(0, device=device) for _ in t_batch], [torch.zeros(0, device=device) for _ in x_batch]
 
-        # Remove first `skip_initial` points from encoder sequences
-        t_enc_list = [ti[skip_initial:] for ti in t_enc_list]
-        x_enc_list = [xi[skip_initial:] for xi in x_enc_list]
-        masks_list = [mask_i[skip_initial:] for mask_i in masks_list]
+        # # Remove first `skip_initial` points from encoder sequences
+        # t_enc_list = [ti[skip_initial:] for ti in t_enc_list]
+        # x_enc_list = [xi[skip_initial:] for xi in x_enc_list]
+        # masks_list = [mask_i[skip_initial:] for mask_i in masks_list]
 
     # Pad sequences
     t_encoder = pad_sequence(t_enc_list, batch_first=True)
@@ -266,6 +266,7 @@ def encode_latent(
     encoder,
     t_encoder,
     x_normalized,
+    dose_tensor,
     enable_vae,
     enable_ae,
     enable_onlymedian,
@@ -316,16 +317,22 @@ def encode_latent(
     # AE and median-only cases
     # ----------------------------
     if enable_ae:
-        _, mu_q, L_q,mu_p,L_p = encoder(t_encoder_trimmed, x_normalized_trimmed)
+        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)
         k_param = mu_q
+      #  k_param=torch.cat([ z0, k_param], dim=-1)
+        
+
 
     elif enable_onlymedian:
         
-        k_param, mu_q, L_q,mu_p,L_p = encoder(t_encoder_trimmed, x_normalized_trimmed)
-        k_param = 0*k_param
+        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)
+        
+#        k_param=torch.cat([z0,0*k_param], dim=-1)
+        k_param =0* k_param
         mu_q = mu_p
         L_q = L_p
-
+      #  print(k_param)
+       # print(k_param)
     # ----------------------------
     # VAE case
     # ----------------------------
@@ -333,9 +340,9 @@ def encode_latent(
     elif enable_vae:
         # KL weight warmup
         kl_weight = 1.0 if epoch + 1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
-    
+       # print(t_encoder_trimmed)
         # Encode original batch
-        _, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed)  # L_q: [B, D, D]
+        k_param, z0, mu_q, L_q, mu_p, L_p  = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)  # L_q: [B, D, D]
     
         B_current = mu_q.size(0)
         D = mu_q.size(1)
@@ -347,6 +354,9 @@ def encode_latent(
             repeat_factor = int(np.ceil(min_batch_size / B_current))
             mu_q = mu_q.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
             mu_p = mu_p.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
+            z0=z0.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
+            
+            
             L_p = L_p.repeat(repeat_factor, 1, 1)  
             L_q = L_q.repeat(repeat_factor, 1, 1)                # [B*rf, D, D]
           #  L_q = L_q.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
@@ -354,10 +364,11 @@ def encode_latent(
         B, D = mu_q.shape
         eps = torch.randn(B, D, device=mu_q.device)  # standard normal
         k_param = mu_q + torch.einsum("bij,bj->bi", L_q, eps)  # [B, D]
-            
-            
+     #   k_param=torch.cat([z0, k_param ], dim=-1)   
+     #   print(k_param)    
   
-       
+   # print(k_param)
+   # print(k_param)   
     return k_param, mu_q, L_q, mu_p, L_p, repeat_factor
     
 
@@ -429,6 +440,7 @@ def normalize_encoder_input(
             encoder_med,
             t_encoder,
             x_encoder,
+            dose_tensor,
             enable_vae=False,
             enable_ae=False,
             enable_onlymedian=True
@@ -567,19 +579,25 @@ def make_predictions(t_padded, t_dense, k_param, ode_func, reducer, global_mean,
 
     batch_size = t_padded.size(0)
     latent_dim=reducer.latent_dim
-    
     # Solve ODE
+   # print(k_param)
+  #  print(k_param)
     pred = odeint(ode_func, k_param, t_dense, method="rk4")  # [time, batch, latent_dim_total]
-
+    
     # Smoothly scale down large values while preserving gradients
     pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim_total]
-  
+  #  print(pred_batch)
     # Reduce dimension
-    reduced = reducer(pred_batch[:, :, :latent_dim])
+    preds=pred_batch[:, :, :latent_dim]
+  #  B, T, D = pred_batch.shape
+   # mask = torch.ones_like(preds)
+   # mask[:, 1:, 2] = 0
+
+   #masked_pred_batch = preds * mask
+    reduced = reducer(preds)
     
     # Destandardize
     reduced = destandardize_concentration(reduced, global_mean, global_std)
-    
     # Interpolate back to padded time points
     t_dense_exp = t_dense.unsqueeze(0).repeat(batch_size, 1)
     pred_interp = batch_linear_interpolate_1d(reduced, t_dense_exp, t_padded)

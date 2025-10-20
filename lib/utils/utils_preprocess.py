@@ -169,7 +169,7 @@ class TrajectoryDataset(Dataset):
         global_mean=None,
         global_std=None,
         augment=False,
-        augment_step=4
+        augment_step=4,
     ):
         # === Step 1: Load data ===
         self.df = pd.read_csv(path, sep=';')
@@ -448,119 +448,6 @@ def prepare_optimizer(models, device, lr, factor=0.8, patience=10, min_lr=1e-7, 
 
 
 
-# def prepare_datasets_and_loaders(data_path,base_dir, all_ids, i,already_done, global_max_dose, global_max_time,
-#                                  global_max,global_min_value, global_std, device, batch_fraction=0.05,truncation=1):
-
-#     """
-#     Splits the dataset into train/val/test, creates DataLoaders, and generates the combined time+dose tensor.
-
-#     Returns:
-#         train_dataset, val_dataset, test_dataset, train_loader, val_loader, combined
-#     """
-
-    
-#     n_ids = len(all_ids)
-#     random.shuffle(all_ids)
-
-#    # all_ids = list(range(n_ids))
-
-#     test_frac = 0.3
-#     val_frac = 0.1
-#     train_frac = 1 - test_frac - val_frac  # 0.6
-    
-#     # Compute exact counts
-#     n_test = 3 # int(12 * 0.3)   # 3
-#     n_val  = 2 #int(12 * 0.1)   # 1
-#     n_train =  7 #12 - n_test - n_val  # 8
-    
-#     # Split IDs
-#     train_ids = all_ids[:n_train]                 # first 7
-#     val_ids   = all_ids[n_train:n_train + n_val] # next 2
-#     test_ids  = all_ids[n_train + n_val:]        # last 3
-
-#     train_dataset = TrajectoryDataset(
-#     data_path,  # <--- pass path, not df
-
-#     max_dose=global_max_dose,
-#     max_time=global_max_time,
-#         min_value=global_min_value,
-#     global_mean=global_max,
-#     global_std=global_std,
-#     subset_ids=train_ids
-#     )
-    
-    
-#     train_export_dataset = TrajectoryDataset(
-#     data_path,  # <--- pass path, not df
-
-#     max_dose=global_max_dose,
-#     max_time=global_max_time,
-#         min_value=global_min_value,
-#     global_mean=global_max,
-#     global_std=global_std,
-#     subset_ids=train_ids
-#     )
-    
-#     val_dataset = TrajectoryDataset(
-#         data_path,
-
-#         max_dose=global_max_dose,
-#         max_time=global_max_time,
-#         min_value=global_min_value,
-#         global_mean=global_max,
-#         global_std=global_std,
-#         subset_ids=val_ids
-#     )
-#     test_dataset = TrajectoryDataset(
-#         data_path,
-
-#         max_dose=global_max_dose,
-#         max_time=global_max_time,
-#         min_value=global_min_value,
-#         global_mean=global_max,
-#         global_std=global_std,
-#         subset_ids=test_ids
-#     )
-
-
-#   #  export_training_data(test_dataset, train_export_dataset, global_max, global_std, global_max_time, i+already_done, truncation, base_dir)
-
-#     # Create DataLoaders
-#     batch_size = max(1, int(len(train_dataset) * batch_fraction))
-#     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=False)
-#     val_loader   = DataLoader(val_dataset, batch_size=max(1, int(len(val_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
-#     test_loader  = DataLoader(test_dataset, batch_size=max(1, int(len(test_dataset) * batch_fraction)), shuffle=False, collate_fn=collate_fn, drop_last=False)
-
-#     # Combined dose + time tensor
-#     #doses = torch.tensor([3], dtype=torch.float32) / 24
-#     time_points = torch.linspace(0, 1, steps=120)
-
-#    # === Extract treatment schedule from train set ===
-#     # Collect dose times from train_dataset
-#     all_dose_times = []
-    
-#     for traj in train_dataset.trajectories:
-#         # Instead of 'DOSE TIME', get dose times from rows with EVID > 0
-#         if hasattr(traj, 'df_group'):  # if you store raw group
-#             dose_times = traj['df_group'].loc[traj['df_group']['EVID'] > 0, 'TIME'].values
-#         else:
-#             # if dose_times are already precomputed inside traj
-#             dose_times = traj['dose_times'].numpy() if isinstance(traj['dose_times'], torch.Tensor) else traj['dose_times']
-    
-#         if len(dose_times) > 0:
-#             all_dose_times.append(torch.tensor(dose_times, dtype=torch.float32))
-    
-#     if all_dose_times:
-#         dose_times = torch.cat(all_dose_times).unique()
-#         # merge with dense grid
-#         t_dense = torch.cat([time_points, dose_times]).unique(sorted=True)
-#     else:
-#         t_dense = time_points
-
-
-#     return (train_dataset, val_dataset, test_dataset,
-#            train_loader, val_loader, test_loader, t_dense)
-
 
 def create_balanced_loader(dataset, batch_size, dose_key='amt', dose_threshold=0.5, collate_fn=None):
     """
@@ -597,6 +484,117 @@ def create_balanced_loader(dataset, batch_size, dose_key='amt', dose_threshold=0
     )
 
     return loader
+def prepare_datasets_and_loaders(data_path, data_path_val, data_path_test,global_mean,
+                                        
+                                           global_max_dose, global_max_time,
+                                           global_max,global_min_value, global_std, device,
+                                           batch_fraction=0.05,time_points=120):
+    """
+    Loads train/val/test datasets from CSV paths, creates DataLoaders, and generates
+    the combined time+dose tensor.
+
+    Returns:
+        train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, combined
+    """
+    
+    df = pd.read_csv(data_path, sep=";")
+    all_ids = df['ID'].unique().tolist()
+
+    n_ids = len(all_ids)
+    random.shuffle(all_ids)
+
+   # all_ids = list(range(n_ids))
+
+    # test_frac = 0.3
+    # val_frac = 0
+    # train_frac = 1 - test_frac - val_frac  # 0.6
+    
+    # Compute exact counts
+    n_test = 3 # int(12 * 0.3)   # 3
+    n_val  = 0 #int(12 * 0.1)   # 1
+    n_train =  9 #12 - n_test - n_val  # 8
+    
+    # Split IDs
+    train_ids = all_ids[:n_train]                 # first 7
+ #   val_ids   = all_ids[n_train:n_train + n_val] # next 2
+    test_ids  = all_ids[n_train + n_val:]        # last 3
+
+    df = pd.read_csv(data_path, sep=";")
+
+    # --- Load datasets ---
+    train_dataset = TrajectoryDataset(
+        data_path,
+        max_dose=global_max_dose,
+        max_time=global_max_time,
+        max_value=global_max,
+        min_value=global_min_value,
+        global_mean=global_mean,
+        global_std=global_std,
+        subset_ids=train_ids
+    )
+    train_base_dataset = TrajectoryDataset(
+        data_path,
+        max_dose=global_max_dose,
+        max_time=global_max_time,
+        max_value=global_max,
+        min_value=global_min_value,
+        global_mean=global_mean,
+        global_std=global_std
+
+    )
+
+  
+
+    test_dataset = TrajectoryDataset(
+        data_path,
+        max_dose=global_max_dose,
+        max_time=global_max_time,
+        max_value=global_max,
+        min_value=global_min_value,
+        global_mean=global_mean,
+        global_std=global_std,
+        subset_ids=test_ids
+    )
+    
+  
+
+
+    collate_fn = make_collate_fn(train_dataset.global_max_len)
+    # --- Create DataLoaders ---
+    batch_size_train = max(1, int(len(train_dataset) * batch_fraction))
+ #   batch_size_val = max(1, int(len(val_dataset)))
+    batch_size_test = max(1, int(len(test_dataset)))
+
+   # train_loader = create_balanced_loader(train_dataset, batch_size_train, dose_key='amt', dose_threshold=0.5, collate_fn=collate_fn)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size_train,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+   # val_loader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False, collate_fn=collate_fn)
+
+    # --- Combined dose + time tensor ---
+ #   df = pd.read_csv(data_path_train, sep=";")
+
+    # Collect all unique dose times from rows with EVID > 0
+    dose_times = (
+        df.loc[df['EVID'] > 0, 'TIME']
+          .dropna()
+          .unique()
+    ) / global_max_time  # normalize by max_time
+    
+    # --- Uniform grid of time points ---
+    uniform_times = torch.linspace(0, 1, steps=time_points).cpu().numpy()
+    
+    # --- Merge dose times with uniform grid ---
+    merged_times = np.unique(np.concatenate([uniform_times, dose_times]))
+    merged_time_points = torch.tensor(merged_times, dtype=torch.float32).to(device)
+
+
+    return train_dataset, train_dataset, test_dataset,train_base_dataset,  train_loader, train_loader, test_loader, merged_time_points, batch_size_train, 1, batch_size_test
+
 
 def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_path_test,global_mean,
                                         

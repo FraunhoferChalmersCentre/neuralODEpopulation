@@ -40,9 +40,9 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-    '--data_validation_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv', 
-    '--data_test_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv', 
-    '--data_path', 'lib/data/tumor_data_CM_LEE011_binimetinib 2.csv',
+    '--data_validation_path', 'lib/data/Simulated_ODE3_corr_val.csv', 
+    '--data_test_path', 'lib/data/Simulated_ODE3_corr_test.csv', 
+    '--data_path', 'lib/data/Simulated_ODE3_corr_train.csv',
     '--save_dir', 'models',
     '--load_dir', 'models']
       
@@ -50,7 +50,7 @@ if __name__ == "__main__":
     from lib.utils.utils_training import   train_loop_model
     from lib.utils.utils_shared import ODEWrapper
     from lib.utils.utils_post_processing import vpc_true, estimate_coverage, plot_single_model_encoders_and_regression_combined, plot_single_model_encoders_and_regression , plot_encoder_vs_samples, plot_encoder_histograms, plot_individual_fits, vpc
-    from lib.models.NNmodels import Encoder_Transformer3, Encoder_Transformer_Full, Encoder_Transformer2, Encoder_Transformer, ODEFunc, SimpleDecoder, TrainableNoise
+    from lib.models.NNmodels import  Encoder_Transformer_Full, ODEFunc, SimpleDecoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
     parser.add_argument("--data_path", type=str, required=True, help="Path to training CSV file")
@@ -94,17 +94,16 @@ if __name__ == "__main__":
     
     
     
-    latent_dim=2
-    dim_parameter_encoder=2
+    dim_latent=2
+    dim_parameters=3
     hid_dim=512
      
     number_drugs = df['EVID'].max()
 
  #  save_models(models, save_dir, "test1")
-    encoder_med = Encoder_Transformer_Full(dim_parameter_encoder+latent_dim, input_dim=2, model_dim=128,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
-    func_med = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim,number_drugs ).to(device)
-    reducer_med = SimpleDecoder(latent_dim, hidden_dim=32).to(device)
-   # initial_encoder_med = InitialConditionVAEEncoder(latent_dim, hidden_dim=8).to(device)
+    encoder_med = Encoder_Transformer_Full(dim_latent,dim_parameters, input_dim=2, model_dim=128,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
+    func_med = ODEFunc(dim_latent,dim_parameters,hid_dim,number_drugs ).to(device)
+    reducer_med = SimpleDecoder(dim_latent, hidden_dim=32).to(device)
     noise_med = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
 
     
@@ -112,11 +111,10 @@ if __name__ == "__main__":
     "func": func_med,
     "encoder": encoder_med,
     "reducer": reducer_med,
- #   "initial_encoder": initial_encoder_med,
     "noise": noise_med,
     }
     
-    optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001)
+    optimizer,scheduler, main_params = prepare_optimizer(models, device, lr=0.001,factor=0.5, patience=5, min_lr=1e-7, prior_lr_factor=1)
   #  save_models(models, save_dir, "med")
       
     
@@ -153,9 +151,7 @@ if __name__ == "__main__":
        enable_onlymedian=True,
        normalization=False,
        truncation=1,
-       print_epoch=1,
-
-   )
+       print_epoch=1)
                
     vpc(func_med,
           reducer_med,
@@ -167,15 +163,12 @@ if __name__ == "__main__":
         global_mean,
         global_std,
         dataset_train,
-        latent_dim,
-        dim_parameter_encoder,
         encoder_med,
         func_med,
         reducer_med,
         noise_med,
         ODEWrapper,
         t_dense,
-        compartment="DV",
         onlymedian=True,
         enable_ae=False,
         enable_vae=False,
@@ -186,17 +179,25 @@ if __name__ == "__main__":
     )  
 
      
-      
-    dim_parameter_encoder_ae=2
-    latent_dim_ae=2
-    
+    dim_latent=2
+    dim_parameters=2
+    hid_dim=512
+     
     truncation=1
-    encoder_ae = Encoder_Transformer_Full(dim_parameter_encoder_ae+latent_dim_ae, input_dim=2, model_dim=128,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
-    
-
-    func_ae = ODEFunc(latent_dim_ae,dim_parameter_encoder_ae,hid_dim,number_drugs ).to(device)
-    reducer_ae = SimpleDecoder(latent_dim_ae, hidden_dim=32).to(device)
+    encoder_ae = Encoder_Transformer_Full(dim_latent,dim_parameters, input_dim=2, 
+                                          model_dim=128,hidden_dim=32, num_heads=4, num_layers=2, dropout=0.1,
+                                          cov_diag_epsilon=1e-5, learn_prior_mean=True, learn_prior_covariance=True,
+                                          diagonal_only=False).to(device)
+    func_ae = ODEFunc(dim_latent,dim_parameters,hid_dim,number_drugs ).to(device)
+    reducer_ae = SimpleDecoder(dim_latent+1, hidden_dim=32).to(device)
     noise_ae = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
+    
+ 
+
+
+    # # # Copy weights
+    # func_ae.load_state_dict(func_med.state_dict())
+    # reducer_ae.load_state_dict(reducer_med.state_dict())
 
     models2 = {
     "func": func_ae,
@@ -205,7 +206,7 @@ if __name__ == "__main__":
     "noise": noise_ae,
         }
         
-    optimizer2,scheduler2, main_params2 = prepare_optimizer(models2, device,lr=0.001 ,factor=0.8, patience=10, min_lr=1e-7, prior_lr_factor=100.0)
+    optimizer2,scheduler2, main_params2 = prepare_optimizer(models2, device,lr=0.001 ,factor=0.8, patience=10, min_lr=1e-7, prior_lr_factor=1)
     #load_models(models, save_dir, "vae")
 
 
@@ -233,10 +234,10 @@ if __name__ == "__main__":
        encoder=encoder_ae,
        noise=noise_ae,
        t_dense=t_dense,
-       n_epochs=10000,
-       warmup_epochs_noise=0,
+       n_epochs=1000,
+       warmup_epochs_noise=30,
        warmup_epochs_iiv=0,
-       smoothing_start_epoch=0,
+       smoothing_start_epoch=30,
        enable_ae=False,
        enable_vae=True,
        enable_onlymedian=False,
@@ -244,10 +245,14 @@ if __name__ == "__main__":
        truncation=truncation,
        print_epoch=1)
     
+    plot_encoder_histograms(
+        encoder_med, func_med, reducer_med,
+       t_dense, global_mean, global_std,
+       dataset_train, train_loader, encoder_ae, device=None, truncation=truncation, normalization=True
+   )
     
-    
- 
-    vpc_true(latent_dim,dim_parameter_encoder,ODEWrapper,
+  
+    vpc_true(ODEWrapper,
     models2, dataset_test, t_dense, global_max_time, global_mean, global_std,global_max_dose,
     encoder_ae, func_ae, reducer_ae, noise_ae,
     func_med, reducer_med, encoder_med, noise_med,
@@ -258,13 +263,30 @@ if __name__ == "__main__":
     fontsize=14,  show_confidence_intervals=True
 )
     
-    
-    plot_encoder_histograms(
-        encoder_med, func_med, reducer_med,
-       t_dense, global_mean, global_std,
-       dataset_train, train_loader, encoder_ae, device=None, truncation=truncation, normalization=True
-   )
-    
+    vpc(func_med,
+          reducer_med,
+          encoder_med,
+          noise_med,models2,
+        train_loader,
+        global_max_dose,
+        global_max_time,
+        global_mean,
+        global_std,
+        dataset_val,
+        encoder_ae,
+        func_ae,
+        reducer_ae,
+        noise_ae,
+        ODEWrapper,
+        t_dense,
+        onlymedian=False,
+        enable_ae=True,
+        enable_vae=False,
+        add_noise_to_prediction=True,
+        num_simulated_total=10,
+        normalization=True,
+        truncation=1
+    )  
     
  
     plot_single_model_encoders_and_regression(
@@ -272,8 +294,8 @@ if __name__ == "__main__":
      encoder_ae, func_ae, reducer_ae,
      encoder_med, func_med, reducer_med,
       global_mean, global_std, t_dense,
-     device=None, truncation=truncation, use_ema_models=True, normalization=True,dim_parameter_encoder=dim_parameter_encoder
-)
+     device=None, truncation=truncation, use_ema_models=True, normalization=True)
+
     
     
     
@@ -286,11 +308,11 @@ if __name__ == "__main__":
          global_mean,
          global_std,
          truncation=truncation,
-         max_plots=100,
+         max_plots=10,
          n_samples=10,
          ci_lower=0.05,
          ci_upper=0.95,
-         nr_row=10,
+         nr_row=1,
          nr_col=10,
          enable_vae=False,
          enable_ae=True,
@@ -301,8 +323,8 @@ if __name__ == "__main__":
          fontsize=14  # Added a parameter to control font size
        ) 
     
-    vpc_true(latent_dim, dim_parameter_encoder, ODEWrapper,
-    models2, dataset_train, t_dense, global_max_time, global_mean, global_std,global_max_dose,
+    vpc_true(ODEWrapper,
+    models2, dataset_test, t_dense, global_max_time, global_mean, global_std,global_max_dose,
     encoder_ae, func_ae, reducer_ae, noise_ae,
     func_med, reducer_med, encoder_med, noise_med,
     add_noise_to_prediction=True,
@@ -320,7 +342,7 @@ if __name__ == "__main__":
         global_max_time,
         global_mean,
         global_std,
-        dataset_test,
+        dataset_train,
         latent_dim,
         dim_parameter_encoder,
         encoder_ae,

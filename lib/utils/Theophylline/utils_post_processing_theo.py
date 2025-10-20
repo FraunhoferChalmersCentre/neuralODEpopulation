@@ -31,9 +31,9 @@ from matplotlib.lines import Line2D
 
 def plot_individual_fits(
     dataset,
-    latent_dim, t_dense, models, dataloader, device,
+     t_dense, models, dataloader, device,
     global_mean, global_std, global_max_time,
-    enable_nf, enable_ae, enable_vae, enable_onlymedian,
+    enable_nf, enable_ae, enable_vae,
     truncation, max_plots=25, nr_row=5, nr_col=5,
     num_simulated_total=200,  # instead of n_samples
     ci_lower=0.05, ci_upper=0.95,
@@ -54,7 +54,6 @@ def plot_individual_fits(
 
     # ---- MODELS ----
     encoder = models['encoder']
-    initial_encoder = models['initial_encoder']
     func = models['func']
     reducer = models['reducer']
     noise = models.get('noise', None)
@@ -77,40 +76,41 @@ def plot_individual_fits(
         x_padded_exp = x_padded.expand(num_simulated_total, *x_padded.shape[1:])
         dose_tensor_exp = dose_tensor.expand(num_simulated_total, *dose_tensor.shape[1:])
 
-        z_refined, mu_q, logvar_q, _ = encode_latent(
-            encoder,
-            t_encoder,
-            x_encoder,
-            enable_vae=True,
+        k_params, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
+            encoder, t_encoder, x_encoder,
+            enable_vae=enable_vae,
             enable_ae=enable_ae,
-            enable_onlymedian=enable_onlymedian
+            enable_onlymedian=False
         )
 
         if enable_vae:
-            eps = torch.randn(num_simulated_total, z_refined.size(-1), device=z_refined.device)
-            z_refined = mu_q + eps * torch.exp(0.5 * logvar_q)
+            B, D = mu_p.shape
+            eps = torch.randn(B, D, device=mu_p.device)
+            k_param = mu_p + torch.einsum('bij,bj->bi', L_p, eps) 
+            cov_p = L_p @ L_p.transpose(-1, -2)
+          #  print(cov_p)
+            std = torch.sqrt(torch.diagonal(cov_p, dim1=-2, dim2=-1))  # [B, D]
+            corr_p = cov_p / std.unsqueeze(-1) / std.unsqueeze(-2)
         else:
-            eps = torch.randn(num_simulated_total, z_refined.size(-1), device=z_refined.device)
-            z_refined = mu_q + 0*eps * torch.exp(0.5 * logvar_q)
+            eps = torch.randn(num_simulated_total, k_params.size(-1), device=k_params.device)
+            k_params = mu_q + 0*eps * torch.exp(0.5 * logvar_q)
 
-        x0, ode_func, mu_IC, logvar_IC = prepare_ode_input(
-            initial_encoder,
+        ode_func = prepare_ode_input(
+
             x_padded_exp,
-            z_refined,
+            k_params,
             func,
             dose_tensor_exp,
             dose_times_list,
             enable_vae
         )
 
-        if enable_vae:
-            eps = torch.randn_like(mu_IC, device=z_refined.device)
-            x0_new = mu_IC + eps * torch.exp(0.5 * logvar_IC)
-            x0[:, :x0_new.size(1)] = x0_new
+   
+           
 
         pred_interp, pred_batch = make_predictions(
-            t_padded_exp, t_dense, x0, ode_func,
-            reducer, latent_dim, global_mean, global_std
+            t_padded_exp, t_dense, k_params, ode_func,
+            reducer, global_mean, global_std
         )
 
         if add_noise_to_prediction and noise is not None:
@@ -263,13 +263,13 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
                             
                             
                             # Encode latent
-                            z_refined, mu_q, logvar_q, _ = encode_latent(
+                            k_params, mu_q, logvar_q, _ = encode_latent(
                                 encoder, t_encoder, x_encoder, enable_vae=True, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
                             )
                             
                             if enable_vae:
                            
-                                z_refined =  torch.randn_like(z_refined)
+                                k_params =  torch.randn_like(k_params)
 
                     
                       
@@ -278,7 +278,7 @@ def generate_plot_data(models, dataloader, dataset, t_dense, global_max_time, gl
                             x0, ode_func,_,_ = prepare_ode_input(
                                 initial_encoder,
                                 x_padded,
-                                z_refined,
+                                k_params,
                                 func,
                                 dose_tensor,
                                 dose_times_list,
@@ -437,7 +437,7 @@ def compute_residuals(dataset, latent_dim, global_mean, global_std,global_max_ti
             )
     
             # Encode latent
-            z_refined, mu_q, logvar_q, _ = encode_latent(
+            k_params, mu_q, logvar_q, _ = encode_latent(
                 encoder, t_encoder, x_encoder, enable_vae=False, enable_ae=True, enable_onlymedian=False
             )
     
@@ -445,7 +445,7 @@ def compute_residuals(dataset, latent_dim, global_mean, global_std,global_max_ti
             x0, ode_func, _, _ = prepare_ode_input(
                 initial_encoder,
                 x_padded,
-                z_refined,
+                k_params,
                 func,
                 dose_tensor,
                 dose_times_list,
@@ -556,17 +556,17 @@ def vpc_true(
         )
 
         # --- Encode latent ---
-        z_refined, mu_q, logvar_q, log_det = encode_latent(
+        k_params, mu_q, logvar_q, log_det = encode_latent(
             encoder, t_encoder, x_encoder,
             enable_nf=enable_nf, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
         )
 
         if enable_vae:
-            z_refined = torch.randn_like(z_refined)
+            k_params = torch.randn_like(k_params)
 
         # --- Prepare ODE input ---
         x0, ode_func, _, _ = prepare_ode_input(
-            initial_encoder, x_padded, z_refined, func, dose_tensor, dose_times_list, enable_vae
+            initial_encoder, x_padded, k_params, func, dose_tensor, dose_times_list, enable_vae
         )
         if enable_vae:
             x0  = torch.randn_like(x0)
@@ -638,7 +638,7 @@ def vpc_true(
         plt.show()
 
         # Free memory
-        del pred_batch, x0, z_refined
+        del pred_batch, x0, k_params
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -698,13 +698,13 @@ def analyze_model_with_vpc(
                 batch, device, truncation=truncation
             )
 
-            z_refined, mu_q, logvar_q, _ = encode_latent(
+            k_params, mu_q, logvar_q, _ = encode_latent(
                 encoder, t_encoder, x_encoder,
                 enable_nf=False, enable_ae=True, enable_onlymedian=False
             )
 
             x0, ode_func, _, _ = prepare_ode_input(
-                initial_encoder, x_padded, z_refined, func, dose_tensor, dose_times_list
+                initial_encoder, x_padded, k_params, func, dose_tensor, dose_times_list
             )
 
             pred_interp, pred_batch = make_predictions(
@@ -747,16 +747,16 @@ def analyze_model_with_vpc(
             batch, device, truncation=truncation
         )
 
-        z_refined, mu_q, logvar_q, log_det = encode_latent(
+        k_params, mu_q, logvar_q, log_det = encode_latent(
             encoder, t_encoder, x_encoder,
             enable_nf=enable_nf, enable_ae=enable_ae, enable_onlymedian=enable_onlymedian
         )
 
         if enable_vae:
-            z_refined = torch.randn_like(z_refined)
+            k_params = torch.randn_like(k_params)
 
         x0, ode_func, _, _ = prepare_ode_input(
-            initial_encoder, x_padded, z_refined, func,
+            initial_encoder, x_padded, k_params, func,
             dose_tensor, dose_times_list, enable_vae
         )
 

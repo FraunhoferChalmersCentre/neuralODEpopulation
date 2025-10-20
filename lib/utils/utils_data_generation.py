@@ -936,44 +936,35 @@ def simulate_single_drug_concentration(
     ka_sd=0.3,
     ke_sd=0.3,
     v_sd=0.25,
-    corr_matrix=None,  # New: correlation matrix between ka, ke, v
+    corr_matrix=None,
     add_e=0,
     prop_e=0,
-    t_interval=(0, 24),
+    t_interval=(0, 24),         # recording / sampling interval
+    t_integration=None,          # integration interval (optional)
     sample_frequency=0.5,
+    dt=0.01,
     save_path="single_drug_sim.csv",
     plot=False
 ):
-    """
-    Simulate plasma concentration (DV) for a single oral drug
-    following a standard 1-compartment PK model with first-order absorption,
-    with optional correlation between PK parameters.
-    """
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
 
-    # Default: no correlation
     if corr_matrix is None:
         corr_matrix = np.eye(3)
 
-    # Convert SDs to covariance matrix
     sd_vector = np.array([ka_sd, ke_sd, v_sd])
     cov_matrix = np.outer(sd_vector, sd_vector) * corr_matrix
 
-    # Construct evaluation grid with extra resolution around doses
-    window = 0.3
-    extra_points = []
-    for dt in dose_times:
-        extra_points.extend(np.linspace(dt - window, dt + window, 20))
-    t_eval = np.unique(
-        np.concatenate([
-            np.linspace(t_interval[0], t_interval[1], 200),
-            dose_times,
-            extra_points
-        ])
-    )
-    t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
+    # Set integration interval if not provided
+    if t_integration is None:
+        t_integration = t_interval
+
+    t0_int, t_end_int = t_integration
+    t_eval = np.arange(t0_int, t_end_int + dt / 2, dt)
+
+    t0_rec, t_end_rec = t_interval
+    t_sample = np.arange(t0_rec, t_end_rec + sample_frequency / 2, sample_frequency)
 
     sampled_data = []
     id_counter = 1
@@ -983,49 +974,58 @@ def simulate_single_drug_concentration(
         mean_vector = np.log([ka_mean, ke_mean, v_mean])
         normal_sample = np.random.multivariate_normal(mean_vector, cov_matrix)
         ka, ke, v = np.exp(normal_sample)
-
         param_names = ['ka', 'ke', 'v']
         param_values = [ka, ke, v]
 
         # Initialize compartments
         A_gut = 0.0
-        A_central = v
-        C_out = []
+        A_central = 0.0
 
+        # Precompute indices for doses
+        dose_indices = [int(round((t_dose - t0_int) / dt)) for t_dose in dose_times]
+        # Prepare dose events
+        doses = list(zip(dose_times, dose_amounts))  # [(time, amt), ...]
+        dose_counter = 0
+        n_doses = len(doses)
+        
+        # Integration loop
+        conc_trace = np.zeros_like(t_eval)
         for i, t in enumerate(t_eval):
-            dt = t_eval[i] - t_eval[i-1] if i > 0 else 0.01
-
-            # Administer doses
-            mask = np.isclose(t, dose_times, atol=1e-5)
-            if mask.any():
-                dose_amt = np.array(dose_amounts)[mask][0]
-                A_gut += dose_amt
-                sampled_data.append({
-                    'ID': id_counter,
-                    'TIME': t,
-                    'DV': np.nan,
-                    'AMT': dose_amt,
-                    'EVID': 1,
-                    'PARAM_NAMES': param_names,
-                    'PARAM_VALUES': param_values
-                })
-
-            # PK model update
+            # Administer all doses that occur at or before current time
+            while dose_counter < n_doses and t >= doses[dose_counter][0]:
+                amt = doses[dose_counter][1]
+                A_gut += amt
+                # Record dose only if within recording interval
+                if t0_rec <= t <= t_end_rec:
+                    sampled_data.append({
+                        'ID': id_counter,
+                        'TIME': t,
+                        'DV': np.nan,
+                        'AMT': amt,
+                        'EVID': 1,
+                        'PARAM_NAMES': param_names,
+                        'PARAM_VALUES': param_values
+                    })
+                dose_counter += 1
+        
+            # Store current central compartment amount
+            conc_trace[i] = A_central
+        
+            # 1-compartment PK derivatives
             dA_gut = -ka * A_gut
             dA_central = ka * A_gut - ke * A_central
-
+        
+            # Euler update
             A_gut += dA_gut * dt
             A_central += dA_central * dt
+        
+            # Avoid negatives
             A_gut = max(A_gut, 0)
             A_central = max(A_central, 0)
 
-            C_out.append(A_central)
 
-        # Sample observations
-        C_out = np.array(C_out)
-        C_sampled = np.interp(t_sample, t_eval, C_out)
-
-        # Add noise
+        # Sample concentrations only in recording interval
+        C_sampled = np.interp(t_sample, t_eval, conc_trace/v)
         noise_add = np.random.normal(0, add_e, size=C_sampled.shape)
         noise_prop = np.random.normal(0, prop_e, size=C_sampled.shape)
         C_noisy = np.maximum(0, C_sampled * (1 + noise_prop) + noise_add)
@@ -1046,21 +1046,162 @@ def simulate_single_drug_concentration(
 
         id_counter += 1
 
-    df = pd.DataFrame(sampled_data)
-    df = df.sort_values(['ID', 'TIME'])
+    df = pd.DataFrame(sampled_data).sort_values(['ID', 'TIME'])
     df.to_csv(save_path, index=False, sep=';')
 
     if plot:
         plt.xlabel("Time (hours)")
         plt.ylabel("Concentration (DV)")
-        plt.title("Simulated Single-Drug Concentration-Time Profiles")
-        plt.legend()
+        plt.title("Simulated Single-Drug Concentration-Time Profiles (Fixed-step)")
         plt.show()
 
     print(f"Saved simulated concentration data to {save_path}")
     return df
 
 
+
+def simulate_single_drug_concentration_1comp(
+    n_individuals,
+    dose_amounts,
+    dose_times,
+    ke_mean=0.6,
+    v_mean=50.0,
+    ke_sd=0.3,
+    v_sd=0.25,
+    corr_matrix=None,
+    add_e=0,
+    prop_e=0,
+    t_interval=(0, 24),         # recording / sampling interval
+    t_integration=None,          # integration interval (optional)
+    sample_frequency=0.5,
+    dt=0.01,
+    save_path="single_drug_sim_1comp.csv",
+    plot=False
+):
+    """
+    Simulate plasma concentration (DV) for a single IV bolus drug
+    using a fixed-step Euler integration of a 1-compartment model.
+
+    dA_central/dt = -ke * A_central
+
+    Parameters:
+        - dose_amounts: list of dose amounts
+        - dose_times: list of dose times (can include pre-zero doses)
+        - ke_mean, v_mean: typical values of elimination rate constant and volume
+        - ke_sd, v_sd: variability (lognormal SDs)
+        - corr_matrix: 2x2 correlation between ke and v (optional)
+        - add_e, prop_e: additive and proportional noise
+        - t_interval: time window for recording concentrations
+        - t_integration: total simulation time (integration range)
+        - sample_frequency: observation interval in hours
+        - dt: integration step
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    # Default: no correlation
+    if corr_matrix is None:
+        corr_matrix = np.eye(2)
+
+    # Convert SDs to covariance
+    sd_vector = np.array([ke_sd, v_sd])
+    cov_matrix = np.outer(sd_vector, sd_vector) * corr_matrix
+
+    # Integration vs recording windows
+    if t_integration is None:
+        t_integration = t_interval
+
+    t0_int, t_end_int = t_integration
+    t_eval = np.arange(t0_int, t_end_int + dt / 2, dt)
+
+    t0_rec, t_end_rec = t_interval
+    t_sample = np.arange(t0_rec, t_end_rec + sample_frequency / 2, sample_frequency)
+
+    sampled_data = []
+    id_counter = 1
+
+    for ind in range(n_individuals):
+        # Sample correlated parameters (lognormal)
+        mean_vector = np.log([ke_mean, v_mean])
+        normal_sample = np.random.multivariate_normal(mean_vector, cov_matrix)
+        ke, v = np.exp(normal_sample)
+        ke = np.clip(ke, 1e-4, 10)
+        v = np.clip(v, 1, 1e3)
+
+        param_names = ['ke', 'v']
+        param_values = [ke, v]
+
+        # Initialize compartment
+        A_central = 0.0
+
+        # Prepare dose events
+        doses = list(zip(dose_times, dose_amounts))
+        dose_counter = 0
+        n_doses = len(doses)
+
+        conc_trace = np.zeros_like(t_eval)
+
+        for i, t in enumerate(t_eval):
+            # Administer dose(s)
+            while dose_counter < n_doses and t + 1e-9 >= doses[dose_counter][0]:
+                amt = doses[dose_counter][1]
+                A_central += amt
+                if t0_rec - 1e-9 <= t <= t_end_rec + 1e-9:
+                    sampled_data.append({
+                        'ID': id_counter,
+                        'TIME': t,
+                        'DV': np.nan,
+                        'AMT': amt,
+                        'EVID': 1,
+                        'PARAM_NAMES': param_names,
+                        'PARAM_VALUES': param_values
+                    })
+                dose_counter += 1
+
+            # Store current central amount
+            conc_trace[i] = A_central
+
+            # Elimination
+            dA_central = -ke * A_central
+
+            # Euler update
+            A_central += dA_central * dt
+            A_central = max(A_central, 0)
+
+        # Sample concentrations only within recording window
+        C_sampled = np.interp(t_sample, t_eval, conc_trace / v)
+        noise_add = np.random.normal(0, add_e, size=C_sampled.shape)
+        noise_prop = np.random.normal(0, prop_e, size=C_sampled.shape)
+        C_noisy = np.maximum(0, C_sampled * (1 + noise_prop) + noise_add)
+
+        for t_obs, dv in zip(t_sample, C_noisy):
+            sampled_data.append({
+                'ID': id_counter,
+                'TIME': t_obs,
+                'DV': dv,
+                'AMT': 0,
+                'EVID': 0,
+                'PARAM_NAMES': param_names,
+                'PARAM_VALUES': param_values
+            })
+
+        if plot:
+            plt.plot(t_sample, C_noisy, label=f"Ind {id_counter}")
+
+        id_counter += 1
+
+    df = pd.DataFrame(sampled_data).sort_values(['ID', 'TIME'])
+    df.to_csv(save_path, index=False, sep=';')
+
+    if plot:
+        plt.xlabel("Time (hours)")
+        plt.ylabel("Concentration (DV)")
+        plt.title("Simulated 1-Compartment IV Bolus Concentration-Time Profiles")
+        plt.show()
+
+    print(f"Saved simulated 1-compartment concentration data to {save_path}")
+    return df
 
 
 

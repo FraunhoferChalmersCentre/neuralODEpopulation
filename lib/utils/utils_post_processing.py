@@ -3,6 +3,34 @@
 Created on Sat Sep 20 07:10:20 2025
 @author: Baaz
 """
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+import gc
+import torch
+import numpy as np
+import math
+
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from torch.utils.data import DataLoader
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
 
 # ===== Standard Library =====
 import math
@@ -26,6 +54,7 @@ from matplotlib.lines import Line2D
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score
 from scipy.stats import norm
+import os
 
 # ===== Local Project Imports =====
 from lib.utils.utils_shared import (
@@ -38,6 +67,42 @@ from lib.utils.utils_shared import (
     make_predictions,
 )
 from lib.utils.utils_preprocess import make_collate_fn
+
+def append_metrics(metrics,residuals, variant, mse_mean, r2_mean, mse_median, r2_median, mse_validation, res_df):
+    """
+    Append metrics and residuals safely for a given variant.
+    """
+    metrics[variant]["mse_mean"].append(mse_mean)
+    metrics[variant]["r2_mean"].append(r2_mean)
+    metrics[variant]["mse_median"].append(mse_median)
+    metrics[variant]["r2_median"].append(r2_median)
+    metrics[variant]["mse_validation"].append(mse_validation)
+    residuals[variant].append(res_df)
+    
+  
+    
+def export_all_metrics_and_residuals(metrics, residuals, base_dir, variants=["", "_ae", "_ae_noise"]):
+    os.makedirs(base_dir, exist_ok=True)
+    
+    for var in variants:
+        # Export metrics
+        metrics_df = pd.DataFrame(metrics[var])
+        metrics_file = os.path.join(base_dir, f"metrics_raw{var}.csv")
+        metrics_df.to_csv(metrics_file, index=False)
+        print(f"Saved metrics: {metrics_file}")
+
+        # Export residuals
+        residuals_file = os.path.join(base_dir, f"residuals_NODE{var}.csv")
+        if residuals[var]:  # only concat if list is non-empty
+            res_all = pd.concat(residuals[var], ignore_index=True)
+            res_all.to_csv(residuals_file, index=False)
+        else:
+            # create empty CSV with standard columns if no residuals yet
+            res_all = pd.DataFrame(columns=["Prediction", "Observation", "Residual", "Iteration", "ID"])
+            res_all.to_csv(residuals_file, index=False)
+        print(f"Saved residuals: {residuals_file}")
+
+
 
 def estimate_coverage(
     models,
@@ -279,7 +344,7 @@ def plot_individual_fits(
     encoder.eval()
 
     func.eval()
-
+    dim_total = encoder.total_parameters + encoder.latent_dim
     population_preds = []
     coverage_list = []
     point_inside_list = []
@@ -293,9 +358,7 @@ def plot_individual_fits(
         id_list,_, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list,evid = preprocess_batch(
             data, device, truncation=truncation
         )
-      
-        dim_parameter_encoder = func.dim_parameter_encoder
-        latent_dim= func.dim_latent
+
 
         k_param_samples_list = []
      
@@ -304,10 +367,10 @@ def plot_individual_fits(
              encoder_med, func_med, reducer_med,
              t_dense, global_mean, global_std)
         
-        with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():  
+        with use_ema(encoder):# if use_ema_models else contextmanager(lambda: (yield))():  
             for _ in range(n_samples):
                 k_param_samples, _, _, _,_,_ = encode_latent(
-                    encoder, t_encoder, x_encoder_norm,
+                    encoder, t_encoder, x_encoder_norm,dose_tensor,
                     enable_vae=enable_vae,
                     enable_ae=enable_ae,
                     enable_onlymedian=enable_onlymedian
@@ -316,7 +379,8 @@ def plot_individual_fits(
                 
 
         k_param_samples = torch.stack(k_param_samples_list, dim=1)
-        k_param_flat = k_param_samples.view(-1, dim_parameter_encoder+latent_dim)
+        k_param_flat = k_param_samples.view(-1, dim_total)
+    
         x_padded_exp = x_padded.repeat(n_samples, 1)
         t_padded_exp = t_padded.repeat(n_samples, 1)
         dose_tensor_exp = dose_tensor.unsqueeze(0).repeat(n_samples, *([1]*dose_tensor.dim()))
@@ -334,7 +398,7 @@ def plot_individual_fits(
     
 
 
-        with use_ema(func) if use_ema_models else contextmanager(lambda: (yield))():
+        with use_ema(func): # if use_ema_models else contextmanager(lambda: (yield))():
 
                 ode_func= prepare_ode_input(
 
@@ -347,7 +411,7 @@ def plot_individual_fits(
                     enable_ae
                 )
                 
-        with use_ema(reducer) if use_ema_models else contextmanager(lambda: (yield))():
+        with use_ema(reducer): # if use_ema_models else contextmanager(lambda: (yield))():
             pred_interp, pred_batch = make_predictions(
                 t_padded_exp, t_dense, k_param_flat, ode_func, reducer,
 
@@ -462,113 +526,204 @@ def torch_linear_interpolate2(x_dense, y_dense, x_target):
     slope = (y1 - y0) / (x1 - x0)
     return y0 + slope * (x_target - x0)  
 
-def compute_residuals(latent_dim, global_mean, global_std, func, encoder, reducer, initial_encoder, noise, dataloader, t_dense, device, truncation):
-    """
-    Compute residuals and generate plots for a trained model.
 
-    Returns:
-        residuals_all: concatenated residuals over all batches
-        times_all: corresponding time points
-        predictions_all: model predictions
-        targets_all: ground truth
+def compute_residuals(func, encoder, reducer, noise, dataloader, t_dense,
+                                                   global_mean, global_std, global_max_time,
+                                                   truncation=1, num_repeats=50, show_confidence_intervals=True):
     """
+    Compute residuals and generate VPC plot showing:
+    - Predicted percentiles with confidence intervals
+    - Observed scatter points
+    - Observed percentiles
+    Returns: residuals_all, predictions_all, targets_all, times_all
+    """
+    device = next(encoder.parameters()).device
     encoder.eval()
-    initial_encoder.eval()
     reducer.eval()
     func.eval()
-    
-    residuals_list = []
-    predictions_list = []
-    targets_list = []
-    times_list = []
+
+    # ---- Step 1: Collect residuals and predictions ----
+    residuals_list, predictions_list, targets_list, times_list = [], [], [], []
+
+    all_times = []
+    all_targets = []
 
     with torch.no_grad():
         for batch in dataloader:
-            # Unpack batch
-            occ_list, t_padded, x_global_padded, mask, dose_tensor, dose_times_list = batch
-    
-            # Preprocess
-            id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list = preprocess_batch(
-                batch, device, truncation=truncation
-            )
-    
+            id_list, treatment_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, evid = preprocess_batch(batch, device, truncation=truncation)
+
             # Encode latent
-            k_param, mu_q, logvar_q = encode_latent(
-                encoder, t_encoder, x_encoder, enable_vae=False, enable_ae=True, enable_onlymedian=False
+            k_param, mu_q, logvar_q, mu_p, logvar_p, _ = encode_latent(
+                encoder, t_encoder, x_encoder,
+                enable_vae=False, enable_ae=True, enable_onlymedian=False
             )
-    
-            # Prepare ODE input
-            x0, ode_func = prepare_ode_input(
-                initial_encoder,
-                x_padded,
-                k_param,
-                func,
-                dose_tensor,
-                dose_times_list,
-                True
-            )
-    
-            # Make predictions
-            pred_interp, pred_batch = make_predictions(
-                t_padded, t_dense, x0, ode_func, reducer, latent_dim, global_mean, global_std
-            )
-    
-            # Compute residuals
+
+            # Prepare ODE input and predict
+            ode_func = prepare_ode_input(x_padded, k_param, func, dose_tensor, dose_times_list, evid, enable_ae=True)
+            pred_interp, pred_batch = make_predictions(t_padded, t_dense, k_param, ode_func, reducer, global_mean, global_std)
             targets = destandardize_concentration(x_padded, global_mean, global_std)
             residuals = targets - pred_interp
-    
-            # Flatten and collect all values (no mask)
+
             residuals_list.append(residuals.view(-1))
-            times_list.append(t_padded.view(-1))
             predictions_list.append(pred_interp.view(-1))
             targets_list.append(targets.view(-1))
+            times_list.append(t_padded.view(-1))
 
-    # Concatenate all batches
+            all_times.append(t_padded.view(-1).cpu().numpy())
+            all_targets.append(targets.view(-1).cpu().numpy())
+
     residuals_all = torch.cat(residuals_list)
-    times_all = torch.cat(times_list)
     predictions_all = torch.cat(predictions_list)
     targets_all = torch.cat(targets_list)
-    
-    # --- Plotting ---
+    times_all = torch.cat(times_list)
+
+    all_times = np.concatenate(all_times)
+    all_targets = np.concatenate(all_targets)
+
+    # ---- Step 2: VPC simulation with repeats (predicted percentiles) ----
+    all_repeats_data = []
+    for r in range(num_repeats):
+        plot_data_r = generate_plot_data(
+            func_med=func,
+            reducer_med=reducer,
+            encoder_med=encoder,
+            noise_med=noise,
+            models={'encoder': encoder, 'func': func, 'reducer': reducer},
+            dataloader=dataloader,
+            dataset=dataloader.dataset,
+            t_dense=t_dense,
+            global_mean_time=1.0,
+            global_mean_dose=1.0,
+            global_mean=global_mean,
+            global_std=global_std,
+            encoder=encoder,
+            func=func,
+            reducer=reducer,
+            noise=noise,
+            ODEWrapper=None,
+            num_simulated_total=1,
+            add_noise_to_prediction=False,
+            enable_onlymedian=True,
+            enable_ae=False,
+            enable_vae=False,
+            normalization=True,
+            truncation=truncation
+        )
+        all_repeats_data.append(plot_data_r)
+
+    treatments = sorted(set(d["treatment"] for d in all_repeats_data[0]))
+    plot_by_treat = {t: [] for t in treatments}
+    for t in treatments:
+        plot_by_treat[t] = [
+            next(d for d in repeat if d["treatment"] == t) for repeat in all_repeats_data
+        ]
+
+    # ---- Step 3: Plotting ----
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    axes = axes.flatten()
+    color_pred, color_obs, color_obs_percentiles = "blue", "orange", "green"
+
+    # --- [0,0] VPC with observed scatter + observed percentiles ---
+    ax = axes[0]
+
+    # Compute observed percentiles over time bins
+    num_bins = 20
+    bins = np.linspace(0, global_max_time, num_bins)
+    bin_indices = np.digitize(all_times*global_max_time, bins) - 1
+    obs_percentiles = {perc: [] for perc in [5,25,50,75,95]}
+    bin_centers = []
+
+    for i in range(num_bins):
+        mask = bin_indices == i
+        if np.sum(mask) > 0:
+            bin_centers.append(bins[i] + (bins[i+1]-bins[i])/2 if i < num_bins-1 else bins[i])
+            data_in_bin = all_targets[mask]
+            for perc in obs_percentiles:
+                obs_percentiles[perc].append(np.percentile(data_in_bin, perc))
+
+    # Scatter all observed data points
+    ax.scatter(all_times*global_max_time, all_targets, color=color_obs, s=20, alpha=0.4, label="Observed points")
+
+    # Plot observed percentiles
+    for perc, color in zip([5,25,50,75,95], ["#66c2a5","#fc8d62","#8da0cb","#fc8d62","#66c2a5"]):
+        ax.plot(bin_centers, obs_percentiles[perc], linestyle='--', color=color, linewidth=1.5, label=f"Observed {perc}th percentile")
+
+    # Plot predicted percentiles
+    for i, (treat, repeat_dicts) in enumerate(plot_by_treat.items()):
+        times = repeat_dicts[0]["time_hours"]
+        percentile_keys = ["perc5_sim","perc10_sim","perc25_sim","median_sim","perc75_sim","perc90_sim","perc95_sim"]
+        sim_stats = {}
+        for k in percentile_keys:
+            arr = np.stack([d.get(k, np.nan*np.ones_like(times)) for d in repeat_dicts], axis=0)
+            sim_stats[k] = {"median": np.nanmedian(arr, axis=0)}
+            if show_confidence_intervals:
+                sim_stats[k]["lower"] = np.nanpercentile(arr, 2.5, axis=0)
+                sim_stats[k]["upper"] = np.nanpercentile(arr, 97.5, axis=0)
+
+        style_map = {
+            "perc5_sim": (":", 1.5, 0.10),
+            "perc10_sim": ("--", 2, 0.12),
+            "perc25_sim": ("-.", 2, 0.15),
+            "median_sim": ("-", 2.5, 0.20),
+            "perc75_sim": ("-.", 2, 0.15),
+            "perc90_sim": ("--", 2, 0.12),
+            "perc95_sim": (":", 1.5, 0.10),
+        }
+        for k, (style, width, alpha) in style_map.items():
+            med = sim_stats[k]["median"]
+            lower = sim_stats[k].get("lower")
+            upper = sim_stats[k].get("upper")
+            if lower is not None and upper is not None:
+                ax.fill_between(times*global_max_time, lower, upper, color=color_pred, alpha=alpha)
+            ax.plot(times*global_max_time, med, color=color_pred, linestyle=style, linewidth=width)
+
+    ax.set_xlabel("Time (hours)")
+    ax.set_ylabel("Concentration")
+    ax.set_title("VPC: Observed scatter + percentiles + predicted percentiles")
+    ax.grid(True)
+    ax.legend(fontsize=8)
+
+    # --- [0,1] Residual histogram ---
+    ax_hist = axes[1]
     residuals_np = residuals_all.cpu().numpy()
-    times_np = times_all.cpu().numpy()
-    targets_np = targets_all.cpu().numpy()
-    
-    # Gaussian additive noise from noise model
-    sigma_add = noise.sigma_add.detach().cpu().numpy().item()  # assuming size=1
+    sigma_add = noise.sigma_add.detach().cpu().numpy().item()
     x_vals = np.linspace(residuals_np.min(), residuals_np.max(), 500)
     pdf_vals = norm.pdf(x_vals, loc=0.0, scale=sigma_add)
-    
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    axes = axes.flatten()
-    
-    # Histogram + PDF
-    axes[0].hist(residuals_np, bins=25, density=True, alpha=0.7, label="Residuals")
-    axes[0].plot(x_vals, pdf_vals, 'r--', label=f'Gaussian Noise σ={sigma_add:.3f}')
-    axes[0].set_xlabel("Residual")
-    axes[0].set_ylabel("Density")
-    axes[0].set_title("Histogram of residuals")
-    axes[0].legend()
-    
-    # Residuals vs time
-    axes[1].scatter(times_np, residuals_np, alpha=0.5, s=5)
-    axes[1].set_xlabel("Time")
-    axes[1].set_ylabel("Residual")
-    axes[1].set_title("Residuals vs Time")
-    
-    # Residuals vs observed values
-    axes[2].scatter(targets_np, residuals_np, alpha=0.5, s=5)
-    axes[2].set_xlabel("Observed value")
-    axes[2].set_ylabel("Residual")
-    axes[2].set_title("Residuals vs Observed value")
-    
-    # Optional empty subplot
-    axes[3].axis('off')
-    
+    ax_hist.hist(residuals_np, bins=25, density=True, alpha=0.7, color='gray', label='Residuals')
+    ax_hist.plot(x_vals, pdf_vals, 'r--', linewidth=2, label=f'Gaussian Noise σ={sigma_add:.3f}')
+    ax_hist.set_xlabel("Residual")
+    ax_hist.set_ylabel("Density")
+    ax_hist.set_title("Residual histogram")
+    ax_hist.legend()
+
+    # --- [1,0] Residuals vs Time ---
+    ax_res_time = axes[2]
+    ax_res_time.scatter(times_all.cpu().numpy()*global_max_time, residuals_all.cpu().numpy(), alpha=0.5, s=5, color='red')
+    ax_res_time.set_xlabel("Time (hours)")
+    ax_res_time.set_ylabel("Residual")
+    ax_res_time.set_title("Residuals vs Time")
+    ax_res_time.grid(True, alpha=0.3)
+
+    # --- [1,1] Residuals vs Observed ---
+    ax_res_obs = axes[3]
+    ax_res_obs.scatter(targets_all.cpu().numpy(), residuals_all.cpu().numpy(), alpha=0.5, s=5, color='green')
+    ax_res_obs.set_xlabel("Observed Concentration")
+    ax_res_obs.set_ylabel("Residual")
+    ax_res_obs.set_title("Residuals vs Observed")
+    ax_res_obs.grid(True, alpha=0.3)
+
     plt.tight_layout()
     plt.show()
 
-    return residuals_all, times_all, predictions_all, targets_all
+    # ---- Return the original 4 outputs ----
+    return residuals_all, predictions_all, targets_all, times_all
+
+
+
+
+
+
+
 
     # Split dataloader by treatment
 def split_dataloader_by_treatment(dataloader, dataset):
@@ -648,21 +803,28 @@ def plot_encoder_histograms(
 
                 # Encode latent with EMA weights
                 with use_ema(encoder):
-                    _, mu_q, L_q, _, _, _ = encode_latent(
-                        encoder, t_encoder, x_encoder,
+                    k_param, mu_q, L_q, mu_p, L_p, _ = encode_latent(
+                        encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=True, enable_ae=False, enable_onlymedian=False
                     )
 
                     # Full covariance and σ
-                    Sigma_q = torch.bmm(L_q, L_q.transpose(1, 2))
-                    sigma_q = torch.sqrt(torch.diagonal(Sigma_q, dim1=1, dim2=2))
-
+          
+                    if L_q.dim() == 2:
+                        # diagonal-only case
+                        L_q = torch.diag_embed(L_q)  # convert [B, D] -> [B, D, D]
+                    
+                    Sigma_q = L_q @ L_q.transpose(-1, -2)
+                    sigma_q = torch.sqrt(torch.diagonal(Sigma_q, dim1=-2, dim2=-1))  # [B, D]
+                 #   print(mu_q)
                     mu_list.append(mu_q.cpu().numpy())
                     sigma_list.append(sigma_q.cpu().numpy())
                     treatment_list_all.append(treatment_list.cpu().numpy())
 
     # Aggregate
     mu_array = np.vstack(mu_list)        # [n_samples, D]
+    
+ #   print(mu_array)
     sigma_array = np.vstack(sigma_list)  # [n_samples, D]
     treatment_array = np.concatenate(treatment_list_all).ravel()
     n_dims = mu_array.shape[1]
@@ -1298,7 +1460,7 @@ def plot_single_model_encoders_and_regression(
     encoder1, func1, reducer1,
     encoder_med, func_med, reducer_med,
      global_mean, global_std, t_dense,
-    device=None, truncation=0, use_ema_models=False, normalization=False, dim_parameter_encoder=2
+    device=None, truncation=1, use_ema_models=False, normalization=False, dim_parameter_encoder=2
 ):
     """
     Plot regression and encoder outputs using μ for regression,
@@ -1310,7 +1472,7 @@ def plot_single_model_encoders_and_regression(
     torch.cuda.empty_cache()
     if device is None:
         device = next(encoder1.parameters()).device
-    latent_dim=encoder1.latent_dim# + encoder1.parameter_dim
+    latent_dim=encoder1.total_parameters
   
     # ---------------- Extract latents helper ----------------
     def extract_latents(df, dataset, encoder):
@@ -1342,14 +1504,14 @@ def plot_single_model_encoders_and_regression(
 
                     # Optional normalization
                     if normalization:
-                        x_padded = normalize_encoder_input(
-                            x_padded, t_padded, x_padded, dose_tensor, dose_times_padded, evid_padded,
+                        x_encoder_norm = normalize_encoder_input(
+                            x_encoder, t_padded, x_padded, dose_tensor, dose_times_padded, evid_padded,
                             encoder_med, func_med, reducer_med,
                             t_dense, global_mean, global_std
                         )
 
                     _, mu_q, logvar_q, _,_,_ = encode_latent(
-                        encoder, t_padded, x_padded,
+                        encoder, t_padded, x_encoder_norm,dose_tensor,
                         enable_vae=False, enable_ae=True, enable_onlymedian=False
                     )
 
@@ -1357,6 +1519,7 @@ def plot_single_model_encoders_and_regression(
                     treatment_cpu = treatment_tensor.cpu().numpy()
 
                     for i, sid in enumerate(id_tensor):
+
                         mus.append(mu_q[i, :latent_dim])
                         treatment_list_all.append(treatment_cpu[i])
                         row = df[df["ID"] == int(sid)]
@@ -1654,233 +1817,6 @@ def plot_single_model_encoders_and_regression_combined(
     plt.show()
 
 
- 
-# def plot_single_model_encoders_and_regression(
-#     df_train, df_val, dataset_train, dataset_val,
-#     encoder1, initial_encoder1, func1, reducer1,
-#     encoder_med, initial_encoder_med, func_med, reducer_med,
-#     latent_dim, global_mean, global_std, t_dense,
-#     device, truncation, dim_parameter_encoder=2,
-#     use_ema_models=False, normalization=False
-# ):
-#     """
-#     Plot regression and encoder outputs for a single model.
-#     Includes regressions from both μ and σ.
-#     Optionally applies EMA weights if available.
-#     """
-#     import gc
-#     import torch
-#     from torch.utils.data import DataLoader
-#     from sklearn.ensemble import RandomForestRegressor
-#     from sklearn.metrics import r2_score
-#     import matplotlib.pyplot as plt
-#     import numpy as np
-#     from contextlib import contextmanager
-
-#     gc.collect()
-#     torch.cuda.empty_cache()
-#     if device is None:
-#         device = next(encoder1.parameters()).device
-
-#     # ---------------- Apply EMA if requested ----------------
-#     applied_ema = []
-#     if use_ema_models:
-#         ema_modules = [
-#             encoder1, initial_encoder1, func1, reducer1,
-#             encoder_med, initial_encoder_med, func_med, reducer_med
-#         ]
-#         for module in ema_modules:
-#             if hasattr(module, "apply_ema_weights"):
-#                 module.apply_ema_weights()
-#                 applied_ema.append(module)
-
-#     # ---------------- Extract latents helper ----------------
-#     def extract_latents(
-#         encoder_med, initial_encoder_med, func_med, reducer_med,
-#         df, dataset, encoder, init_enc, func, reducer
-#     ):
-#         mus, sigmas, ka_list, cl_list, id_list_all = [], [], [], [], []
-#         encoder_med.eval()
-#         initial_encoder_med.eval()
-#         func_med.eval()
-#         dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
-
-#         with torch.no_grad():
-#             for data in dataloader:
-#                 id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list = preprocess_batch(
-#                     data, device, truncation=truncation
-#                 )
-#                 if normalization:
-#                     # Encode latent using median model
-#                     with use_ema(encoder_med):   
-#                         k_param, mu_q, logvar_q,_ = encode_latent(
-#                             encoder_med,
-#                             t_encoder,
-#                             x_encoder,
-#                             enable_vae=False,
-#                             enable_ae=False,
-#                             enable_onlymedian=True
-#                         )
-#                     with use_ema(initial_encoder_med):   
-#                         with use_ema(func_med):  
-#                         # Prepare ODE input and predictions
-#                             x0, ode_func,_,_ = prepare_ode_input(
-#                                 initial_encoder_med,
-#                                 x_padded,
-#                                 k_param,
-#                                 func_med,
-#                                 dose_tensor,
-#                                 dose_times_list,
-#                                 False
-#                             )
-#                         # Prepare ODE input
-#                     with use_ema(reducer_med): 
-#                         pred_interp, pred_batch = make_predictions(
-#                             t_encoder, t_dense, x0, ode_func, reducer_med, latent_dim, global_mean, global_std
-#                         )
-
-#                     # Normalize encoder input
-#                     x_encoder = destandardize_concentration(x_encoder, global_mean, global_std) / pred_interp
-#                 # Encode latent
-#                 k_param, mu_q, logvar_q, _ = encode_latent(
-#                     encoder, t_encoder, x_encoder,
-#                     enable_vae=False, enable_ae=True, enable_onlymedian=False
-#                 )
-
-#                 for i, sid in enumerate(id_list):
-#                     mu = mu_q[i].cpu().numpy()[:dim_parameter_encoder]
-#                     sigma = np.exp(0.5 * logvar_q[i].cpu().numpy()[:dim_parameter_encoder])
-#                     mus.append(mu)
-#                     sigmas.append(sigma)
-#                     row = df[df["ID"] == int(sid)]
-#                     if row.empty:
-#                         continue
-#                     ka_list.append(row["ka"].values[0])
-#                     cl_list.append(row["cl"].values[0])
-#                     id_list_all.append(sid)
-
-#         return np.vstack(mus), np.vstack(sigmas), np.array(ka_list), np.array(cl_list), id_list_all
-
-#     # ---------------- Prepare plots ----------------
-#     fs = 100
-#     fig, axes = plt.subplots(2, 4, figsize=(fs, fs/1.5))  # two rows: μ and σ
-#     fontsize_labels = 60
-#     fontsize_ticks = 50
-#     fontsize_legend = 50
-#     fontsize_r2 = 50
-
-#     # Extract latents for train/val
-#     X_val_mu, X_val_sigma, ka_val, cl_val, id_list_val = extract_latents(
-#         encoder_med, initial_encoder_med, func_med, reducer_med,
-#         df_val, dataset_val,
-#         encoder1, initial_encoder1, func1, reducer1
-#     )
-#     X_train_mu, X_train_sigma, ka_train, cl_train, _ = extract_latents(
-#         encoder_med, initial_encoder_med, func_med, reducer_med,
-#         df_train, dataset_train,
-#         encoder1, initial_encoder1, func1, reducer1
-#     )
-
-#     # ---------------- Fit regressors ----------------
-#     def fit_and_predict(X_train, y_train, X_val, y_val):
-#         rf = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
-#         rf.fit(X_train, np.log(y_train))
-#         y_pred = rf.predict(X_val)
-#         return y_pred, r2_score(np.log(y_val), y_pred)
-
-#     # μ regressors
-#     ka_pred_mu, r2_ka_mu = fit_and_predict(X_train_mu, ka_train, X_val_mu, ka_val)
-#     cl_pred_mu, r2_cl_mu = fit_and_predict(X_train_mu, cl_train, X_val_mu, cl_val)
-
-#     # σ regressors
-#     ka_pred_sigma, r2_ka_sigma = fit_and_predict(X_train_sigma, ka_train, X_val_sigma, ka_val)
-#     cl_pred_sigma, r2_cl_sigma = fit_and_predict(X_train_sigma, cl_train, X_val_sigma, cl_val)
-
-#     log_ka_val = np.log(ka_val)
-#     log_cl_val = np.log(cl_val)
-
-#     # -------- Eight plots (2x4) --------
-#     marker_size = 200
-#     line_width = 8
-#     cmap = plt.get_cmap("tab10")
-
-#     # Row 0 = μ plots
-#     ax0, ax1, ax2, ax3 = axes[0]
-#     ax0.scatter(X_val_mu[:, 0], log_ka_val, c=cmap(0), s=marker_size, alpha=0.7, edgecolors="k", label="μ0")
-#     ax0.scatter(X_val_mu[:, 1], log_ka_val, c=cmap(1), s=marker_size, alpha=0.7, edgecolors="k", label="μ1")
-#     ax0.set_xlabel("Latent μ", fontsize=fontsize_labels)
-#     ax0.set_ylabel("log(ka)", fontsize=fontsize_labels)
-#     ax0.set_title("μ vs ka", fontsize=fontsize_labels)
-#     ax0.tick_params(axis="both", labelsize=fontsize_ticks)
-
-#     ax1.scatter(X_val_mu[:, 0], log_cl_val, c=cmap(0), s=marker_size, alpha=0.7, edgecolors="k", label="μ0")
-#     ax1.scatter(X_val_mu[:, 1], log_cl_val, c=cmap(1), s=marker_size, alpha=0.7, edgecolors="k", label="μ1")
-#     ax1.set_xlabel("Latent μ", fontsize=fontsize_labels)
-#     ax1.set_ylabel("log(CL)", fontsize=fontsize_labels)
-#     ax1.set_title("μ vs CL", fontsize=fontsize_labels)
-#     ax1.tick_params(axis="both", labelsize=fontsize_ticks)
-
-#     ax2.scatter(ka_pred_mu, log_ka_val, c="gray", s=marker_size, alpha=0.7, edgecolors="k")
-#     ax2.plot([ka_pred_mu.min(), ka_pred_mu.max()], [ka_pred_mu.min(), ka_pred_mu.max()], "r--", lw=line_width)
-#     ax2.set_xlabel("Pred log(ka)", fontsize=fontsize_labels)
-#     ax2.set_ylabel("True log(ka)", fontsize=fontsize_labels)
-#     ax2.text(0.05, 0.9, f"R² = {r2_ka_mu:.2f}", transform=ax2.transAxes,
-#              fontsize=fontsize_r2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-
-#     ax3.scatter(cl_pred_mu, log_cl_val, c="gray", s=marker_size, alpha=0.7, edgecolors="k")
-#     ax3.plot([cl_pred_mu.min(), cl_pred_mu.max()], [cl_pred_mu.min(), cl_pred_mu.max()], "r--", lw=line_width)
-#     ax3.set_xlabel("Pred log(CL)", fontsize=fontsize_labels)
-#     ax3.set_ylabel("True log(CL)", fontsize=fontsize_labels)
-#     ax3.text(0.05, 0.9, f"R² = {r2_cl_mu:.2f}", transform=ax3.transAxes,
-#              fontsize=fontsize_r2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-
-#     # Row 1 = σ plots
-#     ax4, ax5, ax6, ax7 = axes[1]
-#     ax4.scatter(X_val_sigma[:, 0], log_ka_val, c=cmap(2), s=marker_size, alpha=0.7, edgecolors="k", label="σ0")
-#     ax4.scatter(X_val_sigma[:, 1], log_ka_val, c=cmap(3), s=marker_size, alpha=0.7, edgecolors="k", label="σ1")
-#     ax4.set_xlabel("Latent σ", fontsize=fontsize_labels)
-#     ax4.set_ylabel("log(ka)", fontsize=fontsize_labels)
-#     ax4.set_title("σ vs ka", fontsize=fontsize_labels)
-#     ax4.tick_params(axis="both", labelsize=fontsize_ticks)
-
-#     ax5.scatter(X_val_sigma[:, 0], log_cl_val, c=cmap(2), s=marker_size, alpha=0.7, edgecolors="k", label="σ0")
-#     ax5.scatter(X_val_sigma[:, 1], log_cl_val, c=cmap(3), s=marker_size, alpha=0.7, edgecolors="k", label="σ1")
-#     ax5.set_xlabel("Latent σ", fontsize=fontsize_labels)
-#     ax5.set_ylabel("log(CL)", fontsize=fontsize_labels)
-#     ax5.set_title("σ vs CL", fontsize=fontsize_labels)
-#     ax5.tick_params(axis="both", labelsize=fontsize_ticks)
-
-#     ax6.scatter(ka_pred_sigma, log_ka_val, c="gray", s=marker_size, alpha=0.7, edgecolors="k")
-#     ax6.plot([ka_pred_sigma.min(), ka_pred_sigma.max()], [ka_pred_sigma.min(), ka_pred_sigma.max()], "r--", lw=line_width)
-#     ax6.set_xlabel("Pred log(ka)", fontsize=fontsize_labels)
-#     ax6.set_ylabel("True log(ka)", fontsize=fontsize_labels)
-#     ax6.text(0.05, 0.9, f"R² = {r2_ka_sigma:.2f}", transform=ax6.transAxes,
-#              fontsize=fontsize_r2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-
-#     ax7.scatter(cl_pred_sigma, log_cl_val, c="gray", s=marker_size, alpha=0.7, edgecolors="k")
-#     ax7.plot([cl_pred_sigma.min(), cl_pred_sigma.max()], [cl_pred_sigma.min(), cl_pred_sigma.max()], "r--", lw=line_width)
-#     ax7.set_xlabel("Pred log(CL)", fontsize=fontsize_labels)
-#     ax7.set_ylabel("True log(CL)", fontsize=fontsize_labels)
-#     ax7.text(0.05, 0.9, f"R² = {r2_cl_sigma:.2f}", transform=ax7.transAxes,
-#              fontsize=fontsize_r2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-
-#     # Add legends
-#     fig.legend(loc="upper center", bbox_to_anchor=(0.5, -0.02),
-#                ncol=4, fontsize=fontsize_legend, title="Encoders", title_fontsize=fontsize_legend)
-
-#     plt.subplots_adjust(hspace=0.4, wspace=0.3, bottom=0.05)
-#     plt.show()
-#     plt.close(fig)
-
-#     # ---------------- Restore original EMA weights ----------------
-#     if use_ema_models:
-#         for module in applied_ema:
-#             if hasattr(module, "restore_original_weights"):
-#                 module.restore_original_weights()
-
-#     torch.cuda.empty_cache()
-#     gc.collect()
-
 
 
 
@@ -1917,7 +1853,7 @@ def sample_from_prior(encoder, batch_size, device):
 def generate_plot_data(
     func_med, reducer_med,  encoder_med, noise_med,
     models, dataloader, dataset, t_dense, global_mean_time, global_mean_dose,
-    global_mean, global_std, latent_dim, dim_parameters,
+    global_mean, global_std,
      encoder, func, reducer, noise,
     ODEWrapper, num_simulated_total, add_noise_to_prediction,
     enable_onlymedian, enable_ae, enable_vae, normalization, truncation,
@@ -1926,6 +1862,8 @@ def generate_plot_data(
     
     plot_data_local = []
     device = next(func.parameters()).device
+
+    
 
     # === Create dataloaders grouped by treatment ===
     loaders_by_treatment = split_dataloader_by_treatment(dataloader, dataset)
@@ -1974,12 +1912,11 @@ def generate_plot_data(
                 # === Encode latent ===
                 with use_ema(encoder):
                     k_param, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
-                        encoder, t_encoder, x_encoder,
+                        encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=enable_vae,
                         enable_ae=enable_ae,
                         enable_onlymedian=enable_onlymedian
                     )
-                    
                 if enable_vae:
                      with use_ema(encoder):
                              B, D = mu_p.shape
@@ -2009,8 +1946,8 @@ def generate_plot_data(
                
 
                       
-                if enable_onlymedian:
-                    k_param = torch.zeros_like(k_param)
+              #  if enable_onlymedian:
+                 #   k_param = torch.zeros_like(k_param)
                 # === Predict ===
                 with use_ema(reducer):
                     pred_interp, pred_batch = make_predictions(
@@ -2035,7 +1972,7 @@ def generate_plot_data(
             pred_batch = torch.cat(all_preds, dim=0)
             t_padded = torch.cat(all_times, dim=0)
             data_matrix = torch.cat(all_data, dim=0)
-            unique_times = torch.unique(t_padded[t_padded > 0])
+            unique_times = torch.unique(t_padded[t_padded >= 0])
             perc10_list, median_list, perc90_list = [], [], []
 
             for t in unique_times:
@@ -2530,16 +2467,13 @@ def vpc(func_med,
         global_mean, 
         global_std,
         dataset,
-        latent_dim,
-        dim_parameters,
         encoder,
         func,
         reducer,
         noise,
         ODEWrapper,
         t_dense,
-        compartment,
-        onlymedian,
+          onlymedian,
         enable_ae,
         enable_vae,
         add_noise_to_prediction,  
@@ -2561,8 +2495,6 @@ def vpc(func_med,
         global_mean_dose=global_mean_dose,
         global_mean=global_mean,
         global_std=global_std,
-        latent_dim=latent_dim,
-        dim_parameters=dim_parameters,
         encoder=encoder,
         func=func,
         reducer=reducer,
@@ -2596,11 +2528,11 @@ def vpc(func_med,
         ax.plot(data["time_hours_data"], data["median_data"], label="Raw median", color="orange", linewidth=2)
         ax.plot(data["time_hours_data"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--", linewidth=2)
         
-        ax.set_xlim(0, 50)
+        ax.set_xlim(0, 48)
         # ax.set_ylim(0, 180)
         ax.set_title(f"Treatment {data['treatment']}", fontsize=32, fontweight='bold')
         ax.set_xlabel("Time (hours)", fontsize=24)
-        ax.set_ylabel(f"Tumor Volume ({compartment})", fontsize=28)
+        ax.set_ylabel(f"Tumor Volume", fontsize=28)
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.tick_params(axis='both', which='major', labelsize=24, width=1.5)
     
@@ -2628,7 +2560,7 @@ def vpc(func_med,
 
 
     
-def vpc_true(latent_dim,dim_parameters,
+def vpc_true(
     ODEWrapper,
     models, dataset, t_dense, global_max_time, global_mean, global_std, global_mean_dose,
     encoder, func, reducer, noise,
@@ -2640,13 +2572,7 @@ def vpc_true(latent_dim,dim_parameters,
     fontsize=14,
     show_confidence_intervals=True   # toggle all CI shading
 ):
-    import matplotlib as mpl
-    import matplotlib.pyplot as plt
-    from torch.utils.data import DataLoader
-    import gc
-    import torch
-    import numpy as np
-    import math
+    
 
     gc.collect()
 
@@ -2676,8 +2602,7 @@ def vpc_true(latent_dim,dim_parameters,
             func_med=func_med, reducer_med=reducer_med, encoder_med=encoder_med, noise_med=noise_med,
             models=models, dataloader=dataloader, dataset=dataset, t_dense=t_dense,
             global_mean_time=global_max_time, global_mean_dose=global_mean_dose,
-            global_mean=global_mean, global_std=global_std, latent_dim=latent_dim,
-            dim_parameters=dim_parameters, encoder=encoder, func=func, reducer=reducer, noise=noise,
+            global_mean=global_mean, global_std=global_std,encoder=encoder, func=func, reducer=reducer, noise=noise,
             ODEWrapper=ODEWrapper, num_simulated_total=1,
             add_noise_to_prediction=add_noise_to_prediction,
             enable_onlymedian=enable_onlymedian, enable_ae=enable_ae,
