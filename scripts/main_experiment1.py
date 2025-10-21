@@ -40,9 +40,9 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-    '--data_validation_path', 'lib/data/Simulated_ODE3_corr_val.csv', 
-    '--data_test_path', 'lib/data/Simulated_ODE3_corr_test.csv', 
-    '--data_path', 'lib/data/Simulated_ODE3_corr_train.csv',
+    '--data_validation_path', 'lib/data/tumor_data_val.csv', 
+    '--data_test_path', 'lib/data/tumor_data_test.csv', 
+    '--data_path', 'lib/data/tumor_data_train.csv',
     '--save_dir', 'models',
     '--load_dir', 'models']
       
@@ -189,7 +189,7 @@ if __name__ == "__main__":
                                           cov_diag_epsilon=1e-5, learn_prior_mean=True, learn_prior_covariance=True,
                                           diagonal_only=False).to(device)
     func_ae = ODEFunc(dim_latent,dim_parameters,hid_dim,number_drugs ).to(device)
-    reducer_ae = SimpleDecoder(dim_latent+1, hidden_dim=32).to(device)
+    reducer_ae = SimpleDecoder(dim_latent, hidden_dim=32).to(device)
     noise_ae = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
     
  
@@ -238,8 +238,8 @@ if __name__ == "__main__":
        warmup_epochs_noise=30,
        warmup_epochs_iiv=0,
        smoothing_start_epoch=30,
-       enable_ae=False,
-       enable_vae=True,
+       enable_ae=True,
+       enable_vae=False,
        enable_onlymedian=False,
        normalization=True,
        truncation=truncation,

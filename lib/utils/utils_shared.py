@@ -246,7 +246,7 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
         x_encoder,
         t_cut,
         x_cut,
-        masks,
+        mask,
         dose_tensor,
         dose_times_list,
         evid
@@ -319,16 +319,18 @@ def encode_latent(
     if enable_ae:
         k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)
         k_param = mu_q
-      #  k_param=torch.cat([ z0, k_param], dim=-1)
-        
+        k_param=torch.cat([ z0, k_param], dim=-1)
+       
 
 
     elif enable_onlymedian:
         
-        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)
-        
-#        k_param=torch.cat([z0,0*k_param], dim=-1)
-        k_param =0* k_param
+        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor,enable_onlymedian)
+   
+        k_param=torch.cat([z0,0*k_param], dim=-1)
+    
+     
+      #  k_param =0* k_param
         mu_q = mu_p
         L_q = L_p
       #  print(k_param)
@@ -364,7 +366,7 @@ def encode_latent(
         B, D = mu_q.shape
         eps = torch.randn(B, D, device=mu_q.device)  # standard normal
         k_param = mu_q + torch.einsum("bij,bj->bi", L_q, eps)  # [B, D]
-     #   k_param=torch.cat([z0, k_param ], dim=-1)   
+        k_param=torch.cat([z0, k_param ], dim=-1)   
      #   print(k_param)    
   
    # print(k_param)

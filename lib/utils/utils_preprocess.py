@@ -712,7 +712,7 @@ def compute_global_stats(df):
 
     global_max_dose = df['AMT'].max()
     global_max_time = df['TIME'].max()
-    global_mean = df['DV'].mean()
+    global_mean = df.loc[df['TIME'] == df['TIME'].min(), 'DV'].median()
     global_std = df['DV'].std()
     global_max_value = df['DV'].max()
     global_min_value = df['DV'].min()

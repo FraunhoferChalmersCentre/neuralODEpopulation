@@ -639,7 +639,6 @@ def train_loop_model(p_dropout, func_med, reducer_med, encoder_med,
             # if enable_onlymedian:
             #     k_param = k_param*0
             
-          
             pred_interp, pred_batch = make_predictions(
                 t_padded, t_dense, k_param, ode_func, reducer,global_mean,global_std,repeat_factor
             )

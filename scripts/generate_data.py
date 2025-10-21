@@ -58,17 +58,17 @@ def main():
             'dose_times_list':   [[0, 0, 0, 0], [0, 0, 0, 0]]
         },
         
-        {
-            'n_individuals': n,
-            'dose_amounts_list': [[200, 200, 200, 200], [0, 0, 0, 0]],
-            'dose_times_list':   [[0, 5, 10, 15], [0, 0, 0, 0]]
-        },
-        # Group 2: Drug B only
-        # {
-        #     'n_individuals': n,
-        #     'dose_amounts_list': [[0, 0, 0, 0], [150, 150, 150, 150]],
-        #     'dose_times_list':   [[0, 0, 0, 0], [1, 6, 11, 16]]
-        # },
+         {
+             'n_individuals': n,
+             'dose_amounts_list': [[200, 200, 200, 200], [0, 0, 0, 0]],
+             'dose_times_list':   [[0, 5, 10, 15], [0, 0, 0, 0]]
+         },
+       #  Group 2: Drug B only
+         {
+             'n_individuals': n,
+             'dose_amounts_list': [[0, 0, 0, 0], [150, 150, 150, 150]],
+             'dose_times_list':   [[0, 0, 0, 0], [1, 6, 11, 16]]
+         },
         
         # {
         #     'n_individuals': n,
@@ -145,7 +145,7 @@ from lib.utils.utils_data_generation import simulate_single_drug_concentration
 def main():
     base_dir = os.getcwd()
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_corr_test.csv")
+    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_corr_val.csv")
     os.makedirs(default_save_dir, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Simulate single-drug concentration for 2 groups.")

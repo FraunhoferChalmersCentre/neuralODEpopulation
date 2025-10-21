@@ -51,7 +51,9 @@ class ODEFunc(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(latent_dim + dim_parameter_encoder+drug_dim, hid_dim),
              nn.SELU(),
-            nn.Linear(hid_dim, latent_dim)
+            nn.Linear(hid_dim, hid_dim),
+            nn.SELU(),
+           nn.Linear(hid_dim, latent_dim)
         )
         
         self.drug = nn.Sequential(
@@ -104,71 +106,71 @@ class ODEFunc(nn.Module):
             masks.append(mask)
         return masks
 
-    # def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
-    #     """
-    #     Compute dose signal per drug using Gaussian pulses.
-    #     Zero contribution if no doses exist for that individual/drug.
-    #     Output: [batch, n_drugs]
-    #     """
-    #     sigma = self.get_sigma()
-    #     batch_size = evid.size(0)
-    #     n_times = t.size(1) if t.dim() > 1 else 1
-    #     device = t.device
-    #     dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-    
-    #     # Ensure t has shape [batch, num_times]
-    #     if t.dim() == 1:
-    #         t = t.unsqueeze(0).repeat(batch_size, 1)  # [batch, num_times]
-    
-    #     for drug_id in range(1, n_drugs + 1):
-    #         # Mask doses for this drug
-    #         mask = (evid == drug_id)  # [batch, num_doses]
-    #         masked_times = dose_times * mask.float()
-    #         masked_amounts = dose_amounts * mask.float()
-    
-    #         # Identify which batch elements actually have doses
-    #         has_dose = mask.any(dim=1)  # [batch]
-    
-    #         if not has_dose.any():
-    #             continue
-    
-    #         # Compute Gaussian pulse
-    #         diff = t.unsqueeze(-1) - masked_times.unsqueeze(1)  # [batch, num_times, num_doses]
-    #         gauss = torch.exp(-(diff / sigma)**2) * masked_amounts.unsqueeze(1)
-    #         mask_nonnegative = diff >= 0
-    #         pulse = gauss * mask_nonnegative.float()
-    
-    #         # Zero out contributions for batches with no doses
-    #         pulse = pulse * has_dose.unsqueeze(-1).unsqueeze(-1).float()
-    
-    #         # Sum over doses
-    #         dose_signal[:, drug_id - 1] = pulse.sum(dim=-1).squeeze()
-         
-    #     return dose_signal
-
-
-        
     def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
         """
-        Compute dose signal per drug using interleaved dose arrays and EVID codes.
+        Compute dose signal per drug using Gaussian pulses.
+        Zero contribution if no doses exist for that individual/drug.
+        Output: [batch, n_drugs]
         """
-        sigma=self.get_sigma()
+        sigma = self.get_sigma()
         batch_size = evid.size(0)
+        n_times = t.size(1) if t.dim() > 1 else 1
         device = t.device
-       # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-        
-        diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
-        mask_nonnegative = diff >= 0
+        dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+    
+        # Ensure t has shape [batch, num_times]
+        if t.dim() == 1:
+            t = t.unsqueeze(0).repeat(batch_size, 1)  # [batch, num_times]
+    
+        for drug_id in range(1, n_drugs + 1):
+            # Mask doses for this drug
+            mask = (evid == drug_id)  # [batch, num_doses]
+            masked_times = dose_times * mask.float()
+            masked_amounts = dose_amounts * mask.float()
+    
+            # Identify which batch elements actually have doses
+            has_dose = mask.any(dim=1)  # [batch]
+    
+            if not has_dose.any():
+                continue
+    
+            # Compute Gaussian pulse
+            diff = t.unsqueeze(-1) - masked_times.unsqueeze(1)  # [batch, num_times, num_doses]
+            gauss = torch.exp(-(diff / sigma)**2) * masked_amounts.unsqueeze(1)
+            mask_nonnegative = diff >= 0
+            pulse = gauss * mask_nonnegative.float()
+    
+            # Zero out contributions for batches with no doses
+            pulse = pulse * has_dose.unsqueeze(-1).unsqueeze(-1).float()
+    
+            # Sum over doses
+            dose_signal[:, drug_id - 1] = pulse.sum(dim=-1).squeeze()
+         
+        return dose_signal
 
-        gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
+
+        
+    # def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
+    #     """
+    #     Compute dose signal per drug using interleaved dose arrays and EVID codes.
+    #     """
+    #     sigma=self.get_sigma()
+    #     batch_size = evid.size(0)
+    #     device = t.device
+    #    # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+        
+    #     diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
+    #     mask_nonnegative = diff >= 0
+
+    #     gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
    
         
         
      
-        dose_signal=gauss*mask_nonnegative
-        #print(dose_signal.sum(1),t )
+    #     dose_signal=gauss*mask_nonnegative
+    #     #print(dose_signal.sum(1),t )
     
-        return dose_signal.sum(1)       
+    #     return dose_signal.sum(1)       
                 
                     
             
@@ -191,18 +193,12 @@ class ODEFunc(nn.Module):
         
         # Concatenate latent state and dose
       
-        if dose_input.dim() == 1:
-         dose_input = dose_input.unsqueeze(1)
+        # if dose_input.dim() == 1:
+        #  dose_input = dose_input.unsqueeze(1)
        
-      #  mask = torch.ones_like(x)
-       # mask[:, 2] = 0
-       # print(mask)
-      #  x=x*mask
-     #   print(x)
-        t = torch.full((batch_size, 1), t, device=x.device)
       
-
         inp1 = torch.cat([x, self.drug (dose_input)], dim=1)
+      #  print(x)
     #    inp1 = torch.cat([x, bolus_signal], dim=1)
         #inp1 = x
       #  inp2 = torch.cat([x, dose_input], dim=1)
@@ -385,7 +381,7 @@ class Encoder_Transformer_Full(nn.Module):
         super().__init__()
         self.latent_dim = latent_dim
         self.parameter_dim = parameter_dim
-        total_parameters=parameter_dim + latent_dim
+        total_parameters=parameter_dim
         self.total_parameters=total_parameters
         self.cov_diag_epsilon = cov_diag_epsilon
         self.diagonal_only = diagonal_only
@@ -423,9 +419,18 @@ class Encoder_Transformer_Full(nn.Module):
         
                
         # NODE initial condition
-        self.z0_mu =nn.Linear(1, latent_dim) 
-        nn.init.constant_(self.z0_mu.weight, 1)
-        nn.init.constant_(self.z0_mu.bias, 0.0)
+        self.z0_mu = nn.Parameter(torch.zeros(latent_dim))
+       # self.z0_mu = nn.Linear(1, latent_dim)
+
+
+        
+        self.z0_iiv = nn.Sequential(
+            nn.Linear(parameter_dim+latent_dim, hidden_dim),
+             nn.SELU(),
+            nn.Linear(hidden_dim, latent_dim)
+        )
+        
+ 
         
         # Learnable prior parameters
         if learn_prior_mean:
@@ -488,7 +493,7 @@ class Encoder_Transformer_Full(nn.Module):
         return mu_p, L_p
 
 
-    def forward(self, t, x, dose, mask=None):
+    def forward(self, t, x, dose, only_median=False, mask=None):
         B, T = t.shape
         if mask is None:
             mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
@@ -523,13 +528,22 @@ class Encoder_Transformer_Full(nn.Module):
         k_params = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
 
         # NODE initial condition
-        #z0 = self.z0_mu.unsqueeze(0).expand(B, -1)
-      #  z0 = self.z0_mu(dose[:, :1])
+        # if dose is not None and dose.shape[1] > 0:
+        #     z0_median = self.z0_mu(dose[:, :1])  # take first column
+        # else:
+        #     z0_median = self.z0_mu(torch.zeros(B, 1, device=t.device))  # fallback to zeros
+        z0_median = self.z0_mu.unsqueeze(0).expand(B, -1)  # shape: (B, latent_dim)
+
+        if only_median:
+            k_params=k_params*0
+       
+        inp1 = torch.cat([z0_median, k_params], dim=1)
+        z0=self.z0_iiv(inp1)
 
         # Prior
         mu_p, L_p = self.get_prior(batch_size=B)
 
-        return k_params, mu_q, mu_q, L_q, mu_p, L_p
+        return k_params, z0, mu_q, L_q, mu_p, L_p
 
 
 
