@@ -3,36 +3,8 @@
 Created on Sat Sep 20 07:10:20 2025
 @author: Baaz
 """
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
-import gc
-import torch
-import numpy as np
-import math
-
-from scipy.stats import norm
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from torch.utils.data import DataLoader
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import norm
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import norm
-
-
 # ===== Standard Library =====
+import os
 import math
 import gc
 import ast
@@ -42,18 +14,17 @@ from itertools import combinations
 # ===== Third-Party Libraries =====
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score
 import torch
 from torch.utils.data import DataLoader, Subset
 from torch.nn.utils.rnn import pad_sequence
-
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from matplotlib.lines import Line2D
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score
-from scipy.stats import norm
 import os
 
 # ===== Local Project Imports =====
@@ -336,7 +307,7 @@ def plot_individual_fits(
     reducer = models['reducer']
     noise = models['noise']
     collate_fn = make_collate_fn(dataset.global_max_len)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
 
     fig, axes = plt.subplots(nr_row, nr_col, figsize=(5*nr_col, 4*nr_row))
     axes = axes.flatten() if nr_row*nr_col > 1 else [axes]
@@ -369,7 +340,7 @@ def plot_individual_fits(
         
         with use_ema(encoder):# if use_ema_models else contextmanager(lambda: (yield))():  
             for _ in range(n_samples):
-                k_param_samples, _, _, _,_,_ = encode_latent(
+                k_param_samples,_, _, _, _,_,_ = encode_latent(
                     encoder, t_encoder, x_encoder_norm,dose_tensor,
                     enable_vae=enable_vae,
                     enable_ae=enable_ae,
@@ -803,7 +774,7 @@ def plot_encoder_histograms(
 
                 # Encode latent with EMA weights
                 with use_ema(encoder):
-                    k_param, mu_q, L_q, mu_p, L_p, _ = encode_latent(
+                    k_param,_, mu_q, L_q, mu_p, L_p, _ = encode_latent(
                         encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=True, enable_ae=False, enable_onlymedian=False
                     )
@@ -1510,7 +1481,7 @@ def plot_single_model_encoders_and_regression(
                             t_dense, global_mean, global_std
                         )
 
-                    _, mu_q, logvar_q, _,_,_ = encode_latent(
+                    _, z0, mu_q, logvar_q, _,_,_ = encode_latent(
                         encoder, t_padded, x_encoder_norm,dose_tensor,
                         enable_vae=False, enable_ae=True, enable_onlymedian=False
                     )
@@ -1911,7 +1882,7 @@ def generate_plot_data(
 
                 # === Encode latent ===
                 with use_ema(encoder):
-                    k_param, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
+                    k_param,z0, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
                         encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=enable_vae,
                         enable_ae=enable_ae,
@@ -1922,11 +1893,13 @@ def generate_plot_data(
                              B, D = mu_p.shape
                              eps = torch.randn(B, D, device=mu_p.device)
                              k_param = mu_p + torch.einsum('bij,bj->bi', L_p, eps) 
+                             k_param=torch.cat([z0, k_param ], dim=-1)   
+
                              cov_p = L_p @ L_p.transpose(-1, -2)
                            #  print(cov_p)
                              std = torch.sqrt(torch.diagonal(cov_p, dim1=-2, dim2=-1))  # [B, D]
                              corr_p = cov_p / std.unsqueeze(-1) / std.unsqueeze(-2)
-                            
+                             
                             # Print first batch
                         #     print(corr_p[0])
                                                  
@@ -2528,7 +2501,7 @@ def vpc(func_med,
         ax.plot(data["time_hours_data"], data["median_data"], label="Raw median", color="orange", linewidth=2)
         ax.plot(data["time_hours_data"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--", linewidth=2)
         
-        ax.set_xlim(0, 48)
+        ax.set_xlim(0, 16)
         # ax.set_ylim(0, 180)
         ax.set_title(f"Treatment {data['treatment']}", fontsize=32, fontweight='bold')
         ax.set_xlabel("Time (hours)", fontsize=24)

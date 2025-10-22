@@ -106,71 +106,71 @@ class ODEFunc(nn.Module):
             masks.append(mask)
         return masks
 
-    def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
-        """
-        Compute dose signal per drug using Gaussian pulses.
-        Zero contribution if no doses exist for that individual/drug.
-        Output: [batch, n_drugs]
-        """
-        sigma = self.get_sigma()
-        batch_size = evid.size(0)
-        n_times = t.size(1) if t.dim() > 1 else 1
-        device = t.device
-        dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-    
-        # Ensure t has shape [batch, num_times]
-        if t.dim() == 1:
-            t = t.unsqueeze(0).repeat(batch_size, 1)  # [batch, num_times]
-    
-        for drug_id in range(1, n_drugs + 1):
-            # Mask doses for this drug
-            mask = (evid == drug_id)  # [batch, num_doses]
-            masked_times = dose_times * mask.float()
-            masked_amounts = dose_amounts * mask.float()
-    
-            # Identify which batch elements actually have doses
-            has_dose = mask.any(dim=1)  # [batch]
-    
-            if not has_dose.any():
-                continue
-    
-            # Compute Gaussian pulse
-            diff = t.unsqueeze(-1) - masked_times.unsqueeze(1)  # [batch, num_times, num_doses]
-            gauss = torch.exp(-(diff / sigma)**2) * masked_amounts.unsqueeze(1)
-            mask_nonnegative = diff >= 0
-            pulse = gauss * mask_nonnegative.float()
-    
-            # Zero out contributions for batches with no doses
-            pulse = pulse * has_dose.unsqueeze(-1).unsqueeze(-1).float()
-    
-            # Sum over doses
-            dose_signal[:, drug_id - 1] = pulse.sum(dim=-1).squeeze()
-         
-        return dose_signal
-
-
-        
     # def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
     #     """
-    #     Compute dose signal per drug using interleaved dose arrays and EVID codes.
+    #     Compute dose signal per drug using Gaussian pulses.
+    #     Zero contribution if no doses exist for that individual/drug.
+    #     Output: [batch, n_drugs]
     #     """
-    #     sigma=self.get_sigma()
+    #     sigma = self.get_sigma()
     #     batch_size = evid.size(0)
+    #     n_times = t.size(1) if t.dim() > 1 else 1
     #     device = t.device
-    #    # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
-        
-    #     diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
-    #     mask_nonnegative = diff >= 0
+    #     dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+    
+    #     # Ensure t has shape [batch, num_times]
+    #     if t.dim() == 1:
+    #         t = t.unsqueeze(0).repeat(batch_size, 1)  # [batch, num_times]
+    
+    #     for drug_id in range(1, n_drugs + 1):
+    #         # Mask doses for this drug
+    #         mask = (evid == drug_id)  # [batch, num_doses]
+    #         masked_times = dose_times * mask.float()
+    #         masked_amounts = dose_amounts * mask.float()
+    
+    #         # Identify which batch elements actually have doses
+    #         has_dose = mask.any(dim=1)  # [batch]
+    
+    #         if not has_dose.any():
+    #             continue
+    
+    #         # Compute Gaussian pulse
+    #         diff = t.unsqueeze(-1) - masked_times.unsqueeze(1)  # [batch, num_times, num_doses]
+    #         gauss = torch.exp(-(diff / sigma)**2) * masked_amounts.unsqueeze(1)
+    #         mask_nonnegative = diff >= 0
+    #         pulse = gauss * mask_nonnegative.float()
+    
+    #         # Zero out contributions for batches with no doses
+    #         pulse = pulse * has_dose.unsqueeze(-1).unsqueeze(-1).float()
+    
+    #         # Sum over doses
+    #         dose_signal[:, drug_id - 1] = pulse.sum(dim=-1).squeeze()
+         
+    #     return dose_signal
 
-    #     gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
+
+        
+    def bolus_pulse(self, t, dose_times, dose_amounts, dose_mask, evid, n_drugs):
+        """
+        Compute dose signal per drug using interleaved dose arrays and EVID codes.
+        """
+        sigma=self.get_sigma()
+        batch_size = evid.size(0)
+        device = t.device
+       # dose_signal = torch.zeros(batch_size, n_drugs, device=device)
+        
+        diff = t.unsqueeze(-1) - dose_times  # [batch, num_times, num_doses]
+        mask_nonnegative = diff >= 0
+
+        gauss = torch.exp(-(diff / sigma)**2) * dose_amounts
    
         
         
      
-    #     dose_signal=gauss*mask_nonnegative
-    #     #print(dose_signal.sum(1),t )
-    
-    #     return dose_signal.sum(1)       
+        dose_signal=gauss*mask_nonnegative
+        #print(dose_signal.sum(1),t )
+      
+        return dose_signal.sum(1)       
                 
                     
             
@@ -193,9 +193,11 @@ class ODEFunc(nn.Module):
         
         # Concatenate latent state and dose
       
-        # if dose_input.dim() == 1:
-        #  dose_input = dose_input.unsqueeze(1)
+        if dose_input.dim() == 1:
+         dose_input = dose_input.unsqueeze(1)
        
+        t=t+torch.zeros(batch_size, 1, device=device)
+        x[:, -1] = 0
       
         inp1 = torch.cat([x, self.drug (dose_input)], dim=1)
       #  print(x)
@@ -205,7 +207,7 @@ class ODEFunc(nn.Module):
         
         # Deep network + skip connection
         dxdt_deep = self.net(inp1)
-        dxdt_skip = self.skip(inp1)
+       # dxdt_skip = self.skip(inp1)
         dxdt = dxdt_deep
        
         # Concatenate zeros for parameter dimensions
@@ -370,7 +372,7 @@ class PositionalEncoding(nn.Module):
                 
 
 
-
+import torch.nn.init as init
 
 
 class Encoder_Transformer_Full(nn.Module):
@@ -408,8 +410,22 @@ class Encoder_Transformer_Full(nn.Module):
 
         # Posterior mean
         self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_mu2 = nn.Linear(hidden_dim, total_parameters)
-   
+        self.fc_mu2 = nn.Linear(hidden_dim, total_parameters//2)
+        
+        self.fc_mu11 = nn.Linear(model_dim, hidden_dim)
+        self.fc_mu22 = nn.Linear(hidden_dim, total_parameters//2)
+        
+                # initialization
+        # init.normal_(self.fc_mu1.weight, mean=0.0, std=0.05)
+        # init.normal_(self.fc_mu2.weight, mean=0.0, std=0.05)
+        # init.normal_(self.fc_mu11.weight, mean=0.0, std=0.05)
+        # init.normal_(self.fc_mu22.weight, mean=0.0, std=0.05)
+        
+        # self.fc_mu1.bias.data.zero_()
+        # self.fc_mu2.bias.data.zero_()
+        # self.fc_mu22.bias.data.zero_()
+        # self.fc_mu11.bias.data.zero_()
+        
         # Posterior covariance
         self.fc_A1 = nn.Linear(model_dim, hidden_dim)
         self.fc_A2 = nn.Linear(hidden_dim, total_parameters * total_parameters)
@@ -417,7 +433,8 @@ class Encoder_Transformer_Full(nn.Module):
         with torch.no_grad():
             self.fc_A2.bias.copy_(torch.eye(total_parameters).flatten())
         
-               
+        nn.init.normal_(self.fc_A2.weight, std=0.1)
+     
         # NODE initial condition
         self.z0_mu = nn.Parameter(torch.zeros(latent_dim))
        # self.z0_mu = nn.Linear(1, latent_dim)
@@ -425,26 +442,30 @@ class Encoder_Transformer_Full(nn.Module):
 
         
         self.z0_iiv = nn.Sequential(
-            nn.Linear(parameter_dim+latent_dim, hidden_dim),
-             nn.SELU(),
-            nn.Linear(hidden_dim, latent_dim)
+            nn.Linear(parameter_dim+latent_dim, latent_dim)
         )
         
  
-        
+        self.fc_first1 = nn.Linear(2, 1)
+     #   self.fc_first2 = nn.Linear(model_dim, 1)
+
         # Learnable prior parameters
         if learn_prior_mean:
-            self.mu_p = nn.Parameter(torch.zeros(total_parameters))
+           self.mu_p = nn.Parameter(torch.zeros(total_parameters))
         else:
-            self.register_buffer("mu_p", torch.zeros(total_parameters))
+           self.register_buffer("mu_p", torch.zeros(total_parameters))
 
         if learn_prior_covariance:
-            init_std = 0.01
-            self.prior_A = nn.Parameter(
-                torch.eye(total_parameters) + torch.randn(total_parameters, total_parameters) * init_std
-            )
+           init_std = 0.01
+           self.prior_A = nn.Parameter(
+               torch.eye(total_parameters) + torch.randn(total_parameters, total_parameters) * init_std
+           )
         else:
-            self.register_buffer("prior_A", torch.zeros(total_parameters, total_parameters))
+           self.register_buffer("prior_A", torch.zeros(total_parameters, total_parameters))
+
+       # Track if priors are currently frozen
+        self._prior_frozen = False
+       
         for name, param in self.named_parameters():
             self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
         self.register_buffer("iteration", torch.tensor(1.0))
@@ -492,28 +513,70 @@ class Encoder_Transformer_Full(nn.Module):
     
         return mu_p, L_p
 
+    def freeze_prior_until(self, current_epoch, freeze_epochs=10):
+        """Freeze the prior for the first `freeze_epochs` epochs."""
+        should_freeze = current_epoch < freeze_epochs
 
+        if should_freeze and not self._prior_frozen:
+            if hasattr(self, "mu_p") and isinstance(self.mu_p, nn.Parameter):
+                self.mu_p.requires_grad_(False)
+            if hasattr(self, "prior_A") and isinstance(self.prior_A, nn.Parameter):
+                self.prior_A.requires_grad_(False)
+            self._prior_frozen = True
+
+        elif not should_freeze and self._prior_frozen:
+            if hasattr(self, "mu_p") and isinstance(self.mu_p, nn.Parameter):
+                self.mu_p.requires_grad_(True)
+            if hasattr(self, "prior_A") and isinstance(self.prior_A, nn.Parameter):
+                self.prior_A.requires_grad_(True)
+            self._prior_frozen = False
+            
     def forward(self, t, x, dose, only_median=False, mask=None):
         B, T = t.shape
         if mask is None:
             mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
-
-        # Encode
-        inp = torch.stack([t, x], dim=-1)
-        h = self.input_proj(inp)
-        h = self.pos_encoder(h)
-        h_enc = self.transformer(h, src_key_padding_mask=~mask)
-
-        # Masked pooling
-        valid_counts = mask.sum(dim=1, keepdim=True).clamp(min=1)
-        pooled = (h_enc * mask.unsqueeze(-1)).sum(dim=1) / valid_counts
-        pooled += torch.randn_like(pooled)  # tiny noise to break symmetry
-
-        # Posterior mean
-        mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
-
-        # Posterior covariance
-        A_q_flat = self.fc_A2(self.selu(self.fc_A1(pooled)))
+            
+          # ===== Split the sequence =====
+         # ===== Split inputs =====
+        t_first, x_first = t[:, :1], x[:, :1]
+        t_rest,  x_rest  = t[:, 1:], x[:, 1:]
+        mask_rest = mask[:, 1:]
+    
+        # ===== Encode first timepoint =====
+        inp_first = torch.stack([t_first, x_first], dim=-1).squeeze(1)  # [B, 2]
+        #h_first = self.selu(self.fc_first1(inp_first))
+        
+      
+        
+        mu_q_1 = self.fc_first1(inp_first)
+        
+  
+        
+        # ===== Encode rest of sequence =====
+        inp_rest = torch.stack([t_rest, x_rest], dim=-1)      # [B, T-1, 2]
+        h_rest = self.input_proj(inp_rest)
+        h_rest = self.pos_encoder(h_rest)
+        h_rest = self.transformer(h_rest, src_key_padding_mask=~mask_rest)
+        valid_counts = mask_rest.sum(dim=1, keepdim=True).clamp(min=1)
+        pooled_rest = (h_rest * mask_rest.unsqueeze(-1)).sum(dim=1) / valid_counts
+        pooled_rest += torch.randn_like(pooled_rest) * 1e-5
+    
+        # ===== Encode all timepoints (for A_q) =====
+        inp_all = torch.stack([t, x], dim=-1)                 # [B, T, 2]
+        h_all = self.input_proj(inp_all)
+        h_all = self.pos_encoder(h_all)
+        h_all = self.transformer(h_all, src_key_padding_mask=~mask)
+        valid_counts_all = mask.sum(dim=1, keepdim=True).clamp(min=1)
+        pooled_all = (h_all * mask.unsqueeze(-1)).sum(dim=1) / valid_counts_all
+    
+        # ===== Posterior means (two independent paths) =====
+       # mu_q_1 = self.fc_mu2(self.selu(self.fc_mu1(pooled_first)))  # [B, D]
+        mu_q_2 = self.fc_mu22(self.selu(self.fc_mu11(pooled_rest)))   # [B, D]
+        mu_q = torch.cat([mu_q_1, mu_q_2], dim=-1)                  # [B, 2*D]
+        
+    
+        # ===== Posterior covariance (from full pooled encoding) =====
+        A_q_flat = self.fc_A2(self.selu(self.fc_A1(pooled_all)))    # [B, D_flat]
         A_q = A_q_flat.view(B, self.total_parameters, self.total_parameters)
 
         if self.diagonal_only:
@@ -538,6 +601,7 @@ class Encoder_Transformer_Full(nn.Module):
             k_params=k_params*0
        
         inp1 = torch.cat([z0_median, k_params], dim=1)
+        inp1[:, -2] = 0
         z0=self.z0_iiv(inp1)
 
         # Prior
@@ -556,746 +620,6 @@ class Encoder_Transformer_Full(nn.Module):
 
 
 
-
-
-
-# class Encoder_Transformer_Full(nn.Module):
-#     def __init__(self, latent_dim, parameter_dim, input_dim=2, model_dim=64,
-#                  hidden_dim=64, num_heads=4, num_layers=2, dropout=0.1,
-#                  cov_diag_epsilon=1e-5, learn_prior_mean=True,
-#                  learn_prior_covariance=True):
-#         super().__init__()
-#         self.latent_dim = latent_dim
-#         self.cov_diag_epsilon = cov_diag_epsilon
-#         self.selu = nn.SELU()
-
-#         # Positional encoding
-#         self.pos_encoder = PositionalEncoding(model_dim)
-
-#         # Input projection
-#         self.input_proj = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim),
-#             nn.SELU(),
-#             nn.Linear(hidden_dim, model_dim)
-#         )
-
-#         # Transformer encoder
-#         encoder_layer = nn.TransformerEncoderLayer(
-#             d_model=model_dim, nhead=num_heads,
-#             dim_feedforward=model_dim * 4, dropout=dropout, batch_first=True
-#         )
-#         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-#         # Output layers for posterior mean
-#         self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
-#         self.fc_mu2 = nn.Linear(hidden_dim, latent_dim)
-#         nn.init.zeros_(self.fc_mu2.weight)
-#         nn.init.zeros_(self.fc_mu2.bias)
-
-        # Output layers for posterior full covariance (A_q)
-        # self.fc_A1 = nn.Linear(model_dim, hidden_dim)
-        # self.fc_A2 = nn.Linear(hidden_dim, latent_dim * latent_dim)
-        # nn.init.zeros_(self.fc_A2.weight)
-        # nn.init.zeros_(self.fc_A2.bias)
-        # eye = torch.eye(latent_dim).flatten()  # shape: [latent_dim*latent_dim]
-
-        # with torch.no_grad():
-        #     nn.init.zeros_(self.fc_A2.weight)
-        #     self.fc_A2.bias.copy_(torch.eye(latent_dim).flatten())
-
-#         # ---- Learnable prior parameters ----
-#         if learn_prior_mean:
-#             self.mu_p = nn.Parameter(torch.zeros(latent_dim))
-#         else:
-#             self.register_buffer("mu_p", torch.zeros(latent_dim))
-
-#         if learn_prior_covariance:
-#             # Prior A matrix: initialize close to identity
-#             init_std = 0.01
-#             self.prior_A = nn.Parameter(
-#                 torch.eye(latent_dim) + torch.randn(latent_dim, latent_dim) * init_std
-#             )
-#         else:
-#             self.register_buffer("prior_A", torch.zeros(latent_dim, latent_dim))
-
-#     # ----- Prior computation -----
-#     def get_prior(self, batch_size=None):
-#         """
-#         Build full prior covariance using Sigma_p = A A^T + eps * I
-#         """
-#         D = self.latent_dim
-#         device = self.prior_A.device
-
-#         Sigma_p = self.prior_A @ self.prior_A.T + self.cov_diag_epsilon * torch.eye(D, device=device)
-#         L_p = torch.linalg.cholesky(Sigma_p)
-
-#         if batch_size is not None:
-#             L_p = L_p.unsqueeze(0).expand(batch_size, -1, -1)
-#             mu_p = self.mu_p.unsqueeze(0).expand(batch_size, -1)
-#         else:
-#             mu_p = self.mu_p
-
-#         return mu_p, L_p
-
-#     # ----- Forward -----
-#     def forward(self, t, x, mask=None):
-#         B, T = t.shape
-#         if mask is None:
-#             mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
-
-#         # Combine inputs
-#         inp = torch.stack([t, x], dim=-1)  # [B, T, 2]
-#         h = self.input_proj(inp)
-#         h = self.pos_encoder(h)
-
-#         # Transformer encoding with masking
-#         h_enc = self.transformer(h, src_key_padding_mask=~mask)
-
-#         # Pool over time (masked mean)
-#         valid_counts = mask.sum(dim=1, keepdim=True).clamp(min=1)
-#         pooled = (h_enc * mask.unsqueeze(-1)).sum(dim=1) / valid_counts
-
-#         # Posterior mean
-#         mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
-
-#         # Posterior covariance: Sigma_q = A_q A_q^T + eps * I
-#         A_q_flat = self.fc_A2(self.selu(self.fc_A1(pooled)))  # [B, D*D]
-#         A_q = A_q_flat.view(B, self.latent_dim, self.latent_dim)
-#         Sigma_q = torch.matmul(A_q, A_q.transpose(-1, -2)) + self.cov_diag_epsilon * torch.eye(self.latent_dim, device=A_q.device)
-#         L_q = torch.linalg.cholesky(Sigma_q)
-
-#         # Sample latent
-#         eps = torch.randn(B, self.latent_dim, device=mu_q.device)
-#         z = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
-
-#         # Prior
-#         mu_p, L_p = self.get_prior(batch_size=B)
-
-#         return z, mu_q, L_q, mu_p, L_p
-
-
-
-
-# class Encoder_Transformer_Full(nn.Module):
-#     def __init__(self, latent_dim, input_dim=2, model_dim=64,
-#                  hidden_dim=64, num_heads=4, num_layers=2, dropout=0.1,
-#                  cov_diag_epsilon=1e-5, learn_prior_mean=True,
-#                  learn_prior_variance=True, learn_prior_covariance=True):
-#         super().__init__()
-#         self.latent_dim = latent_dim
-#         self.cov_diag_epsilon = cov_diag_epsilon
-#         self.selu = nn.SELU()
-
-#         # Positional encoding
-#         self.pos_encoder = PositionalEncoding(model_dim)
-
-#         # Input projection
-#         self.input_proj = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim),
-#             nn.SELU(),
-#             nn.Linear(hidden_dim, model_dim)
-#         )
-
-#         # Transformer encoder
-#         encoder_layer = nn.TransformerEncoderLayer(
-#             d_model=model_dim, nhead=num_heads,
-#             dim_feedforward=model_dim * 4, dropout=dropout, batch_first=True
-#         )
-#         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-#         # Output layers for mean
-#         self.fc_mu1 = nn.Linear(model_dim, hidden_dim)
-#         self.fc_mu2 = nn.Linear(hidden_dim, latent_dim)
-
-#         # Output layers for full covariance
-#         n_tril = latent_dim * (latent_dim + 1) // 2
-#         self.fc_cov1 = nn.Linear(model_dim, hidden_dim)
-#         self.fc_cov2 = nn.Linear(hidden_dim, n_tril)
-
-#         # Learnable priors
-#         if learn_prior_mean:
-#             self.mu_p = nn.Parameter(torch.zeros(latent_dim))
-#         else:
-#             self.register_buffer("mu_p", torch.zeros(latent_dim))
-
-#         if learn_prior_variance:
-#             self.prior_diag_unconstrained = nn.Parameter(torch.zeros(latent_dim))
-#         else:
-#             self.register_buffer(
-#                 "prior_diag_unconstrained",
-#                 torch.full((latent_dim,), torch.log(torch.exp(torch.tensor(1.0)) - 1.0))
-#             )
-
-#         if learn_prior_covariance:
-#             self.prior_subdiag = nn.Parameter(torch.zeros(latent_dim * (latent_dim - 1) // 2))
-#         else:
-#             self.register_buffer("prior_subdiag", torch.zeros(latent_dim * (latent_dim - 1) // 2))
-
-#     # ----- Cholesky helper -----
-#     def _build_cholesky_from_tril(self, tril_flat, latent_dim):
-#         B = tril_flat.shape[0]
-#         L = torch.zeros(B, latent_dim, latent_dim, device=tril_flat.device)
-#         idx = 0
-#         for i in range(latent_dim):
-#             for j in range(i + 1):
-#                 val = tril_flat[:, idx]
-#                 if i == j:
-#                     val = F.softplus(val) + self.cov_diag_epsilon
-#                 L[:, i, j] = val
-#                 idx += 1
-#         return L
-
-#     # ----- Prior -----
-#     def get_prior_cholesky(self):
-#         D = self.latent_dim
-#         L_p = torch.zeros(D, D, device=self.prior_subdiag.device)
-#         tril_idx = torch.tril_indices(D, D, offset=-1)
-#         L_p[tril_idx[0], tril_idx[1]] = self.prior_subdiag
-#         diag = F.softplus(self.prior_diag_unconstrained) + self.cov_diag_epsilon
-#         L_p = L_p + torch.diag(diag)
-#         return L_p.unsqueeze(0)
-
-#     def get_prior(self, batch_size=None):
-#         L_p = self.get_prior_cholesky()
-#         mu_p = self.mu_p.unsqueeze(0)
-#         if batch_size is not None:
-#             L_p = L_p.expand(batch_size, -1, -1)
-#             mu_p = mu_p.expand(batch_size, -1)
-#         return mu_p, L_p
-
-#     # ----- Forward -----
-#     def forward(self, t, x, mask=None):
-#         B, T = t.shape
-#         if mask is None:
-#             mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
-
-#         # Combine inputs
-#         inp = torch.stack([t, x], dim=-1)  # [B, T, 2]
-#         h = self.input_proj(inp)
-#         h = self.pos_encoder(h)
-
-#         # Transformer encoding with masking
-#         h_enc = self.transformer(h, src_key_padding_mask=~mask)
-
-#         # Pool over time (masked mean)
-#         valid_counts = mask.sum(dim=1, keepdim=True).clamp(min=1)
-#         pooled = (h_enc * mask.unsqueeze(-1)).sum(dim=1) / valid_counts
-
-#         # Mean
-#         mu_q = self.fc_mu2(self.selu(self.fc_mu1(pooled)))
-
-#         # Covariance
-#         tril_flat = self.fc_cov2(self.selu(self.fc_cov1(pooled)))
-#         L_q = self._build_cholesky_from_tril(tril_flat, self.latent_dim)
-
-#         # Sample latent
-#         eps = torch.randn(B, self.latent_dim, device=mu_q.device)
-#         z = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
-
-#         # Prior
-#         mu_p, L_p = self.get_prior(batch_size=B)
-#         return z, mu_q, L_q, mu_p, L_p
-
-
-class Encoder_Transformer(nn.Module):
-    def __init__(self, latent_dim, input_dim=2, model_dim=64,
-                 hidden_dim=64, num_heads=4, num_layers=2, dropout=0.1,
-                 cov_diag_epsilon=1e-5,
-                 learn_prior_mean=True,
-                 learn_prior_variance=True,
-                 learn_prior_covariance=True):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.cov_diag_epsilon = cov_diag_epsilon
-        self.selu = nn.SELU()
-        self.pos_encoder = PositionalEncoding(model_dim)
-
-        # ---------- REST OF SEQUENCE ENCODER ----------
-        self.input_proj1_rest = nn.Linear(input_dim, hidden_dim)
-        self.input_proj2_rest = nn.Linear(hidden_dim, model_dim)
-        encoder_layer_rest = nn.TransformerEncoderLayer(
-            d_model=model_dim, nhead=num_heads,
-            dim_feedforward=model_dim * 4, dropout=dropout, batch_first=True
-        )
-        self.transformer_rest = nn.TransformerEncoder(encoder_layer_rest, num_layers=num_layers)
-        self.fc_mu1_rest = nn.Linear(model_dim, hidden_dim)
-        self.fc_mu2_rest = nn.Linear(hidden_dim, latent_dim - 2)
-        self.fc_cov1_rest = nn.Linear(model_dim, hidden_dim)
-        n_tril_rest = (latent_dim - 2) * (latent_dim - 1) // 2
-        self.fc_cov2_rest = nn.Linear(hidden_dim, n_tril_rest)
-
-        # ---------- SIMPLIFIED FIRST OBSERVATION ENCODER ----------
-        self.fc_first_mu1 = nn.Linear(input_dim, hidden_dim)
-        self.fc_first_mu2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc_first_mu_out = nn.Linear(hidden_dim, 2)
-
-        self.fc_first_cov1 = nn.Linear(input_dim, hidden_dim)
-        self.fc_first_cov2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc_first_cov_out = nn.Linear(hidden_dim, 3)
-
-        # ---------- Learnable priors ----------
-        # Mean
-        # ---------- Learnable priors (mean, variance, covariance) ----------
-        # ---------- Learnable priors (mean, variance, covariance) ----------
-        if learn_prior_mean:
-            self.mu_p = nn.Parameter(torch.zeros(latent_dim))
-        else:
-            self.register_buffer("mu_p", torch.zeros(latent_dim))
-        
-        if learn_prior_variance:
-            self.prior_diag_unconstrained = nn.Parameter(torch.zeros(latent_dim))
-            nn.init.normal_(self.prior_diag_unconstrained, mean=0.0, std=1e-3)
-        else:
-            # value so that softplus(x) ≈ 1 → var = 1
-            self.register_buffer(
-                "prior_diag_unconstrained",
-                torch.full((latent_dim,), torch.log(torch.exp(torch.tensor(1.0)) - 1.0))
-            )
-        
-        if learn_prior_covariance:
-            self.prior_subdiag = nn.Parameter(torch.zeros(latent_dim * (latent_dim - 1) // 2))
-            nn.init.normal_(self.prior_subdiag, mean=0.0, std=1e-3)
-        else:
-            self.register_buffer("prior_subdiag", torch.zeros(latent_dim * (latent_dim - 1) // 2))
-
-
-
-    # ---------- Helper functions (same as before) ----------
-    def get_prior_cholesky(self):
-        D = self.latent_dim
-        L_p = torch.zeros(D, D, device=self.prior_subdiag.device)
-        tril_idx = torch.tril_indices(D, D, offset=-1)
-        L_p[tril_idx[0], tril_idx[1]] = self.prior_subdiag
-        diag = F.softplus(self.prior_diag_unconstrained) + self.cov_diag_epsilon
-        L_p = L_p + torch.diag(diag)
-        return L_p.unsqueeze(0)
-
-    def get_prior(self, batch_size=None):
-        L_p = self.get_prior_cholesky()
-        mu_p = self.mu_p.unsqueeze(0)
-        if batch_size is not None:
-            L_p = L_p.expand(batch_size, -1, -1)
-            mu_p = mu_p.expand(batch_size, -1)
-        return mu_p, L_p
-
-
-    def _build_cholesky_from_tril(self, tril_flat, latent_dim):
-        B = tril_flat.shape[0]
-        L = torch.zeros(B, latent_dim, latent_dim, device=tril_flat.device)
-        idx = 0
-        for i in range(latent_dim):
-            for j in range(i + 1):
-                val = tril_flat[:, idx]
-                if i == j:
-                    val = F.softplus(val) + self.cov_diag_epsilon
-                L[:, i, j] = val
-                idx += 1
-        return L
-
-    # ---------- Forward ----------
-    def forward(self, t, x, mask=None):
-        B, T = t.shape
-        assert T > 1, "Need at least one 'first' and one 'rest' observation"
-
-        t_first, x_first = t[:, 0:1], x[:, 0:1]
-        t_rest, x_rest = t[:, 1:], x[:, 1:]
-
-        if mask is None:
-            mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
-        mask_first = mask[:, 0:1]
-        mask_rest = mask[:, 1:]
-
-        # ----- FIRST OBSERVATION -----
-        # Prepare input
-        inp_first = torch.cat([t_first, x_first], dim=-1).view(B, -1)  # flatten [B, input_dim]
-        
-        # ----- MU -----
-        h_mu = self.selu(self.fc_first_mu1(inp_first))
-        h_mu = self.selu(self.fc_first_mu2(h_mu))
-        mu_first = self.fc_first_mu_out(h_mu)  # [B,2]
-        
-        # ----- COVARIANCE (Cholesky) -----
-        h_cov = self.selu(self.fc_first_cov1(inp_first))
-        h_cov = self.selu(self.fc_first_cov2(h_cov))
-        tril_first = self.fc_first_cov_out(h_cov)  # [B,3]
-        L_first = self._build_cholesky_from_tril(tril_first, 2)
-
-        # ----- REST OF SEQUENCE -----
-        inp_rest = torch.cat([t_rest.unsqueeze(-1), x_rest.unsqueeze(-1)], dim=-1)
-        h_rest = self.selu(self.input_proj1_rest(inp_rest))
-        h_rest = self.input_proj2_rest(h_rest)
-        h_rest = self.pos_encoder(h_rest)
-        h_enc_rest = self.transformer_rest(h_rest, src_key_padding_mask=~mask_rest)
-        valid_counts = mask_rest.sum(dim=1, keepdim=True).clamp(min=1)
-        pooled_rest = (h_enc_rest * mask_rest.unsqueeze(-1)).sum(dim=1) / valid_counts
-        mu_rest = self.fc_mu2_rest(self.selu(self.fc_mu1_rest(pooled_rest)))
-        tril_rest = self.fc_cov2_rest(self.selu(self.fc_cov1_rest(pooled_rest)))
-        L_rest = self._build_cholesky_from_tril(tril_rest, self.latent_dim - 2)
-
-        # ----- Combine -----
-        mu_q = torch.cat([mu_first, mu_rest], dim=-1)
-        L_q = torch.zeros(B, self.latent_dim, self.latent_dim, device=t.device)
-        L_q[:, :self.latent_dim - 2, :self.latent_dim - 2] = L_first
-        L_q[:, -2:, -2:] =  L_rest
-
-        eps = torch.randn(B, self.latent_dim, device=mu_q.device)
-        z = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
-        z = torch.clamp(z, -1e2, 1e2)
-
-        mu_p, L_p = self.get_prior(batch_size=B)
-        return z, mu_q, L_q, mu_p, L_p
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class Encoder_Transformer2(nn.Module):
-    def __init__(self, latent_dim=2, parameter_dim=2, input_dim=2,
-                 model_dim=64, hidden_dim=64, num_heads=4, num_layers=2,
-                 dropout=0.1, cov_diag_epsilon=1e-5, ema_alpha=0.1,
-                 learn_prior=True):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.parameter_dim=parameter_dim
-        
-
-        self.cov_diag_epsilon = cov_diag_epsilon
-        self.selu = nn.SELU()
-        self.ema_alpha = ema_alpha
-        self.pos_encoder = PositionalEncoding(model_dim)
-        self.learn_prior = learn_prior
-
-        # ---------- FIRST OBSERVATION ENCODER ----------
-        self.fc_first = nn.Sequential(
-            nn.Linear(input_dim , hidden_dim),
-            nn.SELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.fc_first_mu = nn.Linear(hidden_dim, latent_dim)
-        
-        n_tril_first = latent_dim * (latent_dim + 1) // 2
-        self.fc_first_cov = nn.Linear(hidden_dim, n_tril_first)
-
-        # ---------- REST OF SEQUENCE ENCODER ----------
-        self.input_proj1_rest = nn.Linear(input_dim, hidden_dim)
-        self.input_proj2_rest = nn.Linear(hidden_dim, model_dim)
-        encoder_layer_rest = nn.TransformerEncoderLayer(
-            d_model=model_dim, nhead=num_heads,
-            dim_feedforward=model_dim * 4, dropout=dropout, batch_first=True
-        )
-        self.transformer_rest = nn.TransformerEncoder(encoder_layer_rest, num_layers=num_layers)
-        self.fc_rest_mu1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_rest_mu2 = nn.Linear(hidden_dim, parameter_dim)
-        n_tril_rest = parameter_dim * (parameter_dim + 1) // 2
-        self.fc_rest_cov1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_rest_cov2 = nn.Linear(hidden_dim, n_tril_rest)
-
-        # ---------- Learnable prior ----------
-        if learn_prior:
-            # Mean stays the same
-            total_dim = self.latent_dim + self.parameter_dim
-
-            self.mu_p = nn.Parameter(torch.zeros(total_dim))
-        
-            # Learnable Cholesky for each block
-            n_tril_first = latent_dim * (latent_dim + 1) // 2
-            n_tril_rest = parameter_dim * (parameter_dim + 1) // 2
-        
-            self.prior_tril_first = nn.Parameter(torch.zeros(n_tril_first))
-            self.prior_tril_rest = nn.Parameter(torch.zeros(n_tril_rest))
-        else:
-            self.register_buffer("mu_p", torch.zeros(self.latent_dim))
-            self.register_buffer("prior_tril_first", torch.zeros(latent_dim * (latent_dim + 1) // 2))
-            self.register_buffer("prior_tril_rest", torch.zeros(parameter_dim * (parameter_dim + 1) // 2))
-
-
-        # ---------- EMA ----------
-        for name, param in self.named_parameters():
-            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
-        self.register_buffer("iteration", torch.tensor(1.0))
-
-    # ---------- EMA ----------
-    def update_ema(self, alpha=None):
-        alpha = alpha if alpha is not None else self.ema_alpha
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                ema_param.mul_(1 - alpha).add_(alpha * param.data)
-                setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
-            self.iteration += 1.0
-
-    def apply_ema_weights(self):
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                param.data.copy_(ema_param)
-
-    # ---------- Utility ----------
-    def _build_cholesky_from_tril(self, tril_flat, latent_dim):
-        B = tril_flat.shape[0]
-        L = torch.zeros(B, latent_dim, latent_dim, device=tril_flat.device)
-        idx = 0
-        for i in range(latent_dim):
-            for j in range(i + 1):
-                val = tril_flat[:, idx]
-                if i == j:
-                    val = F.softplus(val) + self.cov_diag_epsilon
-                L[:, i, j] = val
-                idx += 1
-        return L
-
-    # ---------- Prior ----------
-    def get_prior(self, batch_size=None):
-        L_first = self._build_cholesky_from_tril(
-            self.prior_tril_first.unsqueeze(0), self.latent_dim
-        ).squeeze(0)
-        L_rest = self._build_cholesky_from_tril(
-            self.prior_tril_rest.unsqueeze(0), self.parameter_dim
-        ).squeeze(0)
-        total_dim = self.latent_dim + self.parameter_dim
-
-        # Construct block-diagonal L_p
-        L_p = torch.zeros(total_dim, total_dim, device=L_first.device)  # square
-        L_p[:self.latent_dim, :self.latent_dim] = L_first                 # top-left block
-        L_p[self.latent_dim:, self.latent_dim:] = L_rest                 # bottom-right block
-    
-        mu_p = self.mu_p.unsqueeze(0)
-        if batch_size is not None:
-            L_p = L_p.unsqueeze(0).expand(batch_size, -1, -1)
-            mu_p = mu_p.expand(batch_size, -1)
-    
-        return mu_p, L_p
-
-
-    # ---------- Forward ----------
-    def forward(self, t, x, mask=None):
-        B, T = t.shape
-        assert T > 1, "Need at least one first and one rest observation"
-
-        if mask is None:
-            mask = torch.ones(B, T, dtype=torch.bool, device=t.device)
-
-        # ---------- FIRST OBS ----------
-        t_first, x_first = t[:, 0:1], x[:, 0:1]
-        inp_first = torch.cat([t_first, x_first], dim=-1)  # [B, input_dim+1]
-        h_first = self.fc_first(inp_first)  # pass through fully connected SELU MLP
-        mu_first = self.fc_first_mu(h_first)
-        tril_first = self.fc_first_cov(h_first)
-        L_first = self._build_cholesky_from_tril(tril_first, self.latent_dim)
-
-        # ---------- REST ----------
-        t_rest, x_rest = t[:, 1:], x[:, 1:]
-        mask_rest = mask[:, 1:]
-        inp_rest = torch.cat([t_rest.unsqueeze(-1), x_rest.unsqueeze(-1)], dim=-1)  # [B, T-1, input_dim+1]
-        h_rest = self.selu(self.input_proj1_rest(inp_rest))
-        h_rest = self.selu(self.input_proj2_rest(h_rest))
-        h_rest = self.pos_encoder(h_rest)
-        h_enc_rest = self.transformer_rest(h_rest, src_key_padding_mask=~mask_rest)
-        valid_counts = mask_rest.sum(dim=1, keepdim=True).clamp(min=1)
-        pooled_rest = (h_enc_rest * mask_rest.unsqueeze(-1)).sum(dim=1) / valid_counts
-        mu_rest = self.fc_rest_mu2(self.selu(self.fc_rest_mu1(pooled_rest)))
-        tril_rest = self.fc_rest_cov2(self.selu(self.fc_rest_cov1(pooled_rest)))
-        L_rest = self._build_cholesky_from_tril(tril_rest, self.parameter_dim)
-
-        # ---------- Concatenate ----------
-        total_dim = self.latent_dim + self.parameter_dim
-        mu_q = torch.cat([mu_first, mu_rest], dim=-1)  # [B, total_dim]
-        
-        
-        L_q = torch.zeros(B, total_dim, total_dim, device=t.device)
-        L_q[:, :self.latent_dim, :self.latent_dim] = L_first        # top-left block
-        L_q[:, self.latent_dim:, self.latent_dim:] = L_rest         # bottom-right block
-
-        # ---------- Sample z ----------
-        eps = torch.randn(B, total_dim, device=mu_q.device)
-        z = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
-
-        # ---------- Prior ----------
-        mu_p, L_p = self.get_prior(batch_size=B)
-
-        return z, mu_q, L_q, mu_p, L_p
-
-
-class Encoder_Transformer3(nn.Module):
-    def __init__(self, latent_dim=2, parameter_dim=2, input_dim=2,
-                 model_dim=64, hidden_dim=64, num_heads=4, num_layers=2,
-                 dropout=0.1, cov_diag_epsilon=1e-5, ema_alpha=0.1,
-                 learn_prior=True, prior_rank=1):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.selu = nn.SELU()
-
-        self.parameter_dim = parameter_dim
-        self.total_dim = latent_dim + parameter_dim
-        self.cov_diag_epsilon = cov_diag_epsilon
-        self.ema_alpha = ema_alpha
-        self.pos_encoder = PositionalEncoding(model_dim)
-        self.learn_prior = learn_prior
-        self.prior_rank = prior_rank
-
-        # ---------- FIRST OBSERVATION ENCODER ----------
-        self.fc_first = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.SELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.fc_first_mu = nn.Linear(hidden_dim, latent_dim)
-        n_tril_first = latent_dim * (latent_dim + 1) // 2
-        self.fc_first_cov = nn.Linear(hidden_dim, n_tril_first)
-
-        # ---------- REST OF SEQUENCE ENCODER ----------
-        self.input_proj1_rest = nn.Linear(input_dim, hidden_dim)
-        self.input_proj2_rest = nn.Linear(hidden_dim, model_dim)
-        encoder_layer_rest = nn.TransformerEncoderLayer(
-            d_model=model_dim, nhead=num_heads,
-            dim_feedforward=model_dim*4, dropout=dropout, batch_first=True
-        )
-        self.transformer_rest = nn.TransformerEncoder(encoder_layer_rest, num_layers=num_layers)
-        self.fc_rest_mu1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_rest_mu2 = nn.Linear(hidden_dim, parameter_dim)
-        n_tril_rest = parameter_dim * (parameter_dim + 1) // 2
-        self.fc_rest_cov1 = nn.Linear(model_dim, hidden_dim)
-        self.fc_rest_cov2 = nn.Linear(hidden_dim, n_tril_rest)
-
-        # ---------- Learnable low-rank prior ----------
-        if learn_prior:
-            # Prior mean
-            self.mu_p = nn.Parameter(torch.zeros(self.total_dim))
-            # Diagonal for stability (param in unconstrained space -> softplus)
-            self.prior_diag = nn.Parameter(torch.log(torch.exp(torch.ones(self.total_dim) * 0.1) - 1.0))
-            # Low-rank factor (D x r)
-            self.prior_U = nn.Parameter(torch.zeros(self.total_dim, prior_rank))
-        else:
-            self.register_buffer("mu_p", torch.zeros(self.total_dim))
-            self.register_buffer("prior_diag", torch.log(torch.exp(torch.ones(self.total_dim) * 0.1) - 1.0))
-            self.register_buffer("prior_U", torch.zeros(self.total_dim, prior_rank))
-
-        # ---------- EMA ----------
-        for name, param in self.named_parameters():
-            self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
-        self.register_buffer("iteration", torch.tensor(1.0))
-
-    # ---------- EMA ----------
-    def update_ema(self, alpha=None):
-        alpha = alpha if alpha is not None else self.ema_alpha
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                ema_param.mul_(1 - alpha).add_(alpha * param.data)
-                setattr(self, f"{name.replace('.', '_')}_ema", ema_param)
-            self.iteration += 1.0
-
-    def apply_ema_weights(self):
-        with torch.no_grad():
-            for name, param in self.named_parameters():
-                ema_param = getattr(self, f"{name.replace('.', '_')}_ema")
-                param.data.copy_(ema_param)
-
-    # ---------- Utility ----------
-    def _build_cholesky_from_tril(self, tril_flat, latent_dim):
-        # tril_flat: [B, n_tril]
-        B = tril_flat.shape[0]
-        L = torch.zeros(B, latent_dim, latent_dim, device=tril_flat.device)
-        idx = 0
-        for i in range(latent_dim):
-            for j in range(i + 1):
-                val = tril_flat[:, idx]
-                if i == j:
-                    val = F.softplus(val) + self.cov_diag_epsilon
-                L[:, i, j] = val
-                idx += 1
-        return L
-
-    # ---------- Low-rank prior ----------
-    def get_prior(self, batch_size=None):
-        """
-        Returns:
-            mu_p: [D] or [B, D]
-            L_p:  [D, D] or [B, D, D]  (Cholesky lower-triangular)
-        Uses Sigma_p = diag(d) + U U^T, with d = softplus(prior_diag)+eps
-        """
-        device = self.mu_p.device
-        D = self.total_dim
-
-        # diag with positivity
-        diag = F.softplus(self.prior_diag.to(device)) + self.cov_diag_epsilon  # [D]
-        U = self.prior_U.to(device)  # [D, r]
-
-        # Build Sigma_p (D, D)
-        Sigma_p = torch.diag(diag) + (U @ U.t())  # [D, D]
-
-        # Cholesky (lower-triangular)
-        # add tiny jitter for extra stability if needed
-        jitter = self.cov_diag_epsilon * torch.eye(D, device=device)
-        try:
-            L_p = torch.linalg.cholesky(Sigma_p + jitter)
-        except RuntimeError:
-            # fallback: add larger jitter
-            L_p = torch.linalg.cholesky(Sigma_p + (self.cov_diag_epsilon * 10.0) * torch.eye(D, device=device))
-
-        mu_p = self.mu_p.to(device)  # [D]
-
-        if batch_size is not None:
-            # Use repeat so gradients flow back to prior parameters
-            mu_p = mu_p.unsqueeze(0).repeat(batch_size, 1)    # [B, D]
-            L_p = L_p.unsqueeze(0).repeat(batch_size, 1, 1)   # [B, D, D]
-
-        return mu_p, L_p
-
-    # ---------- Forward ----------
-    def forward(self, t, x, mask=None):
-        B, T = t.shape
-        assert T > 1, "Need at least one first and one rest observation"
-        device = t.device
-
-        if mask is None:
-            mask = torch.ones(B, T, dtype=torch.bool, device=device)
-
-        # ---------- FIRST OBS ----------
-        t_first, x_first = t[:, 0:1], x[:, 0:1]
-        inp_first = torch.cat([t_first, x_first], dim=-1)
-        h_first = self.fc_first(inp_first)
-        mu_first = self.fc_first_mu(h_first)
-        tril_first = self.fc_first_cov(h_first)
-        L_first = self._build_cholesky_from_tril(tril_first, self.latent_dim)
-
-        # ---------- REST ----------
-        t_rest, x_rest = t[:, 1:], x[:, 1:]
-        mask_rest = mask[:, 1:]
-        inp_rest = torch.cat([t_rest.unsqueeze(-1), x_rest.unsqueeze(-1)], dim=-1)
-        h_rest = self.selu(self.input_proj1_rest(inp_rest))
-        h_rest = self.selu(self.input_proj2_rest(h_rest))
-        h_rest = self.pos_encoder(h_rest)
-        h_enc_rest = self.transformer_rest(h_rest, src_key_padding_mask=~mask_rest)
-        valid_counts = mask_rest.sum(dim=1, keepdim=True).clamp(min=1)
-        pooled_rest = (h_enc_rest * mask_rest.unsqueeze(-1)).sum(dim=1) / valid_counts
-        mu_rest = self.fc_rest_mu2(self.selu(self.fc_rest_mu1(pooled_rest)))
-        tril_rest = self.fc_rest_cov2(self.selu(self.fc_rest_cov1(pooled_rest)))
-        L_rest = self._build_cholesky_from_tril(tril_rest, self.parameter_dim)
-
-        # ---------- Concatenate ----------
-        mu_q = torch.cat([mu_first, mu_rest], dim=-1)  # [B, total_dim]
-        L_q = torch.zeros(B, self.total_dim, self.total_dim, device=device)
-        L_q[:, :self.latent_dim, :self.latent_dim] = L_first
-        L_q[:, self.latent_dim:, self.latent_dim:] = L_rest
-
-        # ---------- Sample z ----------
-        eps = torch.randn(B, self.total_dim, device=device)
-        z = mu_q + torch.einsum("bij,bj->bi", L_q, eps)
-
-        # ---------- Prior ----------
-        mu_p, L_p = self.get_prior(batch_size=B)
-
-        return z, mu_q, L_q, mu_p, L_p
-
-
-
-    
     
 
 
@@ -1323,7 +647,6 @@ class SimpleDecoder(nn.Module):
         for name, param in self.named_parameters():
             self.register_buffer(f"{name.replace('.', '_')}_ema", param.data.clone())
         self.register_buffer("iteration", torch.tensor(1.0))
-
 
 
     def forward(self, z):

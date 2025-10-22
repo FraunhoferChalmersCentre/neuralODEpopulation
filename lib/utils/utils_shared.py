@@ -371,7 +371,7 @@ def encode_latent(
   
    # print(k_param)
    # print(k_param)   
-    return k_param, mu_q, L_q, mu_p, L_p, repeat_factor
+    return k_param,z0, mu_q, L_q, mu_p, L_p, repeat_factor
     
 
 
@@ -438,7 +438,7 @@ def normalize_encoder_input(
 
     # --- Encode latent with median encoder ---
     with use_ema(encoder_med):
-        k_param, _, _, _ ,_,_= encode_latent(
+        k_param,z0, _, _, _ ,_,_= encode_latent(
             encoder_med,
             t_encoder,
             x_encoder,

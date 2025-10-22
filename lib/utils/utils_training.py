@@ -526,7 +526,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, encoder_med,
     dataset, dataset_val, global_max_time, global_max_dose,
     global_mean, global_std, main_params, dataloader_val, dataloader, models,
     optimizer, scheduler, func, reducer, encoder, noise, t_dense,
-    n_epochs, warmup_epochs_noise, warmup_epochs_iiv, smoothing_start_epoch,
+    n_epochs, warmup_epochs_noise, warmup_epochs_iiv, smoothing_start_epoch,learn_prior,
      enable_ae,enable_vae,
     enable_onlymedian,normalization,
     truncation, print_epoch=1, plot_epoch=1, max_plots=4,
@@ -556,7 +556,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, encoder_med,
     
     for epoch in range(n_epochs):
         # After loss.backward()
-
+        encoder.freeze_prior_until(epoch, freeze_epochs=10)  # freeze first 10 epochs
 
      
             
@@ -603,7 +603,7 @@ def train_loop_model(p_dropout, func_med, reducer_med, encoder_med,
                  encoder_med, func_med, reducer_med,
                  t_dense, global_mean, global_std)
             
-            k_param, mu_q, logvar_q,mu_p,logvar_p, repeat_factor = encode_latent(
+            k_param,_, mu_q, logvar_q,mu_p,logvar_p, repeat_factor = encode_latent(
                 encoder,
                 t_encoder,
                 x_encoder,

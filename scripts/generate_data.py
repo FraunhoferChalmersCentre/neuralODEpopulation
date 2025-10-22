@@ -63,18 +63,18 @@ def main():
              'dose_amounts_list': [[200, 200, 200, 200], [0, 0, 0, 0]],
              'dose_times_list':   [[0, 5, 10, 15], [0, 0, 0, 0]]
          },
-       #  Group 2: Drug B only
-         {
-             'n_individuals': n,
-             'dose_amounts_list': [[0, 0, 0, 0], [150, 150, 150, 150]],
-             'dose_times_list':   [[0, 0, 0, 0], [1, 6, 11, 16]]
-         },
+       # #  Group 2: Drug B only
+       #   {
+       #       'n_individuals': n,
+       #       'dose_amounts_list': [[0, 0, 0, 0], [150, 150, 150, 150]],
+       #       'dose_times_list':   [[0, 0, 0, 0], [1, 6, 11, 16]]
+       #   },
         
-        # {
-        #     'n_individuals': n,
-        #     'dose_amounts_list': [[200, 200, 200, 200], [150, 150, 150, 150]],
-        #     'dose_times_list':   [[0, 5, 10, 15], [1, 6, 11, 16]]
-        # }
+       #  {
+       #      'n_individuals': n,
+       #      'dose_amounts_list': [[200, 200, 200, 200], [150, 150, 150, 150]],
+       #      'dose_times_list':   [[0, 5, 10, 15], [1, 6, 11, 16]]
+       #  }
     ]
 
     combined_data = []
@@ -168,8 +168,8 @@ def main():
  # ----- Define groups -----
     dose_times = [-8,0, 8, 16, 24]
     groups = [
-        {"name": "Low Dose",  "n_individuals": 100, "dose_amounts": [400, 400, 400,400]},
-        {"name": "High Dose",  "n_individuals": 100, "dose_amounts": [800, 800, 800,800]}
+        {"name": "Low Dose",  "n_individuals": 1000, "dose_amounts": [400, 400, 400,400]},
+        {"name": "High Dose",  "n_individuals": 1000, "dose_amounts": [800, 800, 800,800]}
     ]
     
     # dose_times = [0, 3, 8]

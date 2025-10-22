@@ -95,7 +95,7 @@ if __name__ == "__main__":
     
     
     dim_latent=2
-    dim_parameters=3
+    dim_parameters=2
     hid_dim=512
      
     number_drugs = df['EVID'].max()
@@ -146,6 +146,7 @@ if __name__ == "__main__":
        warmup_epochs_noise=1000,
        warmup_epochs_iiv=0,
        smoothing_start_epoch=0,
+       learn_prior=30,
        enable_ae=False,
        enable_vae=False,
        enable_onlymedian=True,
@@ -185,7 +186,7 @@ if __name__ == "__main__":
      
     truncation=1
     encoder_ae = Encoder_Transformer_Full(dim_latent,dim_parameters, input_dim=2, 
-                                          model_dim=128,hidden_dim=32, num_heads=4, num_layers=2, dropout=0.1,
+                                          model_dim=128,hidden_dim=128, num_heads=4, num_layers=2, dropout=0.1,
                                           cov_diag_epsilon=1e-5, learn_prior_mean=True, learn_prior_covariance=True,
                                           diagonal_only=False).to(device)
     func_ae = ODEFunc(dim_latent,dim_parameters,hid_dim,number_drugs ).to(device)
@@ -196,8 +197,8 @@ if __name__ == "__main__":
 
 
     # # # Copy weights
-    # func_ae.load_state_dict(func_med.state_dict())
-    # reducer_ae.load_state_dict(reducer_med.state_dict())
+    #func_ae.load_state_dict(func_med.state_dict())
+    #reducer_ae.load_state_dict(reducer_med.state_dict())
 
     models2 = {
     "func": func_ae,
@@ -206,7 +207,7 @@ if __name__ == "__main__":
     "noise": noise_ae,
         }
         
-    optimizer2,scheduler2, main_params2 = prepare_optimizer(models2, device,lr=0.001 ,factor=0.8, patience=10, min_lr=1e-7, prior_lr_factor=1)
+    optimizer2,scheduler2, main_params2 = prepare_optimizer(models2, device,lr=0.001 ,factor=0.8, patience=10, min_lr=1e-5, prior_lr_factor=1)
     #load_models(models, save_dir, "vae")
 
 
@@ -235,11 +236,12 @@ if __name__ == "__main__":
        noise=noise_ae,
        t_dense=t_dense,
        n_epochs=1000,
-       warmup_epochs_noise=30,
+       warmup_epochs_noise=0,
        warmup_epochs_iiv=0,
-       smoothing_start_epoch=30,
-       enable_ae=True,
-       enable_vae=False,
+       smoothing_start_epoch=0,
+       learn_prior=0,
+       enable_ae=False,
+       enable_vae=True,
        enable_onlymedian=False,
        normalization=True,
        truncation=truncation,
@@ -272,7 +274,7 @@ if __name__ == "__main__":
         global_max_time,
         global_mean,
         global_std,
-        dataset_val,
+        dataset_train,
         encoder_ae,
         func_ae,
         reducer_ae,
@@ -317,19 +319,19 @@ if __name__ == "__main__":
          enable_vae=False,
          enable_ae=True,
          enable_onlymedian=False,
-         add_noise=True,
+         add_noise=False,
          use_ema_models=True,
          normalization=True,
          fontsize=14  # Added a parameter to control font size
        ) 
     
     vpc_true(ODEWrapper,
-    models2, dataset_test, t_dense, global_max_time, global_mean, global_std,global_max_dose,
+    models2, dataset_train, t_dense, global_max_time, global_mean, global_std,global_max_dose,
     encoder_ae, func_ae, reducer_ae, noise_ae,
     func_med, reducer_med, encoder_med, noise_med,
     add_noise_to_prediction=True,
     enable_onlymedian=False, enable_ae=False,
-    enable_vae=True, truncation=truncation, num_repeats=1,
+    enable_vae=True, truncation=truncation, num_repeats=10,
     use_ema_models=True,
     fontsize=14,  show_confidence_intervals=True)
     
