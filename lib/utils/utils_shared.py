@@ -5,24 +5,132 @@ Created on Sun Sep 21 00:16:56 2025
 @author: Baaz
 """
 
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Sep 20 07:10:20 2025
+
+@author: Baaz
+"""
 
 import torch
 
 
 
 import numpy as np
-
 from contextlib import contextmanager
 
 
 import torch.nn as nn
 from torchdiffeq import odeint as odeint
-
-from lib.utils.utils_preprocess import destandardize_concentration
 from torch.nn.utils.rnn import pad_sequence
 
+from lib.utils.utils_preprocess import destandardize_concentration
+
+def sample_from_prior(encoder, batch_size, device):
+    """
+    Draw latent samples z ~ N(mu_p, L_p L_p^T) from the learned prior.
+    """
+    with torch.no_grad():
+        mu_p, L_p = encoder.get_prior(batch_size=batch_size)
+        eps = torch.randn(batch_size, mu_p.size(1), device=device)
+        z = mu_p + torch.einsum('bij,bj->bi', L_p, eps)
+    return z
 
 
+def normalize_encoder_input(
+    x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
+    encoder_med, func_med, reducer_med,
+    t_dense, global_mean, global_std
+):
+    """
+    Normalize encoder input using the median model (EMA weights).
+
+    Handles broadcasting of dose_times and evid to match the time dimension.
+    Works for variable batch sizes and number of doses.
+    """
+
+    batch_size, n_timepoints = x_encoder.shape
+
+    # --- Encode latent with median encoder ---
+    with use_ema(encoder_med):
+        k_param,z0, _, _, _ ,_,_,_= encode_latent(
+            encoder_med,
+            t_encoder,
+            x_encoder,
+            dose_tensor,
+            enable_vae=False,
+            enable_ae=False,
+            enable_onlymedian=True
+        )
+
+    # --- Prepare ODE input with median models ---
+
+        with use_ema(func_med):
+            ode_func_med= prepare_ode_input(
+    
+                x_padded,
+                k_param,
+                func_med,
+                dose_tensor,         # shape: [batch, T] or [batch, n_features]
+                dose_times_list, # list of 1D tensors per individual
+                evid,            # list of 1D tensors per individual
+                enable_ae=False,
+                enable_onlymedian=True
+            )
+
+        with use_ema(reducer_med):
+                pred_interp, pred_batch = make_predictions(
+                    t_encoder, t_dense, k_param, ode_func_med, reducer_med,
+                     global_mean, global_std
+                )
+
+    # --- Normalize encoder input ---
+    x_encoder_norm = destandardize_concentration(x_encoder, global_mean, global_std) / pred_interp
+    return x_encoder_norm.detach()
+
+
+
+
+
+@contextmanager
+def use_ema(model):
+    """
+    Context manager to temporarily replace a model's parameters with EMA parameters.
+    Falls back to current parameters if EMA has never been updated.
+
+    Usage:
+        with use_ema(model):
+            y_pred = model(x)
+    """
+    # Check if EMA is available and has been updated
+    has_ema = hasattr(model, "iteration") and model.iteration.item() > 1
+
+    if not has_ema:
+        # Fail-safe: just use the current parameters
+        yield
+        return
+
+    ema_attrs = [
+        name for name, _ in model.named_parameters()
+        if hasattr(model, f"{name.replace('.', '_')}_ema")
+    ]
+    backup = {}
+
+    if ema_attrs:
+        # Backup and swap
+        for name, param in model.named_parameters():
+            backup[name] = param.data.clone()
+            ema_param = getattr(model, f"{name.replace('.', '_')}_ema", None)
+            if ema_param is not None:
+                # Ensure correct device
+                param.data.copy_(ema_param.to(param.device))
+    try:
+        yield
+    finally:
+        # Restore original params
+        for name, param in model.named_parameters():
+            if name in backup:
+                param.data.copy_(backup[name])
 
 def truncate_time_series(t_batch, x_batch, truncation_time):
     """
@@ -148,33 +256,21 @@ def batch_linear_interpolate_1d(y, t_src, t_target):
 
 
 class ODEWrapper(nn.Module):
-    def __init__(self, func, dose_times, dose_amounts, evid, dose_mask, keep_mask=None):
+    def __init__(self, func, dose_times, transfusion_times, dose_amounts, dose_mask, keep_mask=None):
         super().__init__()
         self.func = func
-        self.dose_times = dose_times      # [batch, max_doses]
-        self.dose_amounts = dose_amounts  # [batch, max_doses]
-        self.evid = evid                  # [batch, max_doses] (event type, e.g. 1=bolus, 2=transfusion)
-        self.dose_mask = dose_mask        # [batch, max_doses]
-        self.keep_mask = keep_mask        # [batch, 1] — optional binary mask
+        self.transfusion_times = transfusion_times          # [batch, max_len]
+        self.dose_times = dose_times          # [batch, max_len]
+        self.dose_amounts = dose_amounts      # [batch, max_len]
+        self.dose_mask = dose_mask            # [batch, max_len]
+        self.keep_mask = keep_mask            # [batch, 1] — binary mask (optional)
 
     def forward(self, t, x):
+        # Pass keep_mask if provided
         if self.keep_mask is not None:
-            return self.func(
-                t, x,
-                self.dose_times,
-                self.dose_amounts,
-                self.evid,
-                self.dose_mask,
-                self.keep_mask
-            )
+            return self.func(t, x, self.dose_times,self.transfusion_times,  self.dose_amounts, self.dose_mask, self.keep_mask)
         else:
-            return self.func(
-                t, x,
-                self.dose_times,
-                self.dose_amounts,
-                self.evid,
-                self.dose_mask
-            )
+            return self.func(t, x, self.dose_times,self.transfusion_times,  self.dose_amounts, self.dose_mask)
 
 
 def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
@@ -215,22 +311,18 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
 
     # Truncate if needed
     if truncation > 0:
-        t_enc_list, x_enc_list, masks_list, t_cut_list, x_cut_list = truncate_time_series(
+        t_enc_list, x_enc_list, _, t_cut_list, x_cut_list = truncate_time_series(
             t_batch, x_batch, truncation
         )
     else:
-        t_enc_list, x_enc_list, masks_list = t_batch, x_batch, [torch.ones_like(xi, dtype=torch.bool) for xi in x_batch]
+        t_enc_list, x_enc_list, _ = t_batch, x_batch, [torch.ones_like(xi, dtype=torch.bool) for xi in x_batch]
         t_cut_list, x_cut_list = [torch.zeros(0, device=device) for _ in t_batch], [torch.zeros(0, device=device) for _ in x_batch]
 
-        # # Remove first `skip_initial` points from encoder sequences
-        # t_enc_list = [ti[skip_initial:] for ti in t_enc_list]
-        # x_enc_list = [xi[skip_initial:] for xi in x_enc_list]
-        # masks_list = [mask_i[skip_initial:] for mask_i in masks_list]
+    
 
     # Pad sequences
     t_encoder = pad_sequence(t_enc_list, batch_first=True)
     x_encoder = pad_sequence(x_enc_list, batch_first=True)
-    masks = pad_sequence(masks_list, batch_first=True)
 
     t_padded = pad_sequence(t_batch, batch_first=True)
     x_padded = pad_sequence(x_batch, batch_first=True)
@@ -263,7 +355,7 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
 
 
 def encode_latent(
-    encoder,
+      encoder,
     t_encoder,
     x_normalized,
     dose_tensor,
@@ -272,8 +364,9 @@ def encode_latent(
     enable_onlymedian,
     warmup_epochs_iiv=0,
     epoch=0,
-    min_batch_size=50,
-    augment=False
+    min_batch_size=100,
+    augment=False,
+    sample_posterior=True
 ):
     """
     Encodes input sequences into latent space, handling AE, median-only, or VAE cases.
@@ -300,179 +393,23 @@ def encode_latent(
 
     B, T = t_encoder.size()
     repeat_factor = 1  # default
-
-    # Remove first time step
-    t_encoder_trimmed = t_encoder
-    x_normalized_trimmed = x_normalized
-
-    # Handle empty sequence
-    # if t_encoder_trimmed.size(1) == 0:
-    #     latent_dim = getattr(encoder, "latent_dim", 2)
-    #     k_param = torch.zeros(B, latent_dim, device=t_encoder.device)
-    #     mu_q = torch.zeros(B, latent_dim, device=t_encoder.device)
-    #     logvar_q = torch.zeros(B, latent_dim, device=t_encoder.device)
-    #     return k_param, mu_q, L_p, repeat_factor
-
-    # ----------------------------
-    # AE and median-only cases
-    # ----------------------------
-    if enable_ae:
-        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)
-        k_param = mu_q
-        k_param=torch.cat([ z0, k_param], dim=-1)
-       
-
-
-    elif enable_onlymedian:
-        
-        k_param, z0, mu_q, L_q, mu_p, L_p = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor,enable_onlymedian)
-   
-        k_param=torch.cat([z0,0*k_param], dim=-1)
-    
-     
-      #  k_param =0* k_param
-        mu_q = mu_p
-        L_q = L_p
-      #  print(k_param)
-       # print(k_param)
-    # ----------------------------
-    # VAE case
-    # ----------------------------
-    # ----------------------------
-    elif enable_vae:
-        # KL weight warmup
-        kl_weight = 1.0 if epoch + 1 >= warmup_epochs_iiv else min(1.0, epoch / warmup_epochs_iiv)
-       # print(t_encoder_trimmed)
-        # Encode original batch
-        k_param, z0, mu_q, L_q, mu_p, L_p  = encoder(t_encoder_trimmed, x_normalized_trimmed,dose_tensor)  # L_q: [B, D, D]
-    
-        B_current = mu_q.size(0)
-        D = mu_q.size(1)
-    
-        repeat_factor = 1  # default in case batch is large enough
-    
-        # Repeat if batch too small
-        if B_current < min_batch_size and augment:
-            repeat_factor = int(np.ceil(min_batch_size / B_current))
-            mu_q = mu_q.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
-            mu_p = mu_p.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
-            z0=z0.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
-            
-            
-            L_p = L_p.repeat(repeat_factor, 1, 1)  
-            L_q = L_q.repeat(repeat_factor, 1, 1)                # [B*rf, D, D]
-          #  L_q = L_q.repeat_interleave(repeat_factor, dim=0)  # [B*rf, D]
-
-        B, D = mu_q.shape
-        eps = torch.randn(B, D, device=mu_q.device)  # standard normal
-        k_param = mu_q + torch.einsum("bij,bj->bi", L_q, eps)  # [B, D]
-        k_param=torch.cat([z0, k_param ], dim=-1)   
-     #   print(k_param)    
   
-   # print(k_param)
-   # print(k_param)   
-    return k_param,z0, mu_q, L_q, mu_p, L_p, repeat_factor
+
+ 
+    if enable_vae and augment:
+        repeat_factor = int(np.ceil(min_batch_size / B))
+        
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p , mask = encoder(t_encoder, x_normalized,dose_tensor,  mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=True)
     
+    elif enable_vae:
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p, mask  = encoder(t_encoder, x_normalized,dose_tensor,  mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=False)
 
-
-
-
-
-@contextmanager
-def use_ema(model):
-    """
-    Context manager to temporarily replace a model's parameters with EMA parameters.
-    Falls back to current parameters if EMA has never been updated.
-
-    Usage:
-        with use_ema(model):
-            y_pred = model(x)
-    """
-    # Check if EMA is available and has been updated
-    has_ema = hasattr(model, "iteration") and model.iteration.item() > 1
-
-    if not has_ema:
-        # Fail-safe: just use the current parameters
-        yield
-        return
-
-    ema_attrs = [
-        name for name, _ in model.named_parameters()
-        if hasattr(model, f"{name.replace('.', '_')}_ema")
-    ]
-    backup = {}
-
-    if ema_attrs:
-        # Backup and swap
-        for name, param in model.named_parameters():
-            backup[name] = param.data.clone()
-            ema_param = getattr(model, f"{name.replace('.', '_')}_ema", None)
-            if ema_param is not None:
-                # Ensure correct device
-                param.data.copy_(ema_param.to(param.device))
-    try:
-        yield
-    finally:
-        # Restore original params
-        for name, param in model.named_parameters():
-            if name in backup:
-                param.data.copy_(backup[name])
-
-
-
-
-
-def normalize_encoder_input(
-    x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
-    encoder_med, func_med, reducer_med,
-    t_dense, global_mean, global_std
-):
-    """
-    Normalize encoder input using the median model (EMA weights).
-
-    Handles broadcasting of dose_times and evid to match the time dimension.
-    Works for variable batch sizes and number of doses.
-    """
-
-    batch_size, n_timepoints = x_encoder.shape
-
-    # --- Encode latent with median encoder ---
-    with use_ema(encoder_med):
-        k_param,z0, _, _, _ ,_,_= encode_latent(
-            encoder_med,
-            t_encoder,
-            x_encoder,
-            dose_tensor,
-            enable_vae=False,
-            enable_ae=False,
-            enable_onlymedian=True
-        )
-
-    # --- Prepare ODE input with median models ---
-
-        with use_ema(func_med):
-            ode_func_med= prepare_ode_input(
-    
-                x_padded,
-                k_param,
-                func_med,
-                dose_tensor,         # shape: [batch, T] or [batch, n_features]
-                dose_times_list, # list of 1D tensors per individual
-                evid,            # list of 1D tensors per individual
-                enable_ae=False,
-                enable_onlymedian=True
-            )
-
-        with use_ema(reducer_med):
-                pred_interp, pred_batch = make_predictions(
-                    t_encoder, t_dense, k_param, ode_func_med, reducer_med,
-                     global_mean, global_std
-                )
-
-    # --- Normalize encoder input ---
-    x_encoder_norm = destandardize_concentration(x_encoder, global_mean, global_std) / pred_interp
-    return x_encoder_norm.detach()
-
+    else:
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p, mask  = encoder(t_encoder, x_normalized,dose_tensor, mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=1, min_batch_size=min_batch_size, augment=False, sample_posterior=True)
+            
+      
+          
+    return k_param,z0,  mu_q, logvar_q, mu_p, logvar_p,mask,  repeat_factor
 
 
 
@@ -528,10 +465,7 @@ def prepare_ode_input(
             dose_times_padded[i, :len(dt)] = dt
             dose_times_mask[i, :len(dt)] = 1
 
-    # Expand dose_tensor to match dose_times
-    # Ensure dose_tensor is 2D: [batch, max_doses]
-    # Expand dose_tensor to match dose_times
-    # Ensure dose_tensor is 2D: [batch, 1] first
+
     if dose_tensor.dim() == 0:  # scalar
         dose_tensor_expanded = dose_tensor.unsqueeze(0).unsqueeze(1)  # [1,1]
     elif dose_tensor.dim() == 1:  # [batch]
@@ -580,22 +514,14 @@ def make_predictions(t_padded, t_dense, k_param, ode_func, reducer, global_mean,
         t_padded = t_padded.repeat_interleave(repeat_factor, dim=0)
 
     batch_size = t_padded.size(0)
-    latent_dim=reducer.latent_dim
-    # Solve ODE
-   # print(k_param)
-  #  print(k_param)
+    latent_dim=reducer.dim_latent
+    
+
     pred = odeint(ode_func, k_param, t_dense, method="rk4")  # [time, batch, latent_dim_total]
     
-    # Smoothly scale down large values while preserving gradients
     pred_batch = pred.permute(1, 0, 2)  # [batch, time, latent_dim_total]
-  #  print(pred_batch)
-    # Reduce dimension
-    preds=pred_batch[:, :, :latent_dim]
-  #  B, T, D = pred_batch.shape
-   # mask = torch.ones_like(preds)
-   # mask[:, 1:, 2] = 0
 
-   #masked_pred_batch = preds * mask
+    preds=pred_batch[:, :, :latent_dim]
     reduced = reducer(preds)
     
     # Destandardize
@@ -605,6 +531,3 @@ def make_predictions(t_padded, t_dense, k_param, ode_func, reducer, global_mean,
     pred_interp = batch_linear_interpolate_1d(reduced, t_dense_exp, t_padded)
 
     return pred_interp, reduced
-
-
-

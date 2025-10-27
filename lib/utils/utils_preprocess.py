@@ -417,33 +417,63 @@ def prepare_optimizer(models, device, lr, factor=0.8, patience=10, min_lr=1e-7, 
         print(f"{name} is on {next(model.parameters()).device}")
 
     encoder = models["encoder"]
+    
+    # Split encoder parameters
+    encoder_params = dict(encoder.named_parameters())
 
-    # 2️⃣ Collect parameters with separate groups
+    # Identify parameter groups
+    z0_mu_params = [p for n, p in encoder_params.items() if "z0_mu" in n]
+    prior_params = [p for n, p in encoder_params.items() if ("mu_p" in n or "prior_A" in n)]
+    other_encoder_params = [
+        p for n, p in encoder_params.items() 
+        if "z0_mu" not in n and "mu_p" not in n and "prior_A" not in n
+    ]
+
     main_params = [
-    {
-        "params": list(models["func"].parameters())
-                + list(models["reducer"].parameters())
-                + [p for p in encoder.parameters() if p is not encoder.mu_p and p is not encoder.prior_A],
-        "lr": lr,
-    },
-    {
-        "params": list(models["noise"].parameters()),
-        "lr": 10 * lr,  # higher LR for noise model
-    },
-    {
-        "params": [encoder.mu_p, encoder.prior_A],
-        "lr": lr * prior_lr_factor,  # higher LR for prior
-    },
-]
+        # 1️⃣ NODE + reducer parameters
+        {
+            "params": list(models["func"].parameters()) + list(models["reducer"].parameters()),
+            "lr": lr,
+        },
+        # 2️⃣ Encoder (excluding z0_mu and prior)
+        {
+            "params": other_encoder_params,
+            "lr": lr,
+        },
+        # 3️⃣ z0_mu parameters (faster learning)
+        {
+            "params": z0_mu_params,
+            "lr": lr * 10.0,
+        },
+        # 4️⃣ Noise model (if any)
+        {
+            "params": list(models["noise"].parameters()),
+            "lr": lr,
+        },
+    ]
 
+    # 5️⃣ Prior parameters (optional)
+    if len(prior_params) > 0:
+        main_params.append({
+            "params": prior_params,
+            "lr": lr * prior_lr_factor,
+        })
 
-    # 3️⃣ Build optimizer & scheduler
+    # 6️⃣ Construct optimizer
     optimizer = torch.optim.Adam(main_params)
+
+    # 7️⃣ Add LR scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=factor, patience=patience, min_lr=min_lr
     )
 
+    print("Optimizer prepared with parameter groups:")
+    for i, g in enumerate(main_params):
+        n_params = sum(p.numel() for p in g["params"])
+        print(f" - Group {i}: {n_params:,} params, lr={g['lr']:.2e}")
+
     return optimizer, scheduler, main_params
+
 
 
 

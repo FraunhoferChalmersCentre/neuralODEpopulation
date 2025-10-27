@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Oct 24 21:45:47 2025
+
+@author: Baaz
+"""
+
 
 
 import os
@@ -18,16 +25,16 @@ if __name__ == "__main__":
     
     # Simulate command line arguments in Spyder
     sys.argv = ['script_name',
-    '--data_validation_path', 'lib/data/Simulated_1-comp_abs_corr_val.csv', 
-    '--data_test_path', 'lib/data/Simulated_1-comp_abs_corr_test.csv', 
-    '--data_path', 'lib/data/Simulated_1-comp_abs_corr_train.csv',
+    '--data_validation_path', 'lib/data/Simulated_ODE3_corr_val.csv', 
+    '--data_test_path', 'lib/data/Simulated_ODE3_corr_test.csv', 
+    '--data_path', 'lib/data/Simulated_ODE3_corr_train.csv',
     '--save_dir', 'models',
     '--load_dir', 'models']
       
     from lib.utils.utils_preprocess import load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists
     from lib.utils.utils_training import   train_loop_model
     from lib.utils.utils_shared import ODEWrapper
-    from lib.utils.utils_post_processing import vpc_true, estimate_coverage, plot_single_model_encoders_and_regression_combined, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits, vpc
+    from lib.utils.utils_post_processing import plot_all_treatments_batch, vpc_true, estimate_coverage, plot_single_model_encoders_and_regression_combined, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits, vpc
     from lib.models.NNmodels import  Encoder_Transformer, ODEFunc, SimpleDecoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
@@ -73,14 +80,14 @@ if __name__ == "__main__":
     
     
     dim_latent=2
-    dim_parameters_IC=0
+    dim_parameters_IC=1
     dim_parameters_dynamic=2
     hid_dim=512
      
     number_drugs = df['EVID'].max()
 
  #  save_models(models, save_dir, "test1")
-    encoder_med = Encoder_Transformer(dim_latent,dim_parameters_IC, dim_parameters_dynamic, model_dim=128,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
+    encoder_med = Encoder_Transformer(dim_latent,dim_parameters_IC, dim_parameters_dynamic, model_dim=128,hidden_dim=32, num_heads=4, dropout=0.00001,IC_dose_dependent=False).to(device)
     
     func_med = ODEFunc(dim_latent,dim_parameters_IC,dim_parameters_dynamic,hid_dim,number_drugs )
     
@@ -88,7 +95,8 @@ if __name__ == "__main__":
     
     noise_med = TrainableNoise(init_add_std=1, init_prop_std=0)
 
-    
+   
+
     models = {
     "func": func_med,
     "encoder": encoder_med,
@@ -103,7 +111,6 @@ if __name__ == "__main__":
      
     
     train_loop_model(
-           p_dropout=1,
        func_med=func_med,
        reducer_med=reducer_med,
        encoder_med=encoder_med,
@@ -160,10 +167,10 @@ if __name__ == "__main__":
         normalization=False,
         truncation=1
     )  
-
+# %%
      
     dim_latent=2
-    dim_parameters_IC=0
+    dim_parameters_IC1=1
     dim_parameters_dynamic=2
     hidden_NODE_dim=512
     
@@ -175,23 +182,20 @@ if __name__ == "__main__":
     model_Encoder_dim=128
     heads_Encoder=4
     layers_Encoder=3
-    dropout_Encoder=0.1
-    learn_prior_mean=True
-    learn_prior_covariance=True
-    diagonal_only=False
+    dropout_Encoder=0.001
+    learn_prior_mean=False
+    learn_prior_covariance=False
+    diagonal_only=True
     
     lr = 0.001
-    prior_lr_factor=1.0
+    prior_lr_factor=50.00
     min_lr=1e-4
     reduction_factor=0.8
     patience=10
     
      
     truncation=1
-    # encoder_ae = Encoder_Transformer(dim_latent+dim_parameters,
-    #                                       model_dim=model_Encoder_dim,hidden_dim=hidden_Encoder_dim, num_heads=heads_Encoder, num_layers=layers_Encoder, dropout=dropout_Encoder,
-    #                                       cov_diag_epsilon=1e-5, learn_prior_mean=learn_prior_mean, learn_prior_covariance=learn_prior_covariance,
-    #                                       diagonal_only=diagonal_only).to(device)
+
     
     encoder_ae = Encoder_Transformer(dim_latent=dim_latent,
       dim_parameters_IC=dim_parameters_IC,
@@ -204,7 +208,8 @@ if __name__ == "__main__":
       cov_diag_epsilon=1e-5,
       learn_prior_mean=learn_prior_mean,
       learn_prior_covariance=learn_prior_covariance,
-      diagonal_only=diagonal_only
+      diagonal_only=diagonal_only,IC_dose_dependent=False,
+        dropout_param=0.1
   )
     
     func_ae = ODEFunc(dim_latent=dim_latent,dim_parameters_IC=dim_parameters_IC,dim_parameters_dynamic=dim_parameters_dynamic,hid_dim=hidden_NODE_dim,drug_dim=number_drugs ).to(device)
@@ -231,7 +236,6 @@ if __name__ == "__main__":
 
 
     train_loop_model(
-           p_dropout=0,
        func_med=func_med,
        reducer_med=reducer_med,
        encoder_med=encoder_med,
@@ -253,7 +257,7 @@ if __name__ == "__main__":
        noise=noise_ae,
        t_dense=t_dense,
        n_epochs=1000,
-       warmup_epochs_noise=100,
+       warmup_epochs_noise=0,
        warmup_epochs_iiv=0,
        smoothing_start_epoch=0,
        learn_prior=0,
@@ -291,7 +295,7 @@ if __name__ == "__main__":
         global_max_time,
         global_mean,
         global_std,
-        dataset_train,
+        dataset_test,
         encoder_ae,
         func_ae,
         reducer_ae,
@@ -301,10 +305,10 @@ if __name__ == "__main__":
         onlymedian=False,
         enable_ae=False,
         enable_vae=True,
-        add_noise_to_prediction=False,
+        add_noise_to_prediction=True,
         num_simulated_total=10,
         normalization=True,
-        truncation=1
+        truncation=truncation
     )  
     
  
@@ -328,255 +332,183 @@ if __name__ == "__main__":
          global_std,
          truncation=truncation,
          max_plots=10,
-         n_samples=10,
+         n_samples=100,
          ci_lower=0.05,
          ci_upper=0.95,
          nr_row=1,
          nr_col=10,
-         enable_vae=False,
-         enable_ae=True,
+         enable_vae=True,
+         enable_ae=False,
          enable_onlymedian=False,
-         add_noise=False,
+         add_noise=True,
          use_ema_models=True,
          normalization=True,
          fontsize=14  # Added a parameter to control font size
        ) 
-    
-    vpc_true(ODEWrapper,
-    models2, dataset_train, t_dense, global_max_time, global_mean, global_std,global_max_dose,
-    encoder_ae, func_ae, reducer_ae, noise_ae,
-    func_med, reducer_med, encoder_med, noise_med,
-    add_noise_to_prediction=True,
-    enable_onlymedian=False, enable_ae=False,
-    enable_vae=True, truncation=truncation, num_repeats=10,
-    use_ema_models=True,
-    fontsize=14,  show_confidence_intervals=True)
-    
-    vpc(func_med,
-          reducer_med,
-          encoder_med,
-          noise_med,models,
-        train_loader,
-        global_max_dose,
-        global_max_time,
-        global_mean,
-        global_std,
-        dataset_train,
-        latent_dim,
-        dim_parameter_encoder,
-        encoder_ae,
-        func_ae,
-        reducer_ae,
-        noise_ae,
-        ODEWrapper,
-        t_dense,
-        compartment="DV",
-        onlymedian=False,
-        enable_ae=False,
-        enable_vae=True,
-        add_noise_to_prediction=False,
-        num_simulated_total=10,
-        normalization=False,
-        truncation=1
-    )  
-
-    #   #  save_models(models, save_dir, "ae")
-    # plot_encoder_histograms(encoder_ae, initial_encoder_ae, func_ae, t_dense, reducer_ae, global_mean, global_std, dataset_train, encoder_ae, latent_dim, device=None, truncation=0.3, normalization=True)
-    # plot_encoder_vs_samples( encoder_ae, initial_encoder_ae, func_ae,
-    #  t_dense, reducer_ae, global_mean, global_std,
-    #  dataset_train, encoder_ae, latent_dim, device=None, truncation=0.3, normalization=True)
-    
-    # plot_single_model_encoders_and_regression(
-    # df, df_validation, dataset_train, dataset_val,
-    # encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    # encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    # latent_dim, global_mean, global_std, t_dense,
-    # device, truncation=1, dim_parameter_encoder=2,     use_ema_models=True, normalization=False
-    # )
-    
-    # plot_two_models_encoders_and_regression(
-    #     df, df_validation, dataset_train, dataset_val,
-    #     encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    #     encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    #     encoder_med, initial_encoder_med, func_med, reducer_med,
-    #     latent_dim, global_mean, global_std, t_dense,
-    #     device, enable_vae=False, enable_ae=True, enable_onlymedian=False, truncation=0.2, normalization=True,
-    #     dim_parameter_encoder=2
-    # )
-    
-    # plot_one_model_encoders_and_regression2(
-    #     df, df_validation, dataset_train, dataset_val,
-    #     encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    #     encoder_med, initial_encoder_med, func_med, reducer_med,
-    #     latent_dim, global_mean, global_std, t_dense,
-    #     device, enable_vae=False, enable_ae=True, enable_onlymedian=False, truncation=0.2, normalization=True,
-    #     dim_parameter_encoder=2
-    # )
-    
-    # plot_single_model_encoder_means(
-    #     df, df_validation, dataset_train, dataset_val,
-    #     encoder_ae, initial_encoder_ae, func_ae, reducer_ae,
-    #     encoder_med, initial_encoder_med, func_med, reducer_med,
-    #     latent_dim, global_mean, global_std, t_dense,
-    #     device=None, truncation=0.2, dim_parameter_encoder=2,
-    #     use_ema_models=True, normalization=True
-    # )
-     
-      
-    # plot_individual_fits(
-    #   models,
-    #   encoder_med, initial_encoder_med, func_med, reducer_med,
-    #   dataset_train,
-    #   device,
-    #   t_dense,
-    #   global_mean,
-    #   global_std,
-    #   truncation=0.3,
-    #   max_plots=15,
-    #   n_samples=10,
-    #   ci_lower=0.05,
-    #   ci_upper=0.95,
-    #   nr_row=5,
-    #   nr_col=3,
-    #   enable_vae=True,
-    #   enable_ae=False,
-    #   enable_onlymedian=False,
-    #   add_noise=True,
-    #   use_ema_models=True,
-    #   normalization=True,
-    #   fontsize=14
-
-    # )
-    
-    
 
     
-    #   #  save_models(models, save_dir, "test1")
-    # encoder_ae2 = Encoder_Transformer(dim_parameter_encoder, input_dim=2, model_dim=64,hidden_dim=32, num_heads=4, dropout=0.001).to(device)
-    # func_ae2 = ODEFunc(latent_dim,dim_parameter_encoder,hid_dim ).to(device)
-    # reducer_ae2 = SimpleDecoder(latent_dim, hidden_dim=16).to(device)
-    # initial_encoder_ae2 = InitialConditionVAEEncoder(latent_dim, hidden_dim=8).to(device)
-    # noise_ae2 = TrainableNoise(size=1, init_add_std=1, init_prop_std=0).to(device)
-    
-    # models2 = {
-    # "func": func_ae2,
-    # "encoder": encoder_ae2,
-    # "reducer": reducer_ae2,
-    # "initial_encoder": initial_encoder_ae2,
-    # "noise": noise_ae2,
-    # }
-    
-    # optimizer,scheduler, main_params = prepare_optimizer(models2, device, lr=0.001)
-    # #load_models(models, save_dir, "vae")
-    
-    
-       
-    
-    train_loop_model(
-       p_dropout=0,
-       func_med=func_med,
-       reducer_med=reducer_med,
-       initial_encoder_med=initial_encoder_med,
-       encoder_med=encoder_med,
-       dataset=dataset_train,
-       dataset_val=dataset_val,
-       global_max_time=global_max_time,
-       global_max_dose=global_max_dose,
-       global_mean=global_mean,
-       global_std=global_std,
-       main_params=main_params,
-       dataloader_val=val_loader,
-       dataloader=train_loader,
-       models=models2,
-       optimizer=optimizer,
-       scheduler=scheduler,
-       func=func_ae2,
-       reducer=reducer_ae2,
-       initial_encoder=initial_encoder_ae2,
-       encoder=encoder_ae2,
-       noise=noise_ae2,
-       t_dense=t_dense,
-       n_epochs=10000,
-       warmup_epochs_noise=1000,
-       warmup_epochs_iiv=0,
-       smoothing_start_epoch=100,
-       traing_against_validation=False,
-       enable_ae=True,
-       enable_vae=False,
-       enable_onlymedian=False,
-       normalization=False,
-       plot_training=False,
-       free_bits=1,
-       truncation=0.4,
-       print_epoch=1,
-       plot_epoch=1,
-       max_plots=4,
-       nr_col=1,
-       nr_row=5
-       )
-    
-    vpc(func_med,
+ # %%
+dim_latent=2
+dim_parameters_IC1=1
+dim_parameters_dynamic=2
+hidden_NODE_dim=512
+
+hidden_OBS_dim=16
+init_add_std=9
+init_prop_std=0
+
+hidden_Encoder_dim=32
+model_Encoder_dim=256
+heads_Encoder=4
+layers_Encoder=3
+dropout_Encoder=0.001
+learn_prior_mean=True
+learn_prior_covariance=True
+diagonal_only=False
+
+lr = 0.001
+prior_lr_factor=1.0
+min_lr=1e-4
+reduction_factor=0.8
+patience=10
+
+ 
+truncation=1
+# encoder_ae = Encoder_Transformer(dim_latent+dim_parameters,
+#                                       model_dim=model_Encoder_dim,hidden_dim=hidden_Encoder_dim, num_heads=heads_Encoder, num_layers=layers_Encoder, dropout=dropout_Encoder,
+#                                       cov_diag_epsilon=1e-5, learn_prior_mean=learn_prior_mean, learn_prior_covariance=learn_prior_covariance,
+#                                       diagonal_only=diagonal_only).to(device)
+
+encoder_eb = Encoder_Transformer(dim_latent=dim_latent,
+  dim_parameters_IC=dim_parameters_IC,
+  dim_parameters_dynamic=dim_parameters_dynamic,
+  model_dim=model_Encoder_dim,
+  hidden_dim=hidden_Encoder_dim,
+  num_heads=heads_Encoder,
+  num_layers=layers_Encoder,
+  dropout=0.1,
+  cov_diag_epsilon=1e-5,
+  learn_prior_mean=learn_prior_mean,
+  learn_prior_covariance=learn_prior_covariance,
+  diagonal_only=diagonal_only,IC_dose_dependent=False
+  )
+
+func_eb = ODEFunc(dim_latent=dim_latent,dim_parameters_IC=dim_parameters_IC,dim_parameters_dynamic=dim_parameters_dynamic,hid_dim=hidden_NODE_dim,drug_dim=number_drugs ).to(device)
+
+reducer_eb = SimpleDecoder(dim_latent, hidden_dim=hidden_OBS_dim).to(device)
+
+noise_eb = TrainableNoise(init_add_std=init_add_std, init_prop_std=init_prop_std).to(device)
+
+ 
+  
+
+models3 = {
+"func": func_eb,
+"encoder": encoder_eb,
+"reducer": reducer_eb,
+"noise": noise_eb}
+ 
+
+
+optimizer3,scheduler3, main_params3 = prepare_optimizer(models3, device,lr=lr,factor=reduction_factor ,  patience=patience,  min_lr=min_lr, prior_lr_factor=prior_lr_factor)
+#load_models(models, save_dir, "vae")
+
+
+
+
+train_loop_model(
+   func_med=func_med,
+   reducer_med=reducer_med,
+   encoder_med=encoder_med,
+   dataset=dataset_train,
+   dataset_val=dataset_val,
+   global_max_time=global_max_time,
+   global_max_dose=global_max_dose,
+   global_mean=global_mean,
+   global_std=global_std,
+   main_params=main_params3,
+   dataloader_val=val_loader,
+   dataloader=train_loader,
+   models=models2,
+   optimizer=optimizer3,
+   scheduler=scheduler3,
+   func=func_eb,
+   reducer=reducer_eb,
+   encoder=encoder_eb,
+   noise=noise_eb,
+   t_dense=t_dense,
+   n_epochs=1000,
+   warmup_epochs_noise=0,
+   warmup_epochs_iiv=0,
+   smoothing_start_epoch=0,
+   learn_prior=0,
+   enable_ae=False,
+   enable_vae=True,
+   enable_onlymedian=False,
+   normalization=True,
+   truncation=truncation,
+   print_epoch=1)
+
+plot_encoder_histograms(
+    encoder_med, func_med, reducer_med,
+   t_dense, global_mean, global_std,
+   dataset_train, train_loader, encoder_eb, device=None, truncation=truncation, normalization=True
+   )
+
+  
+vpc_true(ODEWrapper,
+models2, dataset_val, t_dense, global_max_time, global_mean, global_std,global_max_dose,
+encoder_eb, func_eb, reducer_eb, noise_eb,
+func_med, reducer_med, encoder_med, noise_med,
+add_noise_to_prediction=True,
+enable_onlymedian=False, enable_ae=False,
+enable_vae=True, truncation=truncation, num_repeats=10,
+use_ema_models=True,
+fontsize=14,  show_confidence_intervals=True
+)
+
+vpc(func_med,
       reducer_med,
-      initial_encoder_med,
       encoder_med,
-      noise_med,models,
+      noise_med,models3,
     train_loader,
     global_max_dose,
     global_max_time,
     global_mean,
     global_std,
     dataset_train,
-    latent_dim,
-    dim_parameter_encoder,
-    initial_encoder_ae,
-    encoder_ae2,
-    func_ae2,
-    reducer_ae2,
-    noise_ae2,
+    encoder_eb,
+    func_eb,
+    reducer_eb,
+    noise_eb,
     ODEWrapper,
     t_dense,
-    compartment="DV",
     onlymedian=False,
-    enable_ae=True,
-    enable_vae=False,
+    enable_ae=False,
+    enable_vae=True,
     add_noise_to_prediction=True,
-    num_simulated_total=1000,
+    num_simulated_total=10,
     normalization=True,
-    truncation=0.3
-    )
-    
-    
-    vpc_3(
-        # Median model
-        encoder_med, initial_encoder_med, func_med, reducer_med, noise_med,
-        # Model 1
-        encoder_ae, initial_encoder_ae, func_ae, reducer_ae, noise_ae, models1,
-        encoder_ae, initial_encoder_ae, func_ae, reducer_ae, noise_ae, models1,
-        # Model 2
-  
-        train_loader, dataset_train, val_loader, dataset_val, t_dense, latent_dim, dim_parameter_encoder,
-        global_max_time, global_max_dose, global_mean, global_std,
-        "DV", ODEWrapper,
-        add_noise_to_prediction=True, num_simulated_total=1000, onlymedian=False, enable_ae=False, enable_vae=True,
-        normalization=True,
-        truncation=0.2
-    )
+    truncation=truncation
+)  
+
+ 
+plot_single_model_encoders_and_regression(
+ df, df_validation, dataset_train, dataset_val,
+ encoder_eb, func_eb, reducer_eb,
+ encoder_med, func_med, reducer_med,
+  global_mean, global_std, t_dense,
+ device=None, truncation=truncation, use_ema_models=True, normalization=True)
+
+
+
+
+
     
     
     
     
-    vpc_4(
-        # Median model
-        encoder_med, initial_encoder_med, func_med, reducer_med, noise_med,
-        # Model 1
-        encoder_ae, initial_encoder_ae, func_ae, reducer_ae, noise_ae, models1,
-        encoder_ae, initial_encoder_ae, func_ae, reducer_ae, noise_ae, models1,
-        # Model 2
-  
-        train_loader, dataset_train, test_loader, dataset_test, t_dense, latent_dim, dim_parameter_encoder,
-        global_max_time, global_max_dose, global_mean, global_std,
-        "DV", ODEWrapper,
-        add_noise_to_prediction=True, num_simulated_total=1000, onlymedian=False, enable_ae=False, enable_vae=True,
-        normalization=True,
-        truncation=0.2
-    )
+    
+    
+    
+    

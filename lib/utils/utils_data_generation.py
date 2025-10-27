@@ -369,7 +369,7 @@ def simulate_tumor_volume(
     ka_sd=0.5,
     ke_sd=0.5,
     v_sd=0.25,
-    max_tumor_size=2000,
+    max_tumor_size=200000,
     plot=False
 ):
     """
@@ -974,12 +974,12 @@ def simulate_single_drug_concentration(
         mean_vector = np.log([ka_mean, ke_mean, v_mean])
         normal_sample = np.random.multivariate_normal(mean_vector, cov_matrix)
         ka, ke, v = np.exp(normal_sample)
-        param_names = ['ka', 'ke', 'v']
+        param_names = ['ka', 'ke','v']
         param_values = [ka, ke, v]
 
         # Initialize compartments
         A_gut = 0.0
-        A_central = 0.0
+        A_central = v
 
         # Precompute indices for doses
         dose_indices = [int(round((t_dose - t0_int) / dt)) for t_dose in dose_times]
@@ -1025,7 +1025,7 @@ def simulate_single_drug_concentration(
 
 
         # Sample concentrations only in recording interval
-        C_sampled = np.interp(t_sample, t_eval, conc_trace/v)
+        C_sampled = np.interp(t_sample, t_eval, conc_trace)
         noise_add = np.random.normal(0, add_e, size=C_sampled.shape)
         noise_prop = np.random.normal(0, prop_e, size=C_sampled.shape)
         C_noisy = np.maximum(0, C_sampled * (1 + noise_prop) + noise_add)

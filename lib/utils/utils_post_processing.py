@@ -25,6 +25,11 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from matplotlib.lines import Line2D
 
+
+
+
+
+
 import os
 
 # ===== Local Project Imports =====
@@ -36,6 +41,7 @@ from lib.utils.utils_shared import (
     encode_latent,
     prepare_ode_input,
     make_predictions,
+    sample_from_prior
 )
 from lib.utils.utils_preprocess import make_collate_fn
 
@@ -264,6 +270,98 @@ def estimate_coverage(
     }
 
 
+def plot_all_treatments_batch(
+    models,
+    dataset,
+    device,
+    t_dense,
+    global_mean,
+    global_std,
+    normalization=True,
+    fontsize=14,
+    truncation=1
+):
+    """
+    Plot the median and quantile trajectories per treatment arm (continuous lines).
+    - Median: solid line
+    - 10th and 90th percentiles: dashed lines
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
+    import numpy as np
+
+    # --- Set font sizes ---
+    mpl.rcParams.update({
+        'axes.titlesize': fontsize + 2,
+        'axes.labelsize': fontsize,
+        'xtick.labelsize': fontsize - 2,
+        'ytick.labelsize': fontsize - 2,
+        'legend.fontsize': fontsize,
+    })
+
+    encoder = models['encoder']
+    func = models['func']
+    reducer = models['reducer']
+
+    encoder.eval()
+    func.eval()
+    reducer.eval()
+
+    # --- Split dataset by treatment arm ---
+    treatment1_data = [d for d in dataset if d['treatment'].item() == 1]
+    treatment2_data = [d for d in dataset if d['treatment'].item() == 2]
+
+    plt.figure(figsize=(10, 6))
+
+    for dose_data, color, label in zip(
+        [treatment1_data, treatment2_data],
+        ['blue', 'red'],
+        ['Treatment 1', 'Treatment 2']
+    ):
+        if len(dose_data) == 0:
+            continue
+
+        # Collate batch
+        collate_fn = make_collate_fn(dataset.global_max_len)
+        batch = collate_fn(dose_data)
+
+        id_list, _, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list, evid = preprocess_batch(
+            batch, device, truncation=truncation
+        )
+
+        # Normalize input (using the median encoder)
+        if normalization:
+            x_encoder_norm = normalize_encoder_input(
+                x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list, evid,
+                encoder, func, reducer,
+                t_dense, global_mean, global_std
+            )
+        else:
+            x_encoder_norm = x_encoder
+
+        # Convert to NumPy
+        x_np = x_encoder_norm.detach().cpu().numpy()  # shape [N_individuals, N_timepoints]
+        t_np = t_encoder[0].detach().cpu().numpy()    # shape [N_timepoints]
+
+        # Compute statistics
+        median_traj = np.median(x_np, axis=0)
+        q10 = np.quantile(x_np, 0.1, axis=0)
+        q90 = np.quantile(x_np, 0.9, axis=0)
+
+        # Plot median and quantiles as lines
+        plt.plot(t_np, median_traj, color=color, label=label, linewidth=2)
+        plt.plot(t_np, q10, color=color, linestyle='--', linewidth=1)
+        plt.plot(t_np, q90, color=color, linestyle='--', linewidth=1)
+
+    plt.xlabel("Time")
+    plt.ylabel("Normalized Value" if normalization else "Value")
+    plt.title("Median and quantile trajectories per treatment arm")
+    plt.legend(loc='upper right')
+    plt.tight_layout()
+    plt.show()
+
+
+
 
 
 
@@ -315,7 +413,7 @@ def plot_individual_fits(
     encoder.eval()
 
     func.eval()
-    dim_total = encoder.total_parameters + encoder.latent_dim
+    dim_total = encoder.dim_parameter_dynamic+encoder.dim_latent
     population_preds = []
     coverage_list = []
     point_inside_list = []
@@ -730,10 +828,7 @@ def plot_encoder_histograms(
     - Shows prior and empirical posterior correlations as text on scatter plots.
     """
 
-    import torch
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from itertools import combinations
+
 
     if device is None:
         device = next(encoder.parameters()).device
@@ -774,7 +869,7 @@ def plot_encoder_histograms(
 
                 # Encode latent with EMA weights
                 with use_ema(encoder):
-                    k_param,_, mu_q, L_q, mu_p, L_p, _ = encode_latent(
+                    k_param,_, mu_q, L_q, mu_p, L_p, _,_ = encode_latent(
                         encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=True, enable_ae=False, enable_onlymedian=False
                     )
@@ -805,14 +900,22 @@ def plot_encoder_histograms(
 
     # Prior correlation
     with torch.no_grad():
-        mu_p, L_p = encoder.get_prior()
-        L_p = L_p.to(device)  # [1, D, D] or [B, D, D]
+        _,_, _, _, mu_p, L_p, _,_ = encode_latent(
+            encoder, t_encoder, x_encoder, dose_tensor,
+            enable_vae=True, enable_ae=False, enable_onlymedian=False
+        )
+        L_p = L_p.to(device)  # [B, D, D]
     
-        if L_p.dim() == 3 and L_p.shape[0] == 1:
-            Sigma_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [1, D, D]
-            Sigma_p = Sigma_p[0]  # remove batch dim
+        if L_p.dim() == 3:
+            Sigma_p = torch.bmm(L_p, L_p.transpose(1, 2))  # [B, D, D]
+            if Sigma_p.shape[0] == 1:
+                Sigma_p = Sigma_p[0]  # remove batch dim
+            else:
+                # if multiple batches, you may need to select one or average
+                Sigma_p = Sigma_p[0]  # for example, take first batch
         else:
-            Sigma_p = L_p @ L_p.T  # fallback
+            Sigma_p = L_p @ L_p.T  # [D, D]
+    
         Sigma_p = Sigma_p.detach().cpu().numpy()
 
         prior_corr = np.zeros((n_dims, n_dims))
@@ -891,111 +994,6 @@ def plot_encoder_histograms(
 
 
 
-
-
-
-
-def plot_encoder_vs_samples(
-    encoder_med, initial_encoder_med, func_med,
-    t_dense, reducer_med, global_mean, global_std,
-    dataset, encoder, latent_dim, device=None, truncation=None, normalization=True
-):
-    """
-    Plots μ and σ from the encoder as a function of the number of samples per individual.
-    Loops over dataset one individual at a time (batch size = 1).
-    Uses EMA weights if available.
-    """
-
-    if device is None:
-        device = next(encoder.parameters()).device
-    collate_fn = make_collate_fn(dataset.global_max_len)
-    # Use batch_size=1 to process individual by individual
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
-
-    all_sample_counts = []
-    all_mu = []
-    all_sigma = []
-
-    # --- Apply EMA weights temporarily ---
-    if hasattr(encoder, "apply_ema_weights"):
-        encoder.apply_ema_weights()
-    if hasattr(initial_encoder_med, "apply_ema_weights"):
-        initial_encoder_med.apply_ema_weights()
-    if hasattr(func_med, "apply_ema_weights"):
-        func_med.apply_ema_weights()
-
-    with torch.no_grad():
-        for data in dataloader:
-            # Preprocess single individual
-            id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list = preprocess_batch(
-                data, device, truncation=truncation
-            )
-
-            # Number of actual samples for this individual
-            sample_count = len(t_encoder[0])
-            all_sample_counts.append(sample_count)
-
-            if normalization:
-                # Encode latent using median model
-                k_param, mu_q, logvar_q = encode_latent(
-                    encoder_med,
-                    t_encoder,
-                    x_encoder,
-                    enable_vae=False,
-                    enable_ae=False,
-                    enable_onlymedian=True
-                )
-
-                # Prepare ODE input and predictions
-                x0, ode_func = prepare_ode_input(
-                    initial_encoder_med,
-                    x_padded,
-                    k_param,
-                    func_med,
-                    dose_tensor,
-                    dose_times_list,
-                    False
-                )
-
-                pred_interp, pred_batch = make_predictions(
-                    t_encoder, t_dense, x0, ode_func, reducer_med, latent_dim, global_mean, global_std
-                )
-
-                x_encoder = destandardize_concentration(x_encoder, global_mean, global_std) / pred_interp
-
-            # Encode latent using EMA encoder
-            k_param, mu_q, logvar_q,_ = encode_latent(
-                encoder, t_encoder, x_encoder,
-                enable_vae=True, enable_ae=False, enable_onlymedian=False
-            )
-
-            mu_array = k_param.cpu().numpy()[0]      # shape [latent_dim]
-            sigma_array = torch.exp(0.5 * logvar_q).cpu().numpy()[0]
-
-            all_mu.append(mu_array)
-            all_sigma.append(sigma_array)
-
-    # Convert to arrays
-    all_mu = np.array(all_mu)
-    all_sigma = np.array(all_sigma)
-    all_sample_counts = np.array(all_sample_counts)
-
-    # Plot μ and σ vs number of samples
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    axes = axes.flatten()
-
-    labels = ["μ dim 0", "μ dim 1", "σ dim 0", "σ dim 1"]
-    data_arrays = [all_mu[:, 0], all_mu[:, 1], all_sigma[:, 0], all_sigma[:, 1]]
-
-    for ax, data, label in zip(axes, data_arrays, labels):
-        ax.scatter(all_sample_counts, data, alpha=0.7)
-        ax.set_xlabel("Number of samples", fontsize=18)
-        ax.set_ylabel(label, fontsize=18)
-        ax.set_title(f"{label} vs Number of Samples", fontsize=20)
-        ax.grid(True, linestyle="--", alpha=0.6)
-
-    plt.tight_layout()
-    plt.show()
 
 
 
@@ -1475,14 +1473,16 @@ def plot_single_model_encoders_and_regression(
 
                     # Optional normalization
                     if normalization:
-                        x_encoder_norm = normalize_encoder_input(
-                            x_encoder, t_padded, x_padded, dose_tensor, dose_times_padded, evid_padded,
+                        
+              
+                        x_encoder = normalize_encoder_input(
+                            x_encoder, t_encoder, x_padded, dose_tensor, dose_times_padded, evid_padded,
                             encoder_med, func_med, reducer_med,
                             t_dense, global_mean, global_std
                         )
 
-                    _, z0, mu_q, logvar_q, _,_,_ = encode_latent(
-                        encoder, t_padded, x_encoder_norm,dose_tensor,
+                    _, z0, mu_q, logvar_q, _,_,_ ,_= encode_latent(
+                        encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=False, enable_ae=True, enable_onlymedian=False
                     )
 
@@ -1530,7 +1530,19 @@ def plot_single_model_encoders_and_regression(
     fs = 18
     marker_size = 90
     unique_treatments = np.unique(treatments_val)
-    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_treatments)))
+    n_treatments = len(unique_treatments)
+
+    # Generate complementary/distinct colors dynamically
+    base_colors = ['blue', 'orange']
+
+    # If more than 2 groups, generate extra colors dynamically
+    if n_treatments > 2:
+        extra_colors = plt.cm.tab20(np.linspace(0, 1, n_treatments - 2))
+        colors = np.vstack([np.array([[0, 0, 1, 1], [1, 0.55, 0, 1]]), extra_colors])
+    else:
+        colors = np.array([[0, 0, 1, 1], [1, 0.55, 0, 1]])[:n_treatments]
+    
+    # Map treatments to colors
     treatment_color_map = {t: c for t, c in zip(unique_treatments, colors)}
 
     for i in range(n_params):
@@ -1579,7 +1591,7 @@ def plot_single_model_encoders_and_regression(
                               markerfacecolor=treatment_color_map[t],
                               markersize=10, label=f"Treatment {t}") for t in unique_treatments]
         fig.legend(handles=handles, loc='lower center', ncol=len(unique_treatments), fontsize=fs)
-        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+        plt.tight_layout(rect=[0, 0.15, 1, 0.95])
         plt.show()
 
 
@@ -1591,99 +1603,6 @@ def plot_single_model_encoders_and_regression(
 
 
 
-
-
-
-
-def plot_single_model_encoder_means(
-    df_train, df_val, dataset_train, dataset_val,
-    encoder1, initial_encoder1, func1, reducer1,
-    encoder_med, initial_encoder_med, func_med, reducer_med,
-    latent_dim, global_mean, global_std, t_dense,
-    device=None, truncation=0, dim_parameter_encoder=2,
-    use_ema_models=False, normalization=False
-):
-    
-
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    if device is None:
-        device = next(encoder1.parameters()).device
-
-    # ---------------- Extract latents helper ----------------
-    def extract_latents_and_params(df, dataset, encoder, dim_parameter_encoder):
-        mus_list, sigmas_list, ka_list, cl_list = [], [], [], []
-        collate_fn = make_collate_fn(dataset.global_max_len)
-        dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, collate_fn=collate_fn)
-
-        with use_ema(encoder) if use_ema_models else contextmanager(lambda: (yield))():
-            encoder.eval()
-            with torch.no_grad():
-                for data in dataloader:
-                    id_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, dose_tensor, dose_times_list = preprocess_batch(
-                        data, device, truncation=truncation
-                    )
-                    if normalization:
-                        x_encoder = normalize_encoder_input(
-                            x_encoder, t_encoder, x_padded, dose_tensor, dose_times_list,
-                            encoder_med, initial_encoder_med, func_med, reducer_med,
-                            t_dense, latent_dim, global_mean, global_std
-                        )
-
-                    # Encode latent
-                    _, mu_q, logvar_q, _ = encode_latent(
-                        encoder, t_encoder, x_encoder,
-                        enable_vae=False, enable_ae=True, enable_onlymedian=False
-                    )
-
-                    for i, sid in enumerate(id_list):
-                        mu = mu_q[i].cpu().numpy()[:dim_parameter_encoder]
-                        sigma = np.exp(0.5 * logvar_q[i].cpu().numpy()[:dim_parameter_encoder])
-                        mus_list.append(mu)
-                        sigmas_list.append(sigma)
-                        row = df[df["ID"] == int(sid)]
-                        if row.empty:
-                            continue
-                        ka_list.append(row["ka"].values[0])
-                        cl_list.append(row["cl"].values[0])
-
-        return np.vstack(mus_list), np.vstack(sigmas_list), np.array(ka_list), np.array(cl_list)
-
-    # ---------------- Extract latents ----------------
-    mus_val, sigmas_val, ka_val, cl_val = extract_latents_and_params(df_val, dataset_val, encoder1, dim_parameter_encoder)
-
-    # ---------------- Compute σ² and average precision ----------------
-    variances = sigmas_val ** 2
-    precisions = 1.0 / variances
-    avg_precisions = precisions.mean(axis=0)
-
-    print("Average precision (1/σ^2) per latent dimension:")
-    for i, prec in enumerate(avg_precisions):
-        print(f"  Dimension {i+1}: {prec:.4f}")
-
-    # ---------------- Plot μ vs true parameters ----------------
-    fs = 5
-    fig, axes = plt.subplots(2, dim_parameter_encoder, figsize=(fs*dim_parameter_encoder, fs*2))
-    parameter_names = ["ka", "cl"]
-    true_params = [ka_val, cl_val]
-
-    for i, param in enumerate(true_params):
-        for j in range(dim_parameter_encoder):
-            ax = axes[i, j] if dim_parameter_encoder > 1 else axes[i]
-            ax.scatter(mus_val[:, j], param, c="skyblue", s=80, alpha=0.7, edgecolors="k")
-            ax.plot([mus_val[:, j].min(), mus_val[:, j].max()],
-                    [param.min(), param.max()], "r--")
-            ax.set_xlabel(f"Latent dim {j+1} mean")
-            ax.set_ylabel(parameter_names[i])
-            ax.set_title(f"{parameter_names[i]} vs latent {j+1}")
-
-    plt.tight_layout()
-    plt.show()
-
-
-
- 
     
 def plot_single_model_encoders_and_regression_combined(
     df_train, df_val, dataset_train, dataset_val,
@@ -1810,15 +1729,6 @@ def split_dataloader_by_treatment(dataloader, dataset):
         )
     return loaders_by_treatment
 
-def sample_from_prior(encoder, batch_size, device):
-    """
-    Draw latent samples z ~ N(mu_p, L_p L_p^T) from the learned prior.
-    """
-    with torch.no_grad():
-        mu_p, L_p = encoder.get_prior(batch_size=batch_size)
-        eps = torch.randn(batch_size, mu_p.size(1), device=device)
-        z = mu_p + torch.einsum('bij,bj->bi', L_p, eps)
-    return z
 
 
 def generate_plot_data(
@@ -1882,28 +1792,19 @@ def generate_plot_data(
 
                 # === Encode latent ===
                 with use_ema(encoder):
-                    k_param,z0, mu_q, logvar_q, mu_p,L_p,_ = encode_latent(
+                    k_param,_, mu_q, logvar_q, mu_p,L_p,_,_ = encode_latent(
                         encoder, t_encoder, x_encoder,dose_tensor,
                         enable_vae=enable_vae,
                         enable_ae=enable_ae,
-                        enable_onlymedian=enable_onlymedian
+                        enable_onlymedian=enable_onlymedian,
+                        warmup_epochs_iiv=0,
+                        epoch=0,
+                        min_batch_size=50,
+                        augment=False,
+                        sample_posterior=False
                     )
-                if enable_vae:
-                     with use_ema(encoder):
-                             B, D = mu_p.shape
-                             eps = torch.randn(B, D, device=mu_p.device)
-                             k_param = mu_p + torch.einsum('bij,bj->bi', L_p, eps) 
-                             k_param=torch.cat([z0, k_param ], dim=-1)   
-
-                             cov_p = L_p @ L_p.transpose(-1, -2)
-                           #  print(cov_p)
-                             std = torch.sqrt(torch.diagonal(cov_p, dim1=-2, dim2=-1))  # [B, D]
-                             corr_p = cov_p / std.unsqueeze(-1) / std.unsqueeze(-2)
-                             
-                            # Print first batch
-                        #     print(corr_p[0])
-                                                 
-               
+  
+ 
                 with use_ema(func):
                         ode_func= prepare_ode_input(
                             x_padded,
@@ -2484,7 +2385,7 @@ def vpc(func_med,
     
     # ---- Plot all in a grid ---- #
     n_plots = len(plot_data)
-    n_cols = 2
+    n_cols = 5
     n_rows = math.ceil(n_plots / n_cols)
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 8 * n_rows), sharex=True, sharey=True)
@@ -2493,19 +2394,20 @@ def vpc(func_med,
     for i, data in enumerate(plot_data):
         ax = axes[i]
         
-        ax.plot(data["time_hours"], data["perc10_sim"], label="Simulated 10th", color="blue", linestyle="--", linewidth=2)
-        ax.plot(data["time_hours"], data["median_sim"], label="Simulated median", color="blue", marker="o", markersize=4, linewidth=2)
-        ax.plot(data["time_hours"], data["perc90_sim"], label="Simulated 90th", color="blue", linestyle="--", linewidth=2)
+        ax.plot(data["time_hours"], data["perc10_sim"], label="Reconstruction 10th", color="red", linestyle="--", linewidth=2)
+        ax.plot(data["time_hours"], data["median_sim"], label="Reconstruction median", color="red", marker="o", markersize=4, linewidth=2)
+        ax.plot(data["time_hours"], data["perc90_sim"], label="Reconstruction 90th", color="red", linestyle="--", linewidth=2)
         
         ax.plot(data["time_hours_data"], data["perc10_data"], label="Raw 10th", color="orange", linestyle="--", linewidth=2)
         ax.plot(data["time_hours_data"], data["median_data"], label="Raw median", color="orange", linewidth=2)
         ax.plot(data["time_hours_data"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--", linewidth=2)
         
-        ax.set_xlim(0, 16)
+        ax.set_xlim(0, 36)
+        ax.set_ylim(0, 600)
         # ax.set_ylim(0, 180)
         ax.set_title(f"Treatment {data['treatment']}", fontsize=32, fontweight='bold')
         ax.set_xlabel("Time (hours)", fontsize=24)
-        ax.set_ylabel(f"Tumor Volume", fontsize=28)
+        ax.set_ylabel(f"Concentration (mL/g)", fontsize=28)
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.tick_params(axis='both', which='major', labelsize=24, width=1.5)
     
@@ -2521,7 +2423,7 @@ def vpc(func_med,
         ncol=3,
         fontsize=26,
         frameon=False,
-        bbox_to_anchor=(0.5, -0.02)
+        bbox_to_anchor=(0.5, -0.1)
     )
     
     plt.tight_layout(rect=[0, 0.05, 1, 1])  # Leave space at the bottom for legend
