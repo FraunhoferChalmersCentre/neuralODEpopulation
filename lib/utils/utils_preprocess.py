@@ -181,7 +181,7 @@ class TrajectoryDataset(Dataset):
         self.df.columns = self.df.columns.str.strip().str.upper()
 
         # Convert numeric columns
-        for col in ['AMT', 'TIME', compartment, 'EVID']:
+        for col in ['AMT', 'COV_IND', 'TIME', compartment, 'EVID']:
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
 
         # Filter by subset_ids if provided
@@ -216,15 +216,17 @@ class TrajectoryDataset(Dataset):
             dose_times = torch.tensor(doses['TIME'].values / self.max_time, dtype=torch.float32)
             amt = torch.tensor(doses['AMT'].values / self.max_dose, dtype=torch.float32)
             evid = torch.tensor(doses['EVID'].values, dtype=torch.long)
-
+            cov_ind=torch.tensor(obs['COV_IND'].values, dtype=torch.long)
             # Treatment (scalar per subject)
             treatment = torch.tensor(group['TREATMENT'].iloc[0], dtype=torch.long)
+      
 
             trajectories.append({
                 't': t,
                 'x_global': x_global,
                 'dose_times': dose_times,
                 'amt': amt,
+                'cov_ind': cov_ind,
                 'evid': evid,
                 'subject_id': subject_id,
                 'treatment': treatment
@@ -276,7 +278,9 @@ def make_collate_fn(global_max_len, global_max_doses=None):
     def collate_fn(batch):
         t_list = [s['t'] for s in batch]
         x_global_list = [s['x_global'] for s in batch]
+        
         dose_list = [s['amt'] for s in batch]
+        cov_list = [s['cov_ind'] for s in batch]
         dose_times_list = [s['dose_times'] for s in batch]
         evid_list = [s['evid'] for s in batch]
         id_list = [s['subject_id'] for s in batch]
@@ -301,7 +305,7 @@ def make_collate_fn(global_max_len, global_max_doses=None):
         dose_tensor = pad_sequence(dose_list, batch_first=True)
         dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
         evid_padded = pad_sequence(evid_list, batch_first=True)
-
+        cov_padded=pad_sequence(cov_list, batch_first=True)
         if global_max_doses is not None:
             dose_pad = global_max_doses - dose_tensor.size(1)
             if dose_pad > 0:
@@ -318,6 +322,7 @@ def make_collate_fn(global_max_len, global_max_doses=None):
             t_padded,
             x_global_padded,
             mask,
+            cov_padded,
             dose_tensor,
             dose_times_padded,
             evid_padded,
@@ -411,68 +416,61 @@ def make_collate_fn(global_max_len, global_max_doses=None):
 
 
 def prepare_optimizer(models, device, lr, factor=0.8, patience=10, min_lr=1e-7, prior_lr_factor=100.0):
-    # 1️⃣ Move models to device first
+    # Move models to device
     for name, model in models.items():
         model.to(device)
         print(f"{name} is on {next(model.parameters()).device}")
 
     encoder = models["encoder"]
-    
-    # Split encoder parameters
     encoder_params = dict(encoder.named_parameters())
 
-    # Identify parameter groups
+    # Identify parameter subsets
     z0_mu_params = [p for n, p in encoder_params.items() if "z0_mu" in n]
-    prior_params = [p for n, p in encoder_params.items() if ("mu_p" in n or "prior_A" in n)]
+  #  dose_correction_params = list(encoder.dose_coef.parameters()) + list(encoder.L_dose_coef.parameters())
+
+    prior_base_params = [p for n, p in encoder_params.items() if "mu_p" in n]
     other_encoder_params = [
-        p for n, p in encoder_params.items() 
-        if "z0_mu" not in n and "mu_p" not in n and "prior_A" not in n
+        p for n, p in encoder_params.items()
+        if (
+            "z0_mu" not in n
+            and "mu_p" not in n
+            and "dose_coef" not in n
+            and "L_dose_coef" not in n
+        )
     ]
 
     main_params = [
-        # 1️⃣ NODE + reducer parameters
-        {
-            "params": list(models["func"].parameters()) + list(models["reducer"].parameters()),
-            "lr": lr,
-        },
-        # 2️⃣ Encoder (excluding z0_mu and prior)
-        {
-            "params": other_encoder_params,
-            "lr": lr,
-        },
-        # 3️⃣ z0_mu parameters (faster learning)
-        {
-            "params": z0_mu_params,
-            "lr": lr * 10.0,
-        },
-        # 4️⃣ Noise model (if any)
-        {
-            "params": list(models["noise"].parameters()),
-            "lr": lr,
-        },
+        # NODE + reducer
+        {"name": "core", "params": list(models["func"].parameters()) + list(models["reducer"].parameters()), "lr": lr},
+
+        # Encoder (standard parts)
+        {"name": "encoder_main", "params": other_encoder_params, "lr": lr},
+
+        # z0_mu parameters
+        {"name": "z0_mu", "params": z0_mu_params, "lr": lr * 10.0},
+
+        # Noise model
+        {"name": "noise", "params": list(models["noise"].parameters()), "lr": lr},
+
+        # Base prior parameters
+        {"name": "prior_base", "params": prior_base_params, "lr": lr * prior_lr_factor},
+
+        # # Dose-conditioned prior correction parameters
+        # {"name": "prior_correction", "params": dose_correction_params, "lr": lr * prior_lr_factor},
     ]
 
-    # 5️⃣ Prior parameters (optional)
-    if len(prior_params) > 0:
-        main_params.append({
-            "params": prior_params,
-            "lr": lr * prior_lr_factor,
-        })
-
-    # 6️⃣ Construct optimizer
     optimizer = torch.optim.Adam(main_params)
-
-    # 7️⃣ Add LR scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=factor, patience=patience, min_lr=min_lr
     )
 
     print("Optimizer prepared with parameter groups:")
-    for i, g in enumerate(main_params):
+    for g in main_params:
         n_params = sum(p.numel() for p in g["params"])
-        print(f" - Group {i}: {n_params:,} params, lr={g['lr']:.2e}")
+        print(f" - {g['name']}: {n_params:,} params, lr={g['lr']:.2e}")
 
     return optimizer, scheduler, main_params
+
 
 
 
@@ -514,10 +512,7 @@ def create_balanced_loader(dataset, batch_size, dose_key='amt', dose_threshold=0
     )
 
     return loader
-def prepare_datasets_and_loaders(data_path, data_path_val, data_path_test,global_mean,
-                                        
-                                           global_max_dose, global_max_time,
-                                           global_max,global_min_value, global_std, device,
+def prepare_datasets_and_loaders(data_path, data_path_test, device,
                                            batch_fraction=0.05,time_points=120):
     """
     Loads train/val/test datasets from CSV paths, creates DataLoaders, and generates
@@ -527,59 +522,55 @@ def prepare_datasets_and_loaders(data_path, data_path_val, data_path_test,global
         train_dataset, val_dataset, test_dataset, train_loader, val_loader, test_loader, combined
     """
     
+    
     df = pd.read_csv(data_path, sep=";")
+    
     all_ids = df['ID'].unique().tolist()
+    
 
-    n_ids = len(all_ids)
     random.shuffle(all_ids)
 
-   # all_ids = list(range(n_ids))
 
-    # test_frac = 0.3
-    # val_frac = 0
-    # train_frac = 1 - test_frac - val_frac  # 0.6
+#     test_frac = 0.3
+# #    val_frac = 0
+#     train_frac = 0.7##1 - test_frac - val_frac  # 0.6
     
     # Compute exact counts
-    n_test = 3 # int(12 * 0.3)   # 3
-    n_val  = 0 #int(12 * 0.1)   # 1
-    n_train =  9 #12 - n_test - n_val  # 8
+    n_test =  3#int(len(all_ids) * test_frac)   # 3
+  #  n_val  = 0 #int(12 * 0.1)   # 1
+    n_train = 9 #int(len(all_ids) * train_frac) 
+    
     
     # Split IDs
+    
+
+    
     train_ids = all_ids[:n_train]                 # first 7
  #   val_ids   = all_ids[n_train:n_train + n_val] # next 2
-    test_ids  = all_ids[n_train + n_val:]        # last 3
-
-    df = pd.read_csv(data_path, sep=";")
+    test_ids  = all_ids[n_train:]        # last 3
+  
+    
+    df_train=df[df['ID'].isin(train_ids)]
+    df_test=df[df['ID'].isin(test_ids)]
+    global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df_train)
 
     # --- Load datasets ---
     train_dataset = TrajectoryDataset(
         data_path,
         max_dose=global_max_dose,
         max_time=global_max_time,
-        max_value=global_max,
+        max_value=global_max_value,
         min_value=global_min_value,
         global_mean=global_mean,
         global_std=global_std,
         subset_ids=train_ids
-    )
-    train_base_dataset = TrajectoryDataset(
-        data_path,
-        max_dose=global_max_dose,
-        max_time=global_max_time,
-        max_value=global_max,
-        min_value=global_min_value,
-        global_mean=global_mean,
-        global_std=global_std
-
-    )
-
-  
+    ) 
 
     test_dataset = TrajectoryDataset(
         data_path,
         max_dose=global_max_dose,
         max_time=global_max_time,
-        max_value=global_max,
+        max_value=global_max_value,
         min_value=global_min_value,
         global_mean=global_mean,
         global_std=global_std,
@@ -605,10 +596,7 @@ def prepare_datasets_and_loaders(data_path, data_path_val, data_path_test,global
    # val_loader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False, collate_fn=collate_fn)
 
-    # --- Combined dose + time tensor ---
- #   df = pd.read_csv(data_path_train, sep=";")
 
-    # Collect all unique dose times from rows with EVID > 0
     dose_times = (
         df.loc[df['EVID'] > 0, 'TIME']
           .dropna()
@@ -623,7 +611,7 @@ def prepare_datasets_and_loaders(data_path, data_path_val, data_path_test,global
     merged_time_points = torch.tensor(merged_times, dtype=torch.float32).to(device)
 
 
-    return train_dataset, train_dataset, test_dataset,train_base_dataset,  train_loader, train_loader, test_loader, merged_time_points, batch_size_train, 1, batch_size_test
+    return df_test, df_train, train_dataset, test_dataset,  train_loader, test_loader, merged_time_points
 
 
 def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_path_test,global_mean,
@@ -739,10 +727,15 @@ def compute_global_stats(df):
         df[col] = pd.to_numeric(df[col].replace('.', pd.NA), errors='coerce')
     
     # Replace '.' with NaN and convert to numeric
-
+    observed_dv = df.loc[df['EVID'] == 0, ['TIME', 'DV']]  # keep both columns
+    first_time = observed_dv['TIME'].min()
+    global_mean = observed_dv.loc[observed_dv['TIME'] == first_time, 'DV'].median()
+    global_std = observed_dv['DV'].std()
+    global_std = max(global_std, 1e-6)
     global_max_dose = df['AMT'].max()
     global_max_time = df['TIME'].max()
-    global_mean = df.loc[df['TIME'] == df['TIME'].min(), 'DV'].median()
+    
+
     global_std = df['DV'].std()
     global_max_value = df['DV'].max()
     global_min_value = df['DV'].min()
@@ -750,42 +743,31 @@ def compute_global_stats(df):
 
 
 
-def export_all_metrics_and_residuals(metrics, residuals, base_dir, variants=["", "_ae", "_ae_noise"]):
+def export_all_metrics_and_residuals(metrics, base_dir):
     os.makedirs(base_dir, exist_ok=True)
     
-    for var in variants:
-        # Export metrics
-        metrics_df = pd.DataFrame(metrics[var])
-        metrics_file = os.path.join(base_dir, f"metrics_raw{var}.csv")
-        metrics_df.to_csv(metrics_file, index=False)
-        print(f"Saved metrics: {metrics_file}")
+   
+    metrics_df = pd.DataFrame(metrics)
+    metrics_file = os.path.join(base_dir, f"metrics.csv")
+    metrics_df.to_csv(metrics_file, index=False)
+    print(f"Saved metrics: {metrics_file}")
 
-        # Export residuals
-        residuals_file = os.path.join(base_dir, f"residuals_NODE{var}.csv")
-        if residuals[var]:  # only concat if list is non-empty
-            res_all = pd.concat(residuals[var], ignore_index=True)
-            res_all.to_csv(residuals_file, index=False)
-        else:
-            # create empty CSV with standard columns if no residuals yet
-            res_all = pd.DataFrame(columns=["Prediction", "Observation", "Residual", "Iteration", "ID"])
-            res_all.to_csv(residuals_file, index=False)
-        print(f"Saved residuals: {residuals_file}")
+   
         
         
         
-def append_metrics(metrics,residuals, variant, mse_mean, r2_mean, mse_median, r2_median, mse_validation, res_df):
+def append_metrics(metrics, mse_mean, r2_mean, mse_median, r2_median):
     """
     Append metrics and residuals safely for a given variant.
     """
-    metrics[variant]["mse_mean"].append(mse_mean)
-    metrics[variant]["r2_mean"].append(r2_mean)
-    metrics[variant]["mse_median"].append(mse_median)
-    metrics[variant]["r2_median"].append(r2_median)
-    metrics[variant]["mse_validation"].append(mse_validation)
-    residuals[variant].append(res_df)
+    metrics["mse_mean"].append(mse_mean)
+    metrics["r2_mean"].append(r2_mean)
+    metrics["mse_median"].append(mse_median)
+    metrics["r2_median"].append(r2_median)
 
 
-def load_all_metrics_and_residuals_as_lists(base_dir, variants=["", "_ae", "_ae_noise"]):
+
+def load_all_metrics_and_residuals_as_lists(base_dir):
     """
     Loads metrics and residuals CSVs for all specified variants,
     and converts all metrics to Python lists so they can be appended.
@@ -797,25 +779,23 @@ def load_all_metrics_and_residuals_as_lists(base_dir, variants=["", "_ae", "_ae_
     """
 
     metrics = {}
-    residuals = {}
 
     ensure_result_files(base_dir)  # make sure all files exist
 
-    for var in variants:
-        metrics_file = os.path.join(base_dir, f"metrics_raw{var}.csv")
-        loaded = load_existing_metrics(metrics_file, 
-                                       ["mse_mean","r2_mean","mse_median","r2_median","mse_validation"])
-        # Convert each series/list to pure Python list
-        metrics[var] = {k: list(v) for k, v in loaded.items()}
+   
+    metrics_file = os.path.join(base_dir, f"metrics.csv")
+    loaded = load_existing_metrics(metrics_file, 
+                                   ["mse_mean","r2_mean","mse_median","r2_median"])
+    # Convert each series/list to pure Python list
+    metrics = {k: list(v) for k, v in loaded.items()}
 
-        residuals_file = os.path.join(base_dir, f"residuals_NODE{var}.csv")
-        res = load_existing_residuals(residuals_file)
-        residuals[var] = list(res)  # ensure list
+
+
 
     # Compute already_done
-    already_done = max(len(metrics[var]["mse_mean"]) for var in variants)
+    already_done = len(metrics["mse_mean"])
 
-    return metrics, residuals, already_done
+    return metrics, already_done
 
 
 
@@ -828,12 +808,8 @@ def ensure_result_files(base_dir: str):
     print(f"[INFO] Base dir: {os.path.abspath(base_dir)}")
 
     files_and_headers = {
-        "metrics_raw.csv": ["mse_mean","r2_mean","mse_median","r2_median","mse_validation"],
-        "residuals_NODE.csv": ["id","time","residual"],
-        "metrics_raw_ae.csv": ["mse_mean","r2_mean","mse_median","r2_median","mse_validation"],
-        "residuals_NODE_ae.csv": ["id","time","residual"],
-        "metrics_raw_ae_noise.csv": ["mse_mean","r2_mean","mse_median","r2_median","mse_validation"],
-        "residuals_NODE_ae_noise.csv": ["id","time","residual"],
+        "metrics.csv": ["mse_mean","r2_mean","mse_median","r2_median"],
+  
     }
 
     for fname, headers in files_and_headers.items():
@@ -844,13 +820,7 @@ def ensure_result_files(base_dir: str):
         else:
             print(f"[INFO] Already exists: {path}")
 
-def load_existing_residuals(filepath):
-    """Load residuals from a CSV if it exists, else return an empty list."""
-    if os.path.exists(filepath):
-        df = pd.read_csv(filepath)
-        return [df]   # we keep as list to match append/concat later
-    else:
-        return []
+
     
 def load_existing_metrics(filepath, expected_columns):
     if os.path.exists(filepath):
@@ -917,4 +887,48 @@ def load_models(models: dict, load_dir: str, model_name: str, device=torch.devic
     return models    
 
 
+import pandas as pd
+
+def prepare_and_merge_datasets(df_train, df_test, base_dir=None):
+    """
+    Add censoring columns to train and test datasets, merge them, and optionally export.
+
+    Parameters:
+        df_train (pd.DataFrame): Training data
+        df_test  (pd.DataFrame): Test data
+        base_dir (str, optional): Folder to save merged CSV as 'merged_dataset.csv'
+
+    Returns:
+        pd.DataFrame: merged dataset with 'censoring' column
+    """
+
+    # --- df_train: all zeros ---
+    df_train = df_train.copy()
+    df_train['censoring'] = 0
+    
+    # --- df_test: last three rows per ID set to 1, rest 0 ---
+    df_test = df_test.copy()
+    df_test['censoring'] = 0
+    
+    # Sort by ID and TIME to ensure order
+    df_test.sort_values(['ID', 'TIME'], inplace=True)
+    
+    # Group by ID and set censoring for last three rows
+    def set_censoring(group):
+        group.iloc[-3:, group.columns.get_loc('censoring')] = 1
+        return group
+    
+    df_test = df_test.groupby('ID', group_keys=False).apply(set_censoring)
+    
+    # --- Merge train and test ---
+    df_merged = pd.concat([df_train, df_test], ignore_index=True)
+    
+    # Optional export
+    if base_dir:
+        os.makedirs(base_dir, exist_ok=True)  # ensure folder exists
+        export_path = os.path.join(base_dir, "merged_dataset.csv")
+        df_merged.to_csv(export_path, index=False)
+        print(f"Merged dataset saved to: {export_path}")
+    
+    return df_merged
 

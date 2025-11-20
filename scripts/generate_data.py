@@ -128,6 +128,128 @@ def main():
 
 if __name__ == "__main__":
     main()
+# %%# single_drug_simulation.py
+import os
+import sys
+import argparse
+import numpy as np
+import pandas as pd
+
+# Add project root to path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(project_root)
+
+from lib.utils.utils_data_generation import simulate_single_drug_concentration_with_covariate
+
+def main():
+    base_dir = os.getcwd()
+    default_save_dir = os.path.join(base_dir, "lib", "data")
+    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_correlated_test.csv")
+    os.makedirs(default_save_dir, exist_ok=True)
+
+    parser = argparse.ArgumentParser(description="Simulate single-drug concentration for 2 groups.")
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        default=default_save_path,
+        help="Path to save the simulated CSV file",
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Include this flag to show concentration plots",
+    )
+    args, _ = parser.parse_known_args()
+
+   #  # ----- Define dose times -----
+   
+    n=1000
+ # ----- Define groups -----
+    # dose_times = [0, 8, 16, 24]
+    # groups = [
+    #     {"name": "400 mg",  "n_individuals": n, "dose_amounts": [400, 400, 400,400]},
+    #     {"name": "800 mg",  "n_individuals": n, "dose_amounts": [800, 800, 800,800]}
+    # ]
+    
+    dose_times = [0, 3, 8]
+    groups = [
+        {"name": "Dose 350 mg",  "n_individuals": n, "dose_amounts": [350, 350, 350]},
+        {"name": "Dose 400 mg", "n_individuals": n, "dose_amounts": [400, 400, 400]},
+        {"name": "Dose 600 mg",  "n_individuals": n, "dose_amounts": [600, 600, 600]},
+        {"name": "Dose 800 mg", "n_individuals": n, "dose_amounts": [800, 800, 800]},
+        {"name": "Dose 850 mg",  "n_individuals": n, "dose_amounts": [850, 850, 850]}
+    ]
+
+
+    combined_data = []
+    id_offset = 0
+    corr_matrix = np.array([
+        [1.0, 0.5,0.35], #ka, ke, v
+        [0.5, 1.0,0.2],
+        [0.35, 0.2,1.0],
+   ])
+
+    # corr_matrix = np.array([
+    #        [1.0, 0,0], #ka, ke, v
+    #        [0, 1.0,0],
+    #        [0,0,1.0],
+    #   ])
+    
+    
+    treatment_counter = 0  # keep track of numeric treatment ID
+        
+        # Define a mapping for all treatment x covariate combinations
+    treatment_combinations = {}
+    treatment_counter = 0  # numeric ID for unique treatment x covariate combo
+    
+    for group_idx, group in enumerate(groups, start=1):
+        temp_save_path = os.path.join(default_save_dir, f"temp_group_{group_idx}.csv")
+    
+        df_group = simulate_single_drug_concentration_with_covariate(
+            n_individuals=group["n_individuals"],
+            dose_amounts=group["dose_amounts"],
+            dose_times=dose_times,
+            ka_mean=0.4, ke_mean=0.6, v_mean=50,
+            ka_sd=0.5, ke_sd=0.5, v_sd=0.5,
+            add_e=10, prop_e=0.0001,  covariate_effect=0, t_integration=(0, 30),
+            t_interval=(0,30), sample_frequency=0.5,
+            save_path=temp_save_path,
+            plot=True,
+            corr_matrix=corr_matrix
+        )
+    
+        df_group.columns = df_group.columns.str.strip().str.upper()
+        df_group["ID"] += id_offset
+        id_offset = df_group["ID"].max() + 1
+    
+        # Create descriptive TREATMENT_NAME
+        df_group["TREATMENT_NAME"] = (
+            group["name"] + " " + df_group["COV_IND"].apply(lambda x: "Covariate Effect" if x == 1 else "No Covariate Effect")
+        )
+    
+        # Assign numeric TREATMENT based on treatment x covariate combo
+        for combo in df_group["TREATMENT_NAME"].unique():
+            if combo not in treatment_combinations:
+                treatment_combinations[combo] = treatment_counter
+                treatment_counter += 1
+    
+        df_group["TREATMENT"] = df_group["TREATMENT_NAME"].map(treatment_combinations)
+    
+        combined_data.append(df_group)
+
+
+
+
+    # Combine all groups and save final CSV
+    df_all = pd.concat(combined_data, ignore_index=True)
+    df_all = df_all.sort_values(["ID","TIME"])
+    df_all.to_csv(args.save_path, index=False, sep=";")
+    print(f"Saved single-drug concentration dataset with {len(df_all)} rows to {args.save_path}")
+
+
+if __name__ == "__main__":
+    main()
+# %%
 # %%
 # single_drug_simulation.py
 import os
@@ -145,7 +267,7 @@ from lib.utils.utils_data_generation import simulate_single_drug_concentration
 def main():
     base_dir = os.getcwd()
     default_save_dir = os.path.join(base_dir, "lib", "data")
-    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_corr_val.csv")
+    default_save_path = os.path.join(default_save_dir, "Simulated_ODE3_correlated_train.csv")
     os.makedirs(default_save_dir, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Simulate single-drug concentration for 2 groups.")
@@ -171,7 +293,7 @@ def main():
         {"name": "Low Dose",  "n_individuals": n, "dose_amounts": [400, 400, 400,400]},
         {"name": "High Dose",  "n_individuals": n, "dose_amounts": [800, 800, 800,800]}
     ]
-    
+     
     # dose_times = [0, 3, 8]
     # groups = [
     #     {"name": "Dose 200",  "n_individuals": n, "dose_amounts": [350, 350, 350]},
@@ -190,7 +312,11 @@ def main():
         [0.35, 0.2,1.0],
    ])
 
-    
+    # corr_matrix = np.array([
+    #        [1.0, 0,0], #ka, ke, v
+    #        [0, 1.0,0],
+    #        [0,0,1.0],
+    #   ])
     
     
     for group_idx, group in enumerate(groups, start=1):
@@ -202,8 +328,8 @@ def main():
             dose_times=dose_times,
             ka_mean=0.4, ke_mean=0.6, v_mean=50,
             ka_sd=0.5, ke_sd=0.5, v_sd=0.5,
-            add_e=10, prop_e=0.0001,t_integration=(0, 36),
-            t_interval=(0,36), sample_frequency=0.5,
+            add_e=10, prop_e=0.0001,t_integration=(0, 30),
+            t_interval=(0,30), sample_frequency=0.5,
             save_path=temp_save_path,
             plot=True,
             corr_matrix=corr_matrix  # <-- Add correlation here

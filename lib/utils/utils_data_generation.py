@@ -10,330 +10,330 @@ import pandas as pd
 
 import matplotlib.pyplot as plt
 
-def plot_batch_results_truncated(results, dose_times):
-    fig, ax = plt.subplots(figsize=(10, 6))
+# def plot_batch_results_truncated(results, dose_times):
+#     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Extract unique doses and create a colormap
-    doses = [res['dose_amount'] for res in results]
-    unique_doses = sorted(set(doses))
-    cmap = plt.get_cmap('viridis', len(unique_doses))
+#     # Extract unique doses and create a colormap
+#     doses = [res['dose_amount'] for res in results]
+#     unique_doses = sorted(set(doses))
+#     cmap = plt.get_cmap('viridis', len(unique_doses))
 
-    # Map dose -> color
-    dose_to_color = {dose: cmap(i) for i, dose in enumerate(unique_doses)}
+#     # Map dose -> color
+#     dose_to_color = {dose: cmap(i) for i, dose in enumerate(unique_doses)}
 
-    for res in results:
-        t = res['t_eval']
-        c2 = res['C2_with_noise']
-        t_sample = res['t_sample']   # <-- use per-individual samples
-        dose = res['dose_amount']
-        color = dose_to_color[dose]
-        id_label = f'ID {res["ID"]} (dose: {dose})'
+#     for res in results:
+#         t = res['t_eval']
+#         c2 = res['C2_with_noise']
+#         t_sample = res['t_sample']   # <-- use per-individual samples
+#         dose = res['dose_amount']
+#         color = dose_to_color[dose]
+#         id_label = f'ID {res["ID"]} (dose: {dose})'
 
-        sampled = np.interp(t_sample, t, c2)
-        ax.plot(t, c2, label=id_label, color=color)
-        ax.plot(t_sample, sampled, 'o', alpha=0.4, color=color)
+#         sampled = np.interp(t_sample, t, c2)
+#         ax.plot(t, c2, label=id_label, color=color)
+#         ax.plot(t_sample, sampled, 'o', alpha=0.4, color=color)
 
-    for t_dose in dose_times:
-        ax.axvline(x=t_dose, color='gray', linestyle='--', alpha=0.3)
+#     for t_dose in dose_times:
+#         ax.axvline(x=t_dose, color='gray', linestyle='--', alpha=0.3)
 
-    ax.set_xlabel('Time (h)')
-    ax.set_ylabel('C2 Concentration (with noise)')
+#     ax.set_xlabel('Time (h)')
+#     ax.set_ylabel('C2 Concentration (with noise)')
 
-    # Legend (by dose only)
-    from matplotlib.lines import Line2D
-    legend_elements = [Line2D([0], [0], color=dose_to_color[d], lw=2, label=f'Dose {d}') for d in unique_doses]
-    ax.legend(handles=legend_elements, title="Dose Amounts")
+#     # Legend (by dose only)
+#     from matplotlib.lines import Line2D
+#     legend_elements = [Line2D([0], [0], color=dose_to_color[d], lw=2, label=f'Dose {d}') for d in unique_doses]
+#     ax.legend(handles=legend_elements, title="Dose Amounts")
 
-    ax.grid()
-    plt.title("Simulated C2 Concentration Over Time (Batch)")
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_batch_results(results, t_sample, dose_times):
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    # Extract unique doses and create a colormap
-    doses = [res['dose_amount'] for res in results]
-    unique_doses = sorted(set(doses))
-    cmap = plt.get_cmap('viridis', len(unique_doses))
+#     ax.grid()
+#     plt.title("Simulated C2 Concentration Over Time (Batch)")
+#     plt.tight_layout()
+#     plt.show()
 
 
-    # Create a mapping dose -> color
-    dose_to_color = {dose: cmap(i) for i, dose in enumerate(unique_doses)}
+# def plot_batch_results(results, t_sample, dose_times):
+#     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for res in results:
-        t = res['t_eval']
-        c2 = res['C2_with_noise']
-        dose = res['dose_amount']
-        color = dose_to_color[dose]
-        id_label = f'ID {res["ID"]} (dose: {dose})'
-        sampled = np.interp(t_sample, t, c2)
-        ax.plot(t, c2, label=id_label, color=color)
-        ax.plot(t_sample, sampled, 'o', alpha=0.4, color=color)
+#     # Extract unique doses and create a colormap
+#     doses = [res['dose_amount'] for res in results]
+#     unique_doses = sorted(set(doses))
+#     cmap = plt.get_cmap('viridis', len(unique_doses))
 
-    for t_dose in dose_times:
-        ax.axvline(x=t_dose, color='gray', linestyle='--', alpha=0.3)
 
-    ax.set_xlabel('Time (h)')
-    ax.set_ylabel('C2 Concentration (with noise)')
-    # Optional: show legend with doses only
-    from matplotlib.lines import Line2D
-    legend_elements = [Line2D([0], [0], color=dose_to_color[d], lw=2, label=f'Dose {d}') for d in unique_doses]
-    ax.legend(handles=legend_elements, title="Dose Amounts")
+#     # Create a mapping dose -> color
+#     dose_to_color = {dose: cmap(i) for i, dose in enumerate(unique_doses)}
 
-    ax.grid()
-    plt.title("Simulated C2 Concentration Over Time (Batch)")
-    plt.tight_layout()
-    plt.show()
+#     for res in results:
+#         t = res['t_eval']
+#         c2 = res['C2_with_noise']
+#         dose = res['dose_amount']
+#         color = dose_to_color[dose]
+#         id_label = f'ID {res["ID"]} (dose: {dose})'
+#         sampled = np.interp(t_sample, t, c2)
+#         ax.plot(t, c2, label=id_label, color=color)
+#         ax.plot(t_sample, sampled, 'o', alpha=0.4, color=color)
 
-def save_results(sampled_data, save_path):
-    df = pd.DataFrame(sampled_data)
-    df.to_csv(save_path, index=False, sep=';')
+#     for t_dose in dose_times:
+#         ax.axvline(x=t_dose, color='gray', linestyle='--', alpha=0.3)
+
+#     ax.set_xlabel('Time (h)')
+#     ax.set_ylabel('C2 Concentration (with noise)')
+#     # Optional: show legend with doses only
+#     from matplotlib.lines import Line2D
+#     legend_elements = [Line2D([0], [0], color=dose_to_color[d], lw=2, label=f'Dose {d}') for d in unique_doses]
+#     ax.legend(handles=legend_elements, title="Dose Amounts")
+
+#     ax.grid()
+#     plt.title("Simulated C2 Concentration Over Time (Batch)")
+#     plt.tight_layout()
+#     plt.show()
+
+# def save_results(sampled_data, save_path):
+#     df = pd.DataFrame(sampled_data)
+#     df.to_csv(save_path, index=False, sep=';')
     
 
 
 
 
-def simulate_2cpt_and_save_vectorized_truncated(
-    n_individuals, add_e, prop_e, dose_amounts, dose_times, save_path,
-    min_samples=4, plot=False
-):
-    """
-    Simulates 2-compartment model, then truncates each individual's time series
-    to mimic variable follow-up lengths.
-    """
-    # --- Step 1: Run the full simulation in memory ---
-    sampled_data_full = []
-    all_results_full = []
+# def simulate_2cpt_and_save_vectorized_truncated(
+#     n_individuals, add_e, prop_e, dose_amounts, dose_times, save_path,
+#     min_samples=4, plot=False
+# ):
+#     """
+#     Simulates 2-compartment model, then truncates each individual's time series
+#     to mimic variable follow-up lengths.
+#     """
+#     # --- Step 1: Run the full simulation in memory ---
+#     sampled_data_full = []
+#     all_results_full = []
 
-    def capture_results(data, results):
-        nonlocal sampled_data_full, all_results_full
-        sampled_data_full = data
-        all_results_full = results
+#     def capture_results(data, results):
+#         nonlocal sampled_data_full, all_results_full
+#         sampled_data_full = data
+#         all_results_full = results
 
-    # Override save_results temporarily to capture data
-    orig_save_results = globals().get("save_results")
-    def save_results_override(data, path):
-        capture_results(data, all_results_full)
-    globals()["save_results"] = save_results_override
+#     # Override save_results temporarily to capture data
+#     orig_save_results = globals().get("save_results")
+#     def save_results_override(data, path):
+#         capture_results(data, all_results_full)
+#     globals()["save_results"] = save_results_override
 
-    simulate_2cpt_and_save_vectorized(
-        n_individuals, add_e, prop_e, dose_amounts, dose_times,
-        save_path="__dummy__", plot=True
-    )
+#     simulate_2cpt_and_save_vectorized(
+#         n_individuals, add_e, prop_e, dose_amounts, dose_times,
+#         save_path="__dummy__", plot=True
+#     )
 
-    if orig_save_results:
-        globals()["save_results"] = orig_save_results
+#     if orig_save_results:
+#         globals()["save_results"] = orig_save_results
 
-    # --- Step 2: Apply truncation ---
-    truncated_data = []
-    truncated_results = []
-    rng = np.random.default_rng()
+#     # --- Step 2: Apply truncation ---
+#     truncated_data = []
+#     truncated_results = []
+#     rng = np.random.default_rng()
 
-    for subj_id in set(d["ID"] for d in sampled_data_full):
-        subj_rows = [d for d in sampled_data_full if d["ID"] == subj_id]
-        subj_rows_sorted = sorted(subj_rows, key=lambda x: x["TIME"])
+#     for subj_id in set(d["ID"] for d in sampled_data_full):
+#         subj_rows = [d for d in sampled_data_full if d["ID"] == subj_id]
+#         subj_rows_sorted = sorted(subj_rows, key=lambda x: x["TIME"])
 
-        # choose random truncation length
-        max_samples = len(subj_rows_sorted)
-        n_keep = rng.integers(low=min_samples, high=max_samples + 1)
+#         # choose random truncation length
+#         max_samples = len(subj_rows_sorted)
+#         n_keep = rng.integers(low=min_samples, high=max_samples + 1)
 
-        kept_rows = subj_rows_sorted[:n_keep]
-        truncated_data.extend(kept_rows)
+#         kept_rows = subj_rows_sorted[:n_keep]
+#         truncated_data.extend(kept_rows)
 
-        if plot:
-            t_sample = [row["TIME"] for row in kept_rows]
-            C2_with_noise = [row["DV"] for row in kept_rows]
+#         if plot:
+#             t_sample = [row["TIME"] for row in kept_rows]
+#             C2_with_noise = [row["DV"] for row in kept_rows]
 
-            truncated_results.append({
-                "t_eval": t_sample,
-                "t_sample": t_sample,
-                "C2_with_noise": np.array(C2_with_noise),
-                "ID": subj_id,
-                "dose_amount": kept_rows[0]["AMT"]
-            })
+#             truncated_results.append({
+#                 "t_eval": t_sample,
+#                 "t_sample": t_sample,
+#                 "C2_with_noise": np.array(C2_with_noise),
+#                 "ID": subj_id,
+#                 "dose_amount": kept_rows[0]["AMT"]
+#             })
 
-    # --- Step 3: Save and/or plot ---
-    save_results(truncated_data, save_path)
+#     # --- Step 3: Save and/or plot ---
+#     save_results(truncated_data, save_path)
 
-    if plot:
-        plot_batch_results_truncated(truncated_results, dose_times)
+#     if plot:
+#         plot_batch_results_truncated(truncated_results, dose_times)
         
-def simulate_2cpt_sde_and_save_vectorized(
-    n_individuals, add_e, prop_e, dose_amounts, dose_times,
-    save_path, plot=False,
-    sigma_ka=0.0, sigma_ke=0.0, sigma_v=0.0,    sigma_state1=5, sigma_state2=5
-):
-    """
-    Simulate 2-compartment PK model with SDE structural noise
-    for multiple individuals and save results.
-    """
+# def simulate_2cpt_sde_and_save_vectorized(
+#     n_individuals, add_e, prop_e, dose_amounts, dose_times,
+#     save_path, plot=False,
+#     sigma_ka=0.0, sigma_ke=0.0, sigma_v=0.0,    sigma_state1=5, sigma_state2=5
+# ):
+#     """
+#     Simulate 2-compartment PK model with SDE structural noise
+#     for multiple individuals and save results.
+#     """
 
-    t_interval = (0, 24)
-    sample_frequency = 0.5
-    ka_mean = 0.6
-    ke_mean = 0.6
-    v_mean = 50.0
+#     t_interval = (0, 24)
+#     sample_frequency = 0.5
+#     ka_mean = 0.6
+#     ke_mean = 0.6
+#     v_mean = 50.0
 
-    ka_sd = 0.5
-    ke_sd = 0.5
-    v_sd = 0.1   # <-- SD for lognormal variability in v
+#     ka_sd = 0.5
+#     ke_sd = 0.5
+#     v_sd = 0.1   # <-- SD for lognormal variability in v
 
-    add_error = add_e
-    prop_error = prop_e
+#     add_error = add_e
+#     prop_error = prop_e
 
-    # add denser points around dose events
-    extra_points = []
-    window = 0.3
-    for dt in dose_times:
-        extra_points.extend(np.linspace(dt - window, dt + window, 100))
+#     # add denser points around dose events
+#     extra_points = []
+#     window = 0.3
+#     for dt in dose_times:
+#         extra_points.extend(np.linspace(dt - window, dt + window, 100))
 
-    t_eval = np.unique(np.concatenate([
-        np.linspace(t_interval[0], t_interval[1], 120),
-        dose_times, extra_points
-    ]))
-    t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
+#     t_eval = np.unique(np.concatenate([
+#         np.linspace(t_interval[0], t_interval[1], 120),
+#         dose_times, extra_points
+#     ]))
+#     t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
 
-    sampled_data = []
-    all_results = []
-    id_counter = 1
+#     sampled_data = []
+#     all_results = []
+#     id_counter = 1
 
-    for dose_amount in dose_amounts:
-        # sample inter-individual variability (log-normal distributions)
-        ka_samples = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_individuals)
-        ke_samples = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_individuals)
-        v_samples  = np.random.lognormal(mean=np.log(v_mean),  sigma=v_sd,  size=n_individuals)
+#     for dose_amount in dose_amounts:
+#         # sample inter-individual variability (log-normal distributions)
+#         ka_samples = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_individuals)
+#         ke_samples = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_individuals)
+#         v_samples  = np.random.lognormal(mean=np.log(v_mean),  sigma=v_sd,  size=n_individuals)
 
-        # Simulate all individuals with SDE solver (parameter noise)
-        C2_simulated = []
-        for i in range(n_individuals):
-            conc_i = solve_individual_vectorized_sde_param_noise(
-                ka_samples[i:i+1], ke_samples[i:i+1], v_samples[i],
-                dose_amount, dose_times, t_eval,
-                sigma_ka=sigma_ka, sigma_ke=sigma_ke, sigma_v=sigma_v,    sigma_state1=sigma_state1, sigma_state2=sigma_state2
-            )
-            C2_simulated.append(conc_i[0])  # shape (len(t_eval),)
-        C2_simulated = np.array(C2_simulated)
+#         # Simulate all individuals with SDE solver (parameter noise)
+#         C2_simulated = []
+#         for i in range(n_individuals):
+#             conc_i = solve_individual_vectorized_sde_param_noise(
+#                 ka_samples[i:i+1], ke_samples[i:i+1], v_samples[i],
+#                 dose_amount, dose_times, t_eval,
+#                 sigma_ka=sigma_ka, sigma_ke=sigma_ke, sigma_v=sigma_v,    sigma_state1=sigma_state1, sigma_state2=sigma_state2
+#             )
+#             C2_simulated.append(conc_i[0])  # shape (len(t_eval),)
+#         C2_simulated = np.array(C2_simulated)
 
-        # Add observation noise
-        noise = np.random.normal(0, add_error, size=C2_simulated.shape)
-        noise_prop = np.random.normal(0, prop_error, size=C2_simulated.shape)
-        C2_with_noise = C2_simulated.copy()
-        mask = C2_simulated > 0
-        C2_with_noise[mask] = C2_simulated[mask] * (1 + noise_prop[mask]) + noise[mask]
-        C2_with_noise[C2_with_noise < 0] = 0
+#         # Add observation noise
+#         noise = np.random.normal(0, add_error, size=C2_simulated.shape)
+#         noise_prop = np.random.normal(0, prop_error, size=C2_simulated.shape)
+#         C2_with_noise = C2_simulated.copy()
+#         mask = C2_simulated > 0
+#         C2_with_noise[mask] = C2_simulated[mask] * (1 + noise_prop[mask]) + noise[mask]
+#         C2_with_noise[C2_with_noise < 0] = 0
 
-        # Resample at uniform grid
-        C2_sampled = np.array([np.interp(t_sample, t_eval, c2) for c2 in C2_with_noise])
-        C1_dummy = np.zeros_like(C2_sampled)
+#         # Resample at uniform grid
+#         C2_sampled = np.array([np.interp(t_sample, t_eval, c2) for c2 in C2_with_noise])
+#         C1_dummy = np.zeros_like(C2_sampled)
 
-        # Store results
-        for i in range(n_individuals):
-            for t, C1, C2 in zip(t_sample, C1_dummy[i], C2_sampled[i]):
-                sampled_data.append({
-                    'TIME': t,
-                    'AMT': dose_amount,
-                    'ID': id_counter + i,
-                    'DV': C2,
-                    'ka': ka_samples[i],
-                    'ke': ke_samples[i],
-                    'v': v_samples[i],
-                    'DOSE TIME': dose_times
-                })
+#         # Store results
+#         for i in range(n_individuals):
+#             for t, C1, C2 in zip(t_sample, C1_dummy[i], C2_sampled[i]):
+#                 sampled_data.append({
+#                     'TIME': t,
+#                     'AMT': dose_amount,
+#                     'ID': id_counter + i,
+#                     'DV': C2,
+#                     'ka': ka_samples[i],
+#                     'ke': ke_samples[i],
+#                     'v': v_samples[i],
+#                     'DOSE TIME': dose_times
+#                 })
 
-            if plot:
-                all_results.append({
-                    't_eval': t_sample,
-                    't_sample': t_sample,
-                    'C2_with_noise': C2_sampled[i],
-                    'ID': id_counter + i,
-                    'dose_amount': dose_amount
-                })
+#             if plot:
+#                 all_results.append({
+#                     't_eval': t_sample,
+#                     't_sample': t_sample,
+#                     'C2_with_noise': C2_sampled[i],
+#                     'ID': id_counter + i,
+#                     'dose_amount': dose_amount
+#                 })
 
-        id_counter += n_individuals
+#         id_counter += n_individuals
 
-    save_results(sampled_data, save_path)
+#     save_results(sampled_data, save_path)
 
-    if plot:
-        plot_batch_results(all_results, t_sample, dose_times)
-
-
-
-def pk_2cpt_sde_step_param_noise(
-    y, ka, ke, v, dose_amount, dose_times, t, dt,
-    sigma_ka=0.05, sigma_ke=0.05, sigma_v=0.0,
-    sigma_state1=5, sigma_state2=5
-):
-    """
-    Euler–Maruyama step for 2-compartment SDE with:
-      - noise on parameters (ka, ke, v)
-      - additive structural noise on state dynamics (C1, C2)
-
-    y: shape (N_samples, 2) for C1, C2
-    """
-    C1 = y[:, 0]
-    C2 = y[:, 1]
-
-    ka = np.asarray(ka)
-    ke = np.asarray(ke)
-    v = float(v)
-    dose_amount = float(dose_amount)
-    dose_times = np.asarray(dose_times)
-
-    # stochastic noise on parameters
-    dW_ka = np.random.normal(0, np.sqrt(dt), size=ka.shape)
-    dW_ke = np.random.normal(0, np.sqrt(dt), size=ke.shape)
-    dW_v  = np.random.normal(0, np.sqrt(dt)) if sigma_v > 0 else 0.0
-
-    ka_t = ka * (1 + sigma_ka * dW_ka)
-    ke_t = ke * (1 + sigma_ke * dW_ke)
-    v_t  = v * (1 + sigma_v * dW_v) if sigma_v > 0 else v
-
-    # deterministic drift using noisy parameters
-    dose_input = dose_amount * approx_dirac_delta_vectorized(t, dose_times, dt)
-    dC1dt = -ka_t * C1 + dose_input
-    dC2dt = ka_t * C1 - (ke_t) * C2
-
-    # --- structural noise (Euler–Maruyama) ---
-    dW1 = np.random.normal(0, np.sqrt(dt), size=C1.shape)
-    dW2 = np.random.normal(0, np.sqrt(dt), size=C2.shape)
-
-    dC1 = dC1dt * dt + sigma_state1  * dW1
-    dC2 = dC2dt * dt + sigma_state2  * dW2
-
-    y_next = y + np.stack([dC1, dC2], axis=1)
-    return y_next
+#     if plot:
+#         plot_batch_results(all_results, t_sample, dose_times)
 
 
-def solve_individual_vectorized_sde_param_noise(
-        ka, ke, v, dose_amount, dose_times, t_eval,
-        sigma_ka=0.05, sigma_ke=0.05, sigma_v=0.0,
-        sigma_state1=0.02, sigma_state2=0.02):
-    """
-    Vectorized solver for 2-compartment SDE with parameter noise.
-    ka, ke: arrays of size (N_samples,)
-    v: scalar
-    """
-    N_samples = ka.shape[0]
-    y = np.zeros((N_samples, 2))   # C1, C2
-    y[:, 0] = 0
-    y[:, 1] = v
 
-    y_out = np.zeros((N_samples, len(t_eval)))
-    y_out[:, 0] = y[:, 1]  # plasma concentration (C2)
+# def pk_2cpt_sde_step_param_noise(
+#     y, ka, ke, v, dose_amount, dose_times, t, dt,
+#     sigma_ka=0.05, sigma_ke=0.05, sigma_v=0.0,
+#     sigma_state1=5, sigma_state2=5
+# ):
+#     """
+#     Euler–Maruyama step for 2-compartment SDE with:
+#       - noise on parameters (ka, ke, v)
+#       - additive structural noise on state dynamics (C1, C2)
 
-    for i in range(1, len(t_eval)):
-        dt = t_eval[i] - t_eval[i - 1]
-        y = pk_2cpt_sde_step_param_noise(
-            y, ka, ke, v, dose_amount, dose_times,
-            t_eval[i - 1], dt,
-            sigma_ka=sigma_ka, sigma_ke=sigma_ke, sigma_v=sigma_v,
-            sigma_state1=sigma_state1, sigma_state2=sigma_state2
-        )
-        y_out[:, i] = y[:, 1]  # plasma concentrations
+#     y: shape (N_samples, 2) for C1, C2
+#     """
+#     C1 = y[:, 0]
+#     C2 = y[:, 1]
 
-    return y_out
+#     ka = np.asarray(ka)
+#     ke = np.asarray(ke)
+#     v = float(v)
+#     dose_amount = float(dose_amount)
+#     dose_times = np.asarray(dose_times)
+
+#     # stochastic noise on parameters
+#     dW_ka = np.random.normal(0, np.sqrt(dt), size=ka.shape)
+#     dW_ke = np.random.normal(0, np.sqrt(dt), size=ke.shape)
+#     dW_v  = np.random.normal(0, np.sqrt(dt)) if sigma_v > 0 else 0.0
+
+#     ka_t = ka * (1 + sigma_ka * dW_ka)
+#     ke_t = ke * (1 + sigma_ke * dW_ke)
+#     v_t  = v * (1 + sigma_v * dW_v) if sigma_v > 0 else v
+
+#     # deterministic drift using noisy parameters
+#     dose_input = dose_amount * approx_dirac_delta_vectorized(t, dose_times, dt)
+#     dC1dt = -ka_t * C1 + dose_input
+#     dC2dt = ka_t * C1 - (ke_t) * C2
+
+#     # --- structural noise (Euler–Maruyama) ---
+#     dW1 = np.random.normal(0, np.sqrt(dt), size=C1.shape)
+#     dW2 = np.random.normal(0, np.sqrt(dt), size=C2.shape)
+
+#     dC1 = dC1dt * dt + sigma_state1  * dW1
+#     dC2 = dC2dt * dt + sigma_state2  * dW2
+
+#     y_next = y + np.stack([dC1, dC2], axis=1)
+#     return y_next
+
+
+# def solve_individual_vectorized_sde_param_noise(
+#         ka, ke, v, dose_amount, dose_times, t_eval,
+#         sigma_ka=0.05, sigma_ke=0.05, sigma_v=0.0,
+#         sigma_state1=0.02, sigma_state2=0.02):
+#     """
+#     Vectorized solver for 2-compartment SDE with parameter noise.
+#     ka, ke: arrays of size (N_samples,)
+#     v: scalar
+#     """
+#     N_samples = ka.shape[0]
+#     y = np.zeros((N_samples, 2))   # C1, C2
+#     y[:, 0] = 0
+#     y[:, 1] = v
+
+#     y_out = np.zeros((N_samples, len(t_eval)))
+#     y_out[:, 0] = y[:, 1]  # plasma concentration (C2)
+
+#     for i in range(1, len(t_eval)):
+#         dt = t_eval[i] - t_eval[i - 1]
+#         y = pk_2cpt_sde_step_param_noise(
+#             y, ka, ke, v, dose_amount, dose_times,
+#             t_eval[i - 1], dt,
+#             sigma_ka=sigma_ka, sigma_ke=sigma_ke, sigma_v=sigma_v,
+#             sigma_state1=sigma_state1, sigma_state2=sigma_state2
+#         )
+#         y_out[:, i] = y[:, 1]  # plasma concentrations
+
+#     return y_out
 
 
 
@@ -1038,7 +1038,8 @@ def simulate_single_drug_concentration(
                 'AMT': 0,
                 'EVID': 0,
                 'PARAM_NAMES': param_names,
-                'PARAM_VALUES': param_values
+                'PARAM_VALUES': param_values,
+                'COV_IND': 0
             })
 
         if plot:
@@ -1058,6 +1059,132 @@ def simulate_single_drug_concentration(
     print(f"Saved simulated concentration data to {save_path}")
     return df
 
+def simulate_single_drug_concentration_with_covariate(
+    n_individuals,
+    dose_amounts,
+    dose_times,
+    ka_mean=0.6,
+    ke_mean=0.6,
+    v_mean=50.0,
+    ka_sd=0.3,
+    ke_sd=0.3,
+    v_sd=0.25,
+    corr_matrix=None,
+    add_e=0,
+    prop_e=0,
+    covariate_effect=0.5,       # 20% increase in ke
+    t_interval=(0, 24),
+    t_integration=None,
+    sample_frequency=0.5,
+    dt=0.01,
+    save_path="single_drug_sim_covariate.csv",
+    plot=False
+):
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    if corr_matrix is None:
+        corr_matrix = np.eye(3)
+
+    sd_vector = np.array([ka_sd, ke_sd, v_sd])
+    cov_matrix = np.outer(sd_vector, sd_vector) * corr_matrix
+
+    if t_integration is None:
+        t_integration = t_interval
+
+    t0_int, t_end_int = t_integration
+    t_eval = np.arange(t0_int, t_end_int + dt/2, dt)
+
+    t0_rec, t_end_rec = t_interval
+    t_sample = np.arange(t0_rec, t_end_rec + sample_frequency/2, sample_frequency)
+
+    sampled_data = []
+    id_counter = 1
+
+    # Randomly select half of individuals to have the covariate
+    covariate_ids = np.random.choice(n_individuals, 0, replace=False)
+
+    for ind in range(n_individuals):
+        # Sample correlated PK parameters (lognormal)
+        mean_vector = np.log([ka_mean, ke_mean, v_mean])
+        normal_sample = np.random.multivariate_normal(mean_vector, cov_matrix)
+        ka, ke, v = np.exp(normal_sample)
+
+        # Determine if this individual has covariate
+        has_covariate = int(ind in covariate_ids)
+        
+
+        param_names = ['ka', 'ke','v']
+        param_values = [ka, ke, v]
+        if has_covariate:
+            ke *= (1 + covariate_effect)
+        # Initialize compartments
+        A_gut = 0.0
+        A_central = v
+
+        dose_counter = 0
+        n_doses = len(dose_times)
+        conc_trace = np.zeros_like(t_eval)
+
+        for i, t in enumerate(t_eval):
+            while dose_counter < n_doses and t >= dose_times[dose_counter]:
+                amt = dose_amounts[dose_counter]
+                A_gut += amt
+                if t0_rec <= t <= t_end_rec:
+                    sampled_data.append({
+                        'ID': id_counter,
+                        'TIME': t,
+                        'DV': np.nan,
+                        'AMT': amt,
+                        'EVID': 1,
+                        'PARAM_NAMES': param_names,
+                        'PARAM_VALUES': param_values,
+                        'COV_IND': has_covariate
+                    })
+                dose_counter += 1
+
+            conc_trace[i] = A_central
+            dA_gut = -ka * A_gut
+            dA_central = ka * A_gut - ke * A_central
+            A_gut += dA_gut * dt
+            A_central += dA_central * dt
+            A_gut = max(A_gut, 0)
+            A_central = max(A_central, 0)
+
+        C_sampled = np.interp(t_sample, t_eval, conc_trace)
+        noise_add = np.random.normal(0, add_e, size=C_sampled.shape)
+        noise_prop = np.random.normal(0, prop_e, size=C_sampled.shape)
+        C_noisy = np.maximum(0, C_sampled * (1 + noise_prop) + noise_add)
+
+        for t_obs, dv in zip(t_sample, C_noisy):
+            sampled_data.append({
+                'ID': id_counter,
+                'TIME': t_obs,
+                'DV': dv,
+                'AMT': 0,
+                'EVID': 0,
+                'PARAM_NAMES': param_names,
+                'PARAM_VALUES': param_values,
+                'COV_IND': has_covariate
+            })
+
+        if plot:
+            plt.plot(t_sample, C_noisy, label=f"Ind {id_counter}")
+
+        id_counter += 1
+
+    df = pd.DataFrame(sampled_data).sort_values(['ID', 'TIME'])
+    df.to_csv(save_path, index=False, sep=';')
+
+    if plot:
+        plt.xlabel("Time (hours)")
+        plt.ylabel("Concentration (DV)")
+        plt.title("Simulated Single-Drug Concentration-Time Profiles with Covariate Effect")
+        plt.show()
+
+    print(f"Saved simulated concentration data to {save_path}")
+    return df
 
 
 def simulate_single_drug_concentration_1comp(
@@ -1207,221 +1334,219 @@ def simulate_single_drug_concentration_1comp(
 
 
 
-def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
-    """
-    Approximate Dirac delta for discrete time steps.
-    Returns 1/dt if t is within tol of any dose time, else 0.
-    """
-    return np.any(np.abs(t - np.array(dose_times)) < tol) / dt
+# def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
+#     """
+#     Approximate Dirac delta for discrete time steps.
+#     Returns 1/dt if t is within tol of any dose time, else 0.
+#     """
+#     return np.any(np.abs(t - np.array(dose_times)) < tol) / dt
 
-def pk_2cpt_step(y, ka, cl, v, dose_amounts, dose_times_list, t, dt):
-    """
-    One step of vectorized 2-compartment PK simulation with multiple drugs.
+# def pk_2cpt_step(y, ka, cl, v, dose_amounts, dose_times_list, t, dt):
+#     """
+#     One step of vectorized 2-compartment PK simulation with multiple drugs.
     
-    y: array (N_samples, 2) [C1, C2]
-    ka, cl: arrays of shape (N_samples,)
-    v: array or scalar
-    dose_amounts: list of arrays (per drug)
-    dose_times_list: list of arrays (per drug)
-    t: current time
-    dt: timestep
-    """
-    C1 = y[:, 0]
-    C2 = y[:, 1]
+#     y: array (N_samples, 2) [C1, C2]
+#     ka, cl: arrays of shape (N_samples,)
+#     v: array or scalar
+#     dose_amounts: list of arrays (per drug)
+#     dose_times_list: list of arrays (per drug)
+#     t: current time
+#     dt: timestep
+#     """
+#     C1 = y[:, 0]
+#     C2 = y[:, 1]
 
-    # Total dose input at this time for all drugs
-    dose_input_total = np.zeros_like(C1)
-    for doses, times in zip(dose_amounts, dose_times_list):
-        doses_arr = np.array(doses)
-        times_arr = np.array(times)
-        mask = np.isclose(t, times_arr, atol=1e-5)
-        if mask.any():
-            dose_input_total += doses_arr[mask][0]
+#     # Total dose input at this time for all drugs
+#     dose_input_total = np.zeros_like(C1)
+#     for doses, times in zip(dose_amounts, dose_times_list):
+#         doses_arr = np.array(doses)
+#         times_arr = np.array(times)
+#         mask = np.isclose(t, times_arr, atol=1e-5)
+#         if mask.any():
+#             dose_input_total += doses_arr[mask][0]
 
-    dC1dt = -ka * C1 + dose_input_total
-    dC2dt = ka * C1 - (cl / v) * C2
+#     dC1dt = -ka * C1 + dose_input_total
+#     dC2dt = ka * C1 - (cl / v) * C2
 
-    dy = np.stack([dC1dt, dC2dt], axis=1)
-    y_next = y + dy * dt
-    y_next[:, 1] = np.clip(y_next[:, 1], 0, None)  # prevent negative conc
-    return y_next
+#     dy = np.stack([dC1dt, dC2dt], axis=1)
+#     y_next = y + dy * dt
+#     y_next[:, 1] = np.clip(y_next[:, 1], 0, None)  # prevent negative conc
+#     return y_next
 
-def solve_individual_vectorized(ka, cl, v, dose_amounts, dose_times_list, t_eval):
-    N_samples = ka.shape[0]
-    y = np.zeros((N_samples, 2))  # C1, C2 initial
-    y_out = np.zeros((N_samples, len(t_eval)))
-    y_out[:, 0] = y[:, 1]
+# def solve_individual_vectorized(ka, cl, v, dose_amounts, dose_times_list, t_eval):
+#     N_samples = ka.shape[0]
+#     y = np.zeros((N_samples, 2))  # C1, C2 initial
+#     y_out = np.zeros((N_samples, len(t_eval)))
+#     y_out[:, 0] = y[:, 1]
 
-    for i in range(1, len(t_eval)):
-        dt = t_eval[i] - t_eval[i-1]
-        y = pk_2cpt_step(y, ka, cl, v, dose_amounts, dose_times_list, t_eval[i-1], dt)
-        y_out[:, i] = y[:, 1]
-    return y_out
+#     for i in range(1, len(t_eval)):
+#         dt = t_eval[i] - t_eval[i-1]
+#         y = pk_2cpt_step(y, ka, cl, v, dose_amounts, dose_times_list, t_eval[i-1], dt)
+#         y_out[:, i] = y[:, 1]
+#     return y_out
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
 
-def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
-    """
-    Approximate Dirac delta for discrete time steps.
-    Returns 1/dt if t is within tol of any dose time, else 0.
-    """
-    return (np.any(np.abs(t - np.array(dose_times)) < tol) / dt)
+# def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
+#     """
+#     Approximate Dirac delta for discrete time steps.
+#     Returns 1/dt if t is within tol of any dose time, else 0.
+#     """
+#     return (np.any(np.abs(t - np.array(dose_times)) < tol) / dt)
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
 
-def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
-    """
-    Approximate Dirac delta for discrete time steps.
-    Returns 1/dt if t is within tol of any dose time, else 0.
-    """
-    return 1.0/dt if np.any(np.abs(t - np.array(dose_times)) < tol) else 0.0
-
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
-    """Approximate Dirac delta for discrete time steps."""
-    return np.any(np.abs(t - np.array(dose_times)) < tol) / dt
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
-def simulate_2cpt_and_save(
-    n_individuals,
-    add_e,
-    prop_e,
-    dose_amounts_list,
-    dose_times_list,
-    save_path,
-    plot=False,
-    t_interval=(0,16),
-    sample_frequency=0.5,
-    ka_mean=0.6,
-    ke_mean=0.6,
-    v_mean=50,
-    ka_sd=0.5,
-    ke_sd=0.5,
-    v_sd=0.25
-):
-    n_drugs = len(dose_amounts_list)
-    sampled_data = []
-    id_counter = 1
-
-    # Fine evaluation times
-    extra_points = []
-    window = 0.3
-    for dt_list in dose_times_list:
-        for dt in dt_list:
-            extra_points.extend(np.linspace(dt - window, dt + window, 20))
-
-    t_eval = np.unique(np.concatenate([np.linspace(t_interval[0], t_interval[1], 120),
-                                       *dose_times_list,
-                                       extra_points]))
-    t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
-
-    for ind in range(n_individuals):
-        # Individual parameters
-        ka = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_drugs)
-        ke = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_drugs)
-        v  = np.random.lognormal(mean=np.log(v_mean), sigma=v_sd, size=n_drugs)
-
-        # Initialize compartments
-        C1 = np.zeros(n_drugs)
-        C2 = np.zeros(n_drugs)
-        y_out = np.zeros((len(t_eval), n_drugs))
-
-        # Simulation loop
-        for i, t in enumerate(t_eval):
-            dt = t_eval[i] - t_eval[i-1] if i > 0 else 0.01
-
-            # Add doses
-            for d in range(n_drugs):
-                times = np.array(dose_times_list[d])
-                doses = np.array(dose_amounts_list[d])
-                mask = np.isclose(t, times, atol=1e-5)
-                if mask.any():
-                    C1[d] += doses[mask][0]
-
-            # Update compartments
-            dC1 = -ka * C1
-            dC2 = ka * C1 - (ke / v) * C2
-            C1 += dC1 * dt
-            C2 += dC2 * dt
-            C2 = np.maximum(0, C2)
-            y_out[i,:] = C2
-
-        # Interpolate to observation times
-        y_sampled_noisy = np.zeros((len(t_sample), n_drugs))
-        for d in range(n_drugs):
-            y_sampled = np.interp(t_sample, t_eval, y_out[:, d])
-            # Add noise
-            noise_add = np.random.normal(0, add_e, size=y_sampled.shape)
-            noise_prop = np.random.normal(0, prop_e, size=y_sampled.shape)
-            y_sampled_noisy[:, d] = np.maximum(0, y_sampled * (1 + noise_prop) + noise_add)
-
-        # Store observation rows
-        for i_time, t_obs in enumerate(t_sample):
-            row = {'ID': id_counter, 'TIME': t_obs, 'EVID': 0}
-            for d in range(n_drugs):
-                row[f'DV_Drug{d+1}'] = y_sampled_noisy[i_time, d]
-            sampled_data.append(row)
-
-        # Store dosing rows
-        for d in range(n_drugs):
-            for amt, t_dose in zip(dose_amounts_list[d], dose_times_list[d]):
-                row = {'ID': id_counter, 'TIME': t_dose, 'EVID': d+1}
-                for j in range(n_drugs):
-                    row[f'DV_Drug{j+1}'] = np.nan
-                sampled_data.append(row)
-
-        # Optional plotting
-        if plot:
-            for d in range(n_drugs):
-                plt.plot(t_sample, y_sampled_noisy[:, d], label=f'ID {id_counter} Drug{d+1}')
-
-        id_counter += 1
-
-    # Convert to DataFrame
-    df = pd.DataFrame(sampled_data)
-    df = df.sort_values(['ID','TIME'])
-    df.to_csv(save_path, index=False, sep=';')
-
-    if plot:
-        plt.xlabel("Time (hours)")
-        plt.ylabel("Concentration (DV)")
-        plt.title("Simulated 2CPT Profiles per Drug")
-        plt.legend()
-        plt.show()
-
-    print(f"Saved simulated data to {save_path}")
+# def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
+#     """
+#     Approximate Dirac delta for discrete time steps.
+#     Returns 1/dt if t is within tol of any dose time, else 0.
+#     """
+#     return 1.0/dt if np.any(np.abs(t - np.array(dose_times)) < tol) else 0.0
 
 
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+
+# def approx_dirac_delta_vectorized(t, dose_times, dt, tol=1e-3):
+#     """Approximate Dirac delta for discrete time steps."""
+#     return np.any(np.abs(t - np.array(dose_times)) < tol) / dt
+
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+
+# def simulate_2cpt_and_save(
+#     n_individuals,
+#     add_e,
+#     prop_e,
+#     dose_amounts_list,
+#     dose_times_list,
+#     save_path,
+#     plot=False,
+#     t_interval=(0,16),
+#     sample_frequency=0.5,
+#     ka_mean=0.6,
+#     ke_mean=0.6,
+#     v_mean=50,
+#     ka_sd=0.5,
+#     ke_sd=0.5,
+#     v_sd=0.25
+# ):
+#     n_drugs = len(dose_amounts_list)
+#     sampled_data = []
+#     id_counter = 1
+
+#     # Fine evaluation times
+#     extra_points = []
+#     window = 0.3
+#     for dt_list in dose_times_list:
+#         for dt in dt_list:
+#             extra_points.extend(np.linspace(dt - window, dt + window, 20))
+
+#     t_eval = np.unique(np.concatenate([np.linspace(t_interval[0], t_interval[1], 120),
+#                                        *dose_times_list,
+#                                        extra_points]))
+#     t_sample = np.arange(t_interval[0], t_interval[1] + sample_frequency, sample_frequency)
+
+#     for ind in range(n_individuals):
+#         # Individual parameters
+#         ka = np.random.lognormal(mean=np.log(ka_mean), sigma=ka_sd, size=n_drugs)
+#         ke = np.random.lognormal(mean=np.log(ke_mean), sigma=ke_sd, size=n_drugs)
+#         v  = np.random.lognormal(mean=np.log(v_mean), sigma=v_sd, size=n_drugs)
+
+#         # Initialize compartments
+#         C1 = np.zeros(n_drugs)
+#         C2 = np.zeros(n_drugs)
+#         y_out = np.zeros((len(t_eval), n_drugs))
+
+#         # Simulation loop
+#         for i, t in enumerate(t_eval):
+#             dt = t_eval[i] - t_eval[i-1] if i > 0 else 0.01
+
+#             # Add doses
+#             for d in range(n_drugs):
+#                 times = np.array(dose_times_list[d])
+#                 doses = np.array(dose_amounts_list[d])
+#                 mask = np.isclose(t, times, atol=1e-5)
+#                 if mask.any():
+#                     C1[d] += doses[mask][0]
+
+#             # Update compartments
+#             dC1 = -ka * C1
+#             dC2 = ka * C1 - (ke / v) * C2
+#             C1 += dC1 * dt
+#             C2 += dC2 * dt
+#             C2 = np.maximum(0, C2)
+#             y_out[i,:] = C2
+
+#         # Interpolate to observation times
+#         y_sampled_noisy = np.zeros((len(t_sample), n_drugs))
+#         for d in range(n_drugs):
+#             y_sampled = np.interp(t_sample, t_eval, y_out[:, d])
+#             # Add noise
+#             noise_add = np.random.normal(0, add_e, size=y_sampled.shape)
+#             noise_prop = np.random.normal(0, prop_e, size=y_sampled.shape)
+#             y_sampled_noisy[:, d] = np.maximum(0, y_sampled * (1 + noise_prop) + noise_add)
+
+#         # Store observation rows
+#         for i_time, t_obs in enumerate(t_sample):
+#             row = {'ID': id_counter, 'TIME': t_obs, 'EVID': 0}
+#             for d in range(n_drugs):
+#                 row[f'DV_Drug{d+1}'] = y_sampled_noisy[i_time, d]
+#             sampled_data.append(row)
+
+#         # Store dosing rows
+#         for d in range(n_drugs):
+#             for amt, t_dose in zip(dose_amounts_list[d], dose_times_list[d]):
+#                 row = {'ID': id_counter, 'TIME': t_dose, 'EVID': d+1}
+#                 for j in range(n_drugs):
+#                     row[f'DV_Drug{j+1}'] = np.nan
+#                 sampled_data.append(row)
+
+#         # Optional plotting
+#         if plot:
+#             for d in range(n_drugs):
+#                 plt.plot(t_sample, y_sampled_noisy[:, d], label=f'ID {id_counter} Drug{d+1}')
+
+#         id_counter += 1
+
+#     # Convert to DataFrame
+#     df = pd.DataFrame(sampled_data)
+#     df = df.sort_values(['ID','TIME'])
+#     df.to_csv(save_path, index=False, sep=';')
+
+#     if plot:
+#         plt.xlabel("Time (hours)")
+#         plt.ylabel("Concentration (DV)")
+#         plt.title("Simulated 2CPT Profiles per Drug")
+#         plt.legend()
+#         plt.show()
+
+#     print(f"Saved simulated data to {save_path}")
 
 
 
@@ -1433,144 +1558,146 @@ def simulate_2cpt_and_save(
 
 
 
-def simulate_2cpt_and_save_vectorized_truncated_with_error(
-    n_individuals, add_e, prop_e, dose_amounts, dose_times, save_path,
-    N=1, prop_trunc=0.5, extra_add_error=4, plot=False
-):
-    """
-    Simulates 2-compartment model, truncates last N time points for a subset of individuals,
-    and applies extra additive error ONLY to truncated individuals.
+
+
+# def simulate_2cpt_and_save_vectorized_truncated_with_error(
+#     n_individuals, add_e, prop_e, dose_amounts, dose_times, save_path,
+#     N=1, prop_trunc=0.5, extra_add_error=4, plot=False
+# ):
+#     """
+#     Simulates 2-compartment model, truncates last N time points for a subset of individuals,
+#     and applies extra additive error ONLY to truncated individuals.
     
-    Args:
-        n_individuals : int
-            Number of individuals to simulate.
-        add_e : float
-            Base additive error (from original simulation).
-        prop_e : float
-            Proportional error (from original simulation).
-        dose_amounts : list
-            Doses administered.
-        dose_times : list
-            Times of administration.
-        save_path : str
-            File path to save simulated data.
-        N : int
-            Number of last time points to remove for truncated individuals.
-        prop_trunc : float, optional
-            Proportion of individuals to truncate (default 0.3).
-        extra_add_error : float, optional
-            Extra additive error applied ONLY to truncated individuals (default 0.2).
-        plot : bool, optional
-            Whether to plot truncated simulation results.
-    """
-    # --- Step 1: Run the full simulation in memory ---
-    sampled_data_full = []
-    all_results_full = []
+#     Args:
+#         n_individuals : int
+#             Number of individuals to simulate.
+#         add_e : float
+#             Base additive error (from original simulation).
+#         prop_e : float
+#             Proportional error (from original simulation).
+#         dose_amounts : list
+#             Doses administered.
+#         dose_times : list
+#             Times of administration.
+#         save_path : str
+#             File path to save simulated data.
+#         N : int
+#             Number of last time points to remove for truncated individuals.
+#         prop_trunc : float, optional
+#             Proportion of individuals to truncate (default 0.3).
+#         extra_add_error : float, optional
+#             Extra additive error applied ONLY to truncated individuals (default 0.2).
+#         plot : bool, optional
+#             Whether to plot truncated simulation results.
+#     """
+#     # --- Step 1: Run the full simulation in memory ---
+#     sampled_data_full = []
+#     all_results_full = []
 
-    def capture_results(data, results):
-        nonlocal sampled_data_full, all_results_full
-        sampled_data_full = data
-        all_results_full = results
+#     def capture_results(data, results):
+#         nonlocal sampled_data_full, all_results_full
+#         sampled_data_full = data
+#         all_results_full = results
 
-    # Override save_results temporarily
-    orig_save_results = globals().get("save_results")
-    def save_results_override(data, path):
-        capture_results(data, all_results_full)
-    globals()["save_results"] = save_results_override
+#     # Override save_results temporarily
+#     orig_save_results = globals().get("save_results")
+#     def save_results_override(data, path):
+#         capture_results(data, all_results_full)
+#     globals()["save_results"] = save_results_override
 
-    simulate_2cpt_and_save_vectorized(
-        n_individuals, add_e, prop_e, dose_amounts, dose_times,
-        save_path="__dummy__", plot=True
-    )
+#     simulate_2cpt_and_save_vectorized(
+#         n_individuals, add_e, prop_e, dose_amounts, dose_times,
+#         save_path="__dummy__", plot=True
+#     )
 
-    if orig_save_results:
-        globals()["save_results"] = orig_save_results
+#     if orig_save_results:
+#         globals()["save_results"] = orig_save_results
 
-    # --- Step 2: Decide which individuals will be truncated ---
-    unique_ids = list(set(d["ID"] for d in sampled_data_full))
-    rng = np.random.default_rng()
-    n_truncated = int(len(unique_ids) * prop_trunc)
-    truncated_ids = set(rng.choice(unique_ids, size=n_truncated, replace=False))
+#     # --- Step 2: Decide which individuals will be truncated ---
+#     unique_ids = list(set(d["ID"] for d in sampled_data_full))
+#     rng = np.random.default_rng()
+#     n_truncated = int(len(unique_ids) * prop_trunc)
+#     truncated_ids = set(rng.choice(unique_ids, size=n_truncated, replace=False))
 
-    truncated_data = []
-    truncated_results = []
+#     truncated_data = []
+#     truncated_results = []
 
-    for subj_id in unique_ids:
-        subj_rows = [d for d in sampled_data_full if d["ID"] == subj_id]
-        subj_rows_sorted = sorted(subj_rows, key=lambda x: x["TIME"])
+#     for subj_id in unique_ids:
+#         subj_rows = [d for d in sampled_data_full if d["ID"] == subj_id]
+#         subj_rows_sorted = sorted(subj_rows, key=lambda x: x["TIME"])
 
-        if subj_id in truncated_ids:
-            # Remove last N points
-            kept_rows = subj_rows_sorted[:-N] if len(subj_rows_sorted) > N else []
+#         if subj_id in truncated_ids:
+#             # Remove last N points
+#             kept_rows = subj_rows_sorted[:-N] if len(subj_rows_sorted) > N else []
 
-            # add extra additive noise to DV
-            for row in kept_rows:
-                row = row.copy()
-                row["DV"] = max(0, row["DV"] + rng.normal(0, extra_add_error))
-                truncated_data.append(row)
+#             # add extra additive noise to DV
+#             for row in kept_rows:
+#                 row = row.copy()
+#                 row["DV"] = max(0, row["DV"] + rng.normal(0, extra_add_error))
+#                 truncated_data.append(row)
 
-            if plot and kept_rows:
-                t_sample = [row["TIME"] for row in kept_rows]
-                C2_with_noise = [row["DV"] for row in kept_rows]
-                truncated_results.append({
-                    "t_eval": t_sample,
-                    "t_sample": t_sample,
-                    "C2_with_noise": np.array(C2_with_noise),
-                    "ID": subj_id,
-                    "dose_amount": kept_rows[0]["AMT"]
-                })
+#             if plot and kept_rows:
+#                 t_sample = [row["TIME"] for row in kept_rows]
+#                 C2_with_noise = [row["DV"] for row in kept_rows]
+#                 truncated_results.append({
+#                     "t_eval": t_sample,
+#                     "t_sample": t_sample,
+#                     "C2_with_noise": np.array(C2_with_noise),
+#                     "ID": subj_id,
+#                     "dose_amount": kept_rows[0]["AMT"]
+#                 })
 
-        else:
-            # keep all rows, no extra error
-            truncated_data.extend(subj_rows_sorted)
+#         else:
+#             # keep all rows, no extra error
+#             truncated_data.extend(subj_rows_sorted)
 
-            if plot:
-                t_sample = [row["TIME"] for row in subj_rows_sorted]
-                C2_with_noise = [row["DV"] for row in subj_rows_sorted]
-                truncated_results.append({
-                    "t_eval": t_sample,
-                    "t_sample": t_sample,
-                    "C2_with_noise": np.array(C2_with_noise),
-                    "ID": subj_id,
-                    "dose_amount": subj_rows_sorted[0]["AMT"]
-                })
+#             if plot:
+#                 t_sample = [row["TIME"] for row in subj_rows_sorted]
+#                 C2_with_noise = [row["DV"] for row in subj_rows_sorted]
+#                 truncated_results.append({
+#                     "t_eval": t_sample,
+#                     "t_sample": t_sample,
+#                     "C2_with_noise": np.array(C2_with_noise),
+#                     "ID": subj_id,
+#                     "dose_amount": subj_rows_sorted[0]["AMT"]
+#                 })
 
-    # --- Step 3: Save and/or plot ---
-    save_results(truncated_data, save_path)
+#     # --- Step 3: Save and/or plot ---
+#     save_results(truncated_data, save_path)
 
-    if plot:
-        plot_batch_results_truncated(truncated_results, dose_times)
+#     if plot:
+#         plot_batch_results_truncated(truncated_results, dose_times)
         
 
-def pk_2cpt_sde_step(y, ka, ke, v, dose_amount, dose_times, t, dt,
-                     sigma1=0.05, sigma2=0.05):
-    """
-    Euler–Maruyama step for 2-compartment SDE.
-    y: shape (N_samples, 2) for C1, C2
-    """
-    C1 = y[:, 0]
-    C2 = y[:, 1]
+# def pk_2cpt_sde_step(y, ka, ke, v, dose_amount, dose_times, t, dt,
+#                      sigma1=0.05, sigma2=0.05):
+#     """
+#     Euler–Maruyama step for 2-compartment SDE.
+#     y: shape (N_samples, 2) for C1, C2
+#     """
+#     C1 = y[:, 0]
+#     C2 = y[:, 1]
 
-    ka = np.asarray(ka)
-    ke = np.asarray(ke)
-    v = float(v)
-    dose_amount = float(dose_amount)
-    dose_times = np.asarray(dose_times)
+#     ka = np.asarray(ka)
+#     ke = np.asarray(ke)
+#     v = float(v)
+#     dose_amount = float(dose_amount)
+#     dose_times = np.asarray(dose_times)
 
-    # deterministic drift (same as before)
-    dose_input = dose_amount * approx_dirac_delta_vectorized(t, dose_times, dt)
-    dC1dt = -ka * C1 + dose_input
-    dC2dt = ka * C1 - (ke / v) * C2
+#     # deterministic drift (same as before)
+#     dose_input = dose_amount * approx_dirac_delta_vectorized(t, dose_times, dt)
+#     dC1dt = -ka * C1 + dose_input
+#     dC2dt = ka * C1 - (ke / v) * C2
 
-    # stochastic diffusion terms
-    dW1 = np.random.normal(0, np.sqrt(dt), size=C1.shape)
-    dW2 = np.random.normal(0, np.sqrt(dt), size=C2.shape)
+#     # stochastic diffusion terms
+#     dW1 = np.random.normal(0, np.sqrt(dt), size=C1.shape)
+#     dW2 = np.random.normal(0, np.sqrt(dt), size=C2.shape)
 
-    dC1 = dC1dt * dt + sigma1 * C1 * dW1
-    dC2 = dC2dt * dt + sigma2 * C2 * dW2
+#     dC1 = dC1dt * dt + sigma1 * C1 * dW1
+#     dC2 = dC2dt * dt + sigma2 * C2 * dW2
 
-    y_next = y + np.stack([dC1, dC2], axis=1)
-    return y_next
+#     y_next = y + np.stack([dC1, dC2], axis=1)
+#     return y_next
 
 
 
