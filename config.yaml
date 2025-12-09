@@ -1,0 +1,65 @@
+data:
+  train_path: lib/data/tumor_data_train.csv
+  validation_path: lib/data/tumor_data_val.csv
+  test_path: lib/data/tumor_data_test.csv
+directories:
+  save_dir: models
+  load_dir: models
+model:
+  name: MultipleDoseAddError_AE_NF2
+  dim_latent: 2
+  dim_parameters: 2
+  hid_dim: 512
+  truncation: 1
+  dropout: 0.001
+encoder:
+  model_dim: 128
+  hidden_dim: 32
+  num_heads: 4
+  num_layers: 2
+  dropout: 0.1
+  cov_diag_epsilon: 1.0e-05
+  learn_prior_mean: true
+  learn_prior_covariance: true
+  diagonal_only: false
+decoder:
+  hidden_dim: 32
+optimizer:
+  lr: 0.001
+  factor: 0.5
+  patience: 5
+  min_lr: 1.0e-07
+  prior_lr_factor: 1
+optimizer_ae:
+  lr: 0.001
+  factor: 0.8
+  patience: 10
+  min_lr: 1.0e-05
+  prior_lr_factor: 1
+training:
+  n_epochs: 10000
+  warmup_epochs_noise: 1000
+  warmup_epochs_iiv: 0
+  smoothing_start_epoch: 0
+  learn_prior: 30
+  p_dropout: 1
+  print_epoch: 1
+  enable_ae: false
+  enable_vae: false
+  enable_onlymedian: true
+  normalization: false
+  batch_fraction: 0.05
+  time_points: 120
+training_vae:
+  n_epochs: 1000
+  warmup_epochs_noise: 0
+  warmup_epochs_iiv: 0
+  smoothing_start_epoch: 0
+  learn_prior: 0
+  p_dropout: 0
+  enable_ae: false
+  enable_vae: true
+  enable_onlymedian: false
+  normalization: true
+  truncation: 1
+  print_epoch: 1
