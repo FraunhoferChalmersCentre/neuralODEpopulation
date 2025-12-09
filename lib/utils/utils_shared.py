@@ -1,16 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Sep 21 00:16:56 2025
 
-@author: Baaz
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Created on Sat Sep 20 07:10:20 2025
-
-@author: Baaz
-"""
 
 import torch
 
@@ -38,7 +26,7 @@ def sample_from_prior(encoder, batch_size, device):
 
 
 def normalize_encoder_input(
-    x_encoder, t_encoder, x_padded, cov, dose_tensor, dose_times_list, evid,
+    x_encoder, t_encoder, x_padded, cov, dose_tensor,mask, dose_times_list, evid,
     encoder_med, func_med, reducer_med,
     t_dense, global_mean, global_std
 ):
@@ -53,35 +41,35 @@ def normalize_encoder_input(
 
 
     # --- Encode latent with median encoder ---
-    with use_ema(encoder_med):
-        k_param,z0, mu_q, logvar_q, mu_p, logvar_p,mask,  repeat_factor= encode_latent(
-            encoder_med,
-            t_encoder,
-            x_encoder,
-            cov,
-            dose_tensor,
-            enable_vae=False,
-            enable_ae=False,
-            enable_onlymedian=True
-        )
+    with torch.no_grad():
+        with use_ema(encoder_med):
+            k_param,z0, mu_q, logvar_q, mu_p, logvar_p,mask,  repeat_factor= encode_latent(
+                encoder_med,
+                t_encoder,
+                x_encoder,
+                cov,
+                dose_tensor,
+                mask,
+                enable_vae=False,
+                enable_ae=False,
+                enable_onlymedian=True
+            )
 
     # --- Prepare ODE input with median models ---
-
+    with torch.no_grad():
         with use_ema(func_med):
             ode_func_med= prepare_ode_input(
-    
                 x_padded,
                 k_param,
                 func_med,
                 cov,
                 dose_tensor,         # shape: [batch, T] or [batch, n_features]
                 dose_times_list, # list of 1D tensors per individual
-                mask,
                 evid,            # list of 1D tensors per individual
                 enable_ae=False,
                 enable_onlymedian=True
             )
-
+    with torch.no_grad():
         with use_ema(reducer_med):
                 pred_interp, pred_batch = make_predictions(
                     t_encoder, t_dense, k_param, ode_func_med, reducer_med,
@@ -259,7 +247,7 @@ def batch_linear_interpolate_1d(y, t_src, t_target):
 
 
 class ODEWrapper(nn.Module):
-    def __init__(self, func, cov, dose_times, dose_tensor, evid, dose_mask, keep_mask=None):
+    def __init__(self, func, cov, dose_times, dose_tensor, evid, dose_mask):
         super().__init__()
         self.func = func
         self.dose_tensor = dose_tensor          # [batch, max_len]
@@ -267,14 +255,12 @@ class ODEWrapper(nn.Module):
         self.evid = evid      # [batch, max_len]
         self.dose_mask = dose_mask            # [batch, max_len]
         self.cov=cov
-        self.keep_mask = keep_mask            # [batch, 1] — binary mask (optional)
+
 
     def forward(self, t, x):
         # Pass keep_mask if provided
-        if self.keep_mask is not None:
-            return self.func(t, x, self.cov, self.dose_times,self.dose_tensor,  self.evid, self.dose_mask, self.keep_mask)
-        else:
-            return self.func(t, x, self.cov, self.dose_times,self.dose_tensor,  self.evid, self.dose_mask)
+
+        return self.func(t, x, self.cov, self.dose_times,self.dose_tensor,  self.evid, self.dose_mask)
 
 
 def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
@@ -300,35 +286,46 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
         dose_tensor    : per-subject dose amounts
         dose_times_list: per-subject dose times
         evid           : per-subject EVID tensor
+        cov            : per-subject covariates
     """
 
     # Unpack batch
     occ_list, treatment_list, t_batch, x_batch, mask, cov, dose_tensor, dose_times_list, evid = batch
 
-    # Move to device
-    t_batch = [t.to(device) for t in t_batch]
-    x_batch = [x.to(device) for x in x_batch]
+    # Move to device and clone to avoid warnings
+    t_batch = [t.detach().clone().to(device) for t in t_batch]
+    x_batch = [x.detach().clone().to(device) for x in x_batch]
+    dose_times_list = [dt.detach().clone().to(device) for dt in dose_times_list]
+    cov = cov.detach().clone().to(device)
+    dose_tensor = dose_tensor.detach().clone().to(device)
+    evid = evid.detach().clone().to(device)
     mask = mask.to(device)
-    dose_tensor = dose_tensor.to(device)
-    cov=cov.to(device)
-    dose_times_list = [dt.to(device) for dt in dose_times_list]
-    evid = evid.to(device)
+
+    # Convert treatment_list to tensor if needed
+    treatment_list = torch.stack([t.detach().clone().to(device) for t in treatment_list]) \
+                     if isinstance(treatment_list[0], torch.Tensor) else torch.tensor(treatment_list, device=device)
+
+    # Convert occ_list to tensor if needed
+    if isinstance(occ_list, torch.Tensor):
+        occ_list = occ_list.detach().clone().long().to(device)
+    else:
+        occ_list = torch.tensor(occ_list, dtype=torch.long, device=device)
+
 
     # Truncate if needed
     if truncation > 0:
-        t_enc_list, x_enc_list, _, t_cut_list, x_cut_list = truncate_time_series(
+        t_enc_list, x_enc_list, mask_encoder, t_cut_list, x_cut_list = truncate_time_series(
             t_batch, x_batch, truncation
         )
     else:
-        t_enc_list, x_enc_list, _ = t_batch, x_batch, [torch.ones_like(xi, dtype=torch.bool) for xi in x_batch]
-        t_cut_list, x_cut_list = [torch.zeros(0, device=device) for _ in t_batch], [torch.zeros(0, device=device) for _ in x_batch]
-
-    
+        t_enc_list, x_enc_list = t_batch, x_batch
+        mask_encoder = [torch.ones_like(xi, dtype=torch.bool, device=device) for xi in x_batch]
+        t_cut_list = [torch.zeros(0, device=device) for _ in t_batch]
+        x_cut_list = [torch.zeros(0, device=device) for _ in x_batch]
 
     # Pad sequences
     t_encoder = pad_sequence(t_enc_list, batch_first=True)
     x_encoder = pad_sequence(x_enc_list, batch_first=True)
-
     t_padded = pad_sequence(t_batch, batch_first=True)
     x_padded = pad_sequence(x_batch, batch_first=True)
     t_cut = pad_sequence(t_cut_list, batch_first=True)
@@ -343,18 +340,12 @@ def preprocess_batch(batch, device, truncation=-1.0, skip_initial=0):
         x_encoder,
         t_cut,
         x_cut,
-        mask,
+        mask_encoder,
         cov,
         dose_tensor,
         dose_times_list,
         evid
     )
-
-
-
-
-
-
 
 
 
@@ -366,6 +357,7 @@ def encode_latent(
     x_normalized,
     cov,
     dose_tensor,
+    mask_encoder,
     enable_vae,
     enable_ae,
     enable_onlymedian,
@@ -406,22 +398,22 @@ def encode_latent(
     cov = cov[:, :1]
     if cov.dim() == 3:
         cov = cov.squeeze(0)
- 
+     
     if enable_vae and augment:
         repeat_factor = int(np.ceil(min_batch_size / B))
         
-        k_param,z0, mu_q, logvar_q, mu_p,logvar_p ,mask = encoder(t_encoder, x_normalized,cov, dose_tensor,  mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=sample_posterior)
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p ,mask_L1 = encoder(t_encoder, x_normalized,cov, dose_tensor,  mask=mask_encoder, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=sample_posterior)
     
     elif enable_vae:
        
-        k_param,z0, mu_q, logvar_q, mu_p,logvar_p,mask  = encoder(t_encoder, x_normalized,cov, dose_tensor,  mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=sample_posterior)
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p,mask_L1  = encoder(t_encoder, x_normalized,cov, dose_tensor,  mask=mask_encoder, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=repeat_factor, min_batch_size=min_batch_size, augment=augment,sample_posterior=sample_posterior)
 
     else:
-        k_param,z0, mu_q, logvar_q, mu_p,logvar_p,mask  = encoder(t_encoder, x_normalized,cov, dose_tensor, mask=None, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=1, min_batch_size=min_batch_size, augment=False, sample_posterior=True)
+        k_param,z0, mu_q, logvar_q, mu_p,logvar_p,mask_L1  = encoder(t_encoder, x_normalized,cov, dose_tensor, mask=mask_encoder, only_median=enable_onlymedian,enable_ae=enable_ae, num_samples=1, min_batch_size=min_batch_size, augment=False, sample_posterior=True)
             
       
           
-    return k_param,z0,  mu_q, logvar_q, mu_p, logvar_p,mask, repeat_factor
+    return k_param,z0,  mu_q, logvar_q, mu_p, logvar_p,mask_L1, repeat_factor
 
 
 
@@ -432,7 +424,6 @@ def prepare_ode_input(
     cov,
     dose_tensor,
     dose_times_list,
-    mask_dropout,
     evid,
     enable_ae,enable_onlymedian=False, repeat_factor=1
 ):
@@ -451,15 +442,6 @@ def prepare_ode_input(
         x0       : initial latent state
         ode_func : ODEWrapper instance
     """
-
-    # Encode initial state
-    
-    
-    if repeat_factor > 1:
-        x_padded_repeated = x_padded.repeat_interleave(repeat_factor, dim=0)
-    else:
-        x_padded_repeated = x_padded
-        
         
   
     evid= evid.repeat_interleave(repeat_factor, dim=0)
@@ -495,7 +477,6 @@ def prepare_ode_input(
         # Repeat batch-dependent tensors along dim=0
         dose_mask = dose_mask.repeat_interleave(repeat_factor, dim=0)
         dose_times_padded = dose_times_padded.repeat_interleave(repeat_factor, dim=0)
-        mask_dropout = mask_dropout.repeat_interleave(repeat_factor, dim=0)
         dose_tensor_expanded = dose_tensor_expanded.repeat_interleave(repeat_factor, dim=0)
     
    
@@ -507,8 +488,7 @@ def prepare_ode_input(
     dose_times_padded,
     dose_tensor_expanded,
     evid,
-    dose_mask,
-    mask_dropout
+    dose_mask
 )
 
     return ode_func

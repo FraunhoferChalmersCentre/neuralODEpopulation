@@ -5,23 +5,24 @@ Clean, organized imports
 
 # ===== Standard Library =====
 import os
-import ast
-import math
+
+
 import random
 from collections import Counter
 
 # ===== Third-Party Libraries =====
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
 
 import torch
-import torch.nn as nn
+
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.nn.utils.rnn import pad_sequence
-from torchdiffeq import odeint
+
 
 # ===== Local Project Imports =====
+
 
 
 def pad_dose_times(dose_times_list, pad_value=-1.0):
@@ -204,6 +205,9 @@ class TrajectoryDataset(Dataset):
         all_times = torch.cat([traj['t'] for traj in self.samples])
         self.global_times, self.global_idx = torch.sort(torch.unique(all_times))
         self.global_max_len = len(self.global_times)
+        self.global_max_len = max(len(traj['t']) for traj in self.samples)
+        
+        
 
     def _extract_trajectories(self):
         trajectories = []
@@ -271,143 +275,91 @@ class TrajectoryDataset(Dataset):
         return self.samples[idx]
 
 
-import torch
-from torch.nn.utils.rnn import pad_sequence
 
-def make_collate_fn(global_max_len, global_max_doses=None):
+def make_collate_fn(global_max_len, device=torch.device('cpu')):
     def collate_fn(batch):
-        t_list = [s['t'] for s in batch]
-        x_global_list = [s['x_global'] for s in batch]
-        
-        dose_list = [s['amt'] for s in batch]
-        cov_list = [s['cov_ind'] for s in batch]
-        dose_times_list = [s['dose_times'] for s in batch]
-        evid_list = [s['evid'] for s in batch]
-        id_list = [s['subject_id'] for s in batch]
-        treatment_list = [s['treatment'] for s in batch]
+        B = len(batch)
 
-        # === Pad with batch-local max first ===
+        # --- Extract lists safely ---
+        t_list = [
+            t.detach().clone().float().to(device) if torch.is_tensor(t := s['t'])
+            else torch.tensor(t, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        x_list = [
+            x.detach().clone().float().to(device) if torch.is_tensor(x := s['x_global'])
+            else torch.tensor(x, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        dose_list = [
+            d.detach().clone().float().to(device) if torch.is_tensor(d := s['amt'])
+            else torch.tensor(d, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        cov_list = [
+            c.detach().clone().float().to(device) if torch.is_tensor(c := s['cov_ind'])
+            else torch.tensor(c, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        dose_times_list = [
+            dt.detach().clone().float().to(device) if torch.is_tensor(dt := s['dose_times'])
+            else torch.tensor(dt, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        evid_list = [
+            e.detach().clone().float().to(device) if torch.is_tensor(e := s['evid'])
+            else torch.tensor(e, dtype=torch.float32, device=device)
+            for s in batch
+        ]
+        id_list = [
+            torch.tensor(i, dtype=torch.long, device=device) if not torch.is_tensor(i := s['subject_id'])
+            else i.detach().clone().long().to(device)
+            for s in batch
+        ]
+        treatment_list = [
+            t.detach().clone().to(device) if torch.is_tensor(t := s['treatment'])
+            else torch.tensor(t, device=device)
+            for s in batch
+        ]
+
+        # --- Pad sequences to batch max length first ---
         t_padded = pad_sequence(t_list, batch_first=True)
-        x_global_padded = pad_sequence(x_global_list, batch_first=True)
+        x_padded = pad_sequence(x_list, batch_first=True)
 
-        # === Then pad to global max length ===
+        # --- Pad to global_max_len ---
         pad_len = global_max_len - t_padded.size(1)
         if pad_len > 0:
             t_padded = torch.nn.functional.pad(t_padded, (0, pad_len))
-            x_global_padded = torch.nn.functional.pad(x_global_padded, (0, pad_len))
+            x_padded = torch.nn.functional.pad(x_padded, (0, pad_len))
 
-        # === Build mask (True = valid entry) ===
-        mask = torch.zeros((len(batch), global_max_len), dtype=torch.bool)
+        # --- Build mask ---
+        mask = torch.zeros((B, global_max_len), dtype=torch.bool, device=device)
         for i, t in enumerate(t_list):
-            mask[i, :len(t)] = 1
+            mask[i, :len(t)] = 1  # True = valid
 
-        # === Doses: handle separately (optionally global) ===
+        # --- Pad dose, dose_times, evid, cov to batch max ---
         dose_tensor = pad_sequence(dose_list, batch_first=True)
         dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
         evid_padded = pad_sequence(evid_list, batch_first=True)
-        cov_padded=pad_sequence(cov_list, batch_first=True)
-        if global_max_doses is not None:
-            dose_pad = global_max_doses - dose_tensor.size(1)
-            if dose_pad > 0:
-                dose_tensor = torch.nn.functional.pad(dose_tensor, (0, dose_pad))
-                dose_times_padded = torch.nn.functional.pad(dose_times_padded, (0, dose_pad))
-                evid_padded = torch.nn.functional.pad(evid_padded, (0, dose_pad))
+        cov_padded = pad_sequence(cov_list, batch_first=True)
 
-        id_tensor = torch.tensor(id_list, dtype=torch.long)
+        # --- Stack IDs and treatments ---
+        id_tensor = torch.stack(id_list)
         treatment_tensor = torch.stack(treatment_list)
 
         return (
             id_tensor,
             treatment_tensor,
             t_padded,
-            x_global_padded,
+            x_padded,
             mask,
             cov_padded,
             dose_tensor,
             dose_times_padded,
-            evid_padded,
+            evid_padded
         )
 
     return collate_fn
-
-
-
-# def collate_fn(batch):
-#     t_list = [s['t'] for s in batch]
-#     x_global_list = [s['x_global'] for s in batch]
-#     dose_list = [s['amt'] for s in batch]
-#     dose_times_list = [s['dose_times'] for s in batch]
-#     evid_list = [s['evid'] for s in batch]
-#     id_list = [s['subject_id'] for s in batch]
-#     treatment_list = [s['treatment'] for s in batch]
-
-#     # Pad time & x_global
-#     t_padded = pad_sequence(t_list, batch_first=True)
-#     x_global_padded = pad_sequence(x_global_list, batch_first=True)
-
-#     # Build mask
-#     max_len = t_padded.size(1)
-#     mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
-#     for i, t in enumerate(t_list):
-#         mask[i, :len(t)] = 1
-
-#     # Pad doses
-#     dose_tensor = pad_sequence(dose_list, batch_first=True)
-#     dose_times_padded = pad_sequence(dose_times_list, batch_first=True)
-#     evid_padded = pad_sequence(evid_list, batch_first=True)
-
-#     # Convert subject IDs and treatments into tensors
-#     id_tensor = torch.tensor(id_list, dtype=torch.long)
-#     treatment_tensor = torch.stack(treatment_list)  # shape [batch]
-
-#     return (
-#         id_tensor,          # subject ids
-#         treatment_tensor,   # treatment class
-#         t_padded,           # normalized time
-#         x_global_padded,    # normalized observations
-#         mask,               # mask for padded times
-#         dose_tensor,        # dose amounts
-#         dose_times_padded,  # dose times
-#         evid_padded         # evid codes
-#     )
-
-
-
-
-
-
-
-# def collate_fn(batch):
-#     t_list = [s['t'] for s in batch]
-#     x_global_list = [s['x_global'] for s in batch]
-#     dose_list = [s['amt'] for s in batch]
-#     dose_times_list = [s['dose_times'] for s in batch]
-#     id_list = [s['subject_id'] for s in batch]
-
-#     # Check if dose-normalized values exist
-#     x_dose_list = [s['x_dose'] for s in batch] if 'x_dose' in batch[0] else None
-
-#     # Pad time & x_global
-#     t_padded = pad_sequence(t_list, batch_first=True)
-#     x_global_padded = pad_sequence(x_global_list, batch_first=True)
-
-#     # Build mask
-#     max_len = t_padded.size(1)
-#     mask = torch.zeros((len(batch), max_len), dtype=torch.bool)
-#     for i, t in enumerate(t_list):
-#         mask[i, :len(t)] = 1
-
-#     dose_tensor = torch.stack(dose_list)
-
-#     if x_dose_list is not None:
-#         x_dose_padded = pad_sequence(x_dose_list, batch_first=True)
-#     else:
-#         x_dose_padded = None
-
-#     return id_list, t_padded, x_global_padded, mask, dose_tensor, dose_times_list
-
-
-
 
 
 
@@ -530,23 +482,13 @@ def prepare_datasets_and_loaders(data_path, data_path_test, device,
 
     random.shuffle(all_ids)
 
-
-#     test_frac = 0.3
-# #    val_frac = 0
-#     train_frac = 0.7##1 - test_frac - val_frac  # 0.6
-    
-    # Compute exact counts
-    n_test =  3#int(len(all_ids) * test_frac)   # 3
-  #  n_val  = 0 #int(12 * 0.1)   # 1
-    n_train = 9 #int(len(all_ids) * train_frac) 
-    
-    
-    # Split IDs
-    
+    n_test =  3
+    n_train = 9 
+ 
 
     
     train_ids = all_ids[:n_train]                 # first 7
- #   val_ids   = all_ids[n_train:n_train + n_val] # next 2
+
     test_ids  = all_ids[n_train:]        # last 3
   
     
@@ -711,6 +653,7 @@ def prepare_datasets_and_loaders_simulated(data_path_train, data_path_val, data_
     return train_dataset, val_dataset, test_dataset,train_base_dataset,  train_loader, val_loader, test_loader, merged_time_points, batch_size_train, batch_size_val, batch_size_test
 
 
+
 def compute_global_stats(df):
     """
     Compute global statistics for the dataset.
@@ -728,8 +671,8 @@ def compute_global_stats(df):
     
     # Replace '.' with NaN and convert to numeric
     observed_dv = df.loc[df['EVID'] == 0, ['TIME', 'DV']]  # keep both columns
-    first_time = observed_dv['TIME'].min()
-    global_mean = observed_dv.loc[observed_dv['TIME'] == first_time, 'DV'].median()
+    #first_time = observed_dv['TIME'].min()
+    global_mean = observed_dv['DV' ].mean() #.loc[observed_dv['TIME'] == first_time, 'DV'].median()
     global_std = observed_dv['DV'].std()
     global_std = max(global_std, 1e-6)
     global_max_dose = df['AMT'].max()
@@ -743,6 +686,7 @@ def compute_global_stats(df):
 
 
 
+
 def export_all_metrics_and_residuals(metrics, base_dir):
     os.makedirs(base_dir, exist_ok=True)
     
@@ -752,18 +696,37 @@ def export_all_metrics_and_residuals(metrics, base_dir):
     metrics_df.to_csv(metrics_file, index=False)
     print(f"Saved metrics: {metrics_file}")
 
-   
+def export_obsvspred(obsvspred, base_dir):
+    os.makedirs(base_dir, exist_ok=True)
+
+    df = pd.DataFrame(obsvspred)
+
+    out_file = os.path.join(base_dir, "obsvspred.csv")
+    df.to_csv(out_file, index=False)
+    print("Saved:", out_file)
+
+
+        
+def append_obsvspred(obsvspred, all_targets, all_predictions, all_ids, iteration):
+    # append scalar iteration N times
+    obsvspred["iteration"].extend([iteration] * len(all_targets))
+
+    # append flat lists directly
+    obsvspred["ids"].extend(all_ids)
+    obsvspred["obs"].extend(all_targets)
+    obsvspred["pred"].extend(all_predictions)
+
+       
         
         
-        
-def append_metrics(metrics, mse_mean, r2_mean, mse_median, r2_median):
+def append_metrics(metrics, r2, mse):
     """
     Append metrics and residuals safely for a given variant.
     """
-    metrics["mse_mean"].append(mse_mean)
-    metrics["r2_mean"].append(r2_mean)
-    metrics["mse_median"].append(mse_median)
-    metrics["r2_median"].append(r2_median)
+    metrics["r2"].append(r2)
+    metrics["mse"].append(mse)
+    #metrics["mse_median"].append(mse_median)
+  #  metrics["r2_median"].append(r2_median)
 
 
 
@@ -785,7 +748,7 @@ def load_all_metrics_and_residuals_as_lists(base_dir):
    
     metrics_file = os.path.join(base_dir, f"metrics.csv")
     loaded = load_existing_metrics(metrics_file, 
-                                   ["mse_mean","r2_mean","mse_median","r2_median"])
+                                   ["r2","mse"])
     # Convert each series/list to pure Python list
     metrics = {k: list(v) for k, v in loaded.items()}
 
@@ -793,11 +756,39 @@ def load_all_metrics_and_residuals_as_lists(base_dir):
 
 
     # Compute already_done
-    already_done = len(metrics["mse_mean"])
+    already_done = len(metrics["r2"])
 
     return metrics, already_done
 
+def load_all_obsvspred(base_dir):
+    """
+    Loads metrics and residuals CSVs for all specified variants,
+    and converts all metrics to Python lists so they can be appended.
 
+    Returns:
+        metrics: dict of dicts (all lists)
+        residuals: dict of lists
+        already_done: int, max length of mse_mean lists across variants
+    """
+
+    metrics = {}
+
+    ensure_result_files(base_dir)  # make sure all files exist
+
+   
+    metrics_file = os.path.join(base_dir, f"obsvspred.csv")
+    loaded = load_existing_metrics(metrics_file, 
+                                   ["obs","pred","ids","iteration"])
+    # Convert each series/list to pure Python list
+    metrics = {k: list(v) for k, v in loaded.items()}
+
+
+
+
+    # Compute already_done
+   # already_done = len(metrics["r2"])
+
+    return metrics
 
 
 
@@ -808,7 +799,7 @@ def ensure_result_files(base_dir: str):
     print(f"[INFO] Base dir: {os.path.abspath(base_dir)}")
 
     files_and_headers = {
-        "metrics.csv": ["mse_mean","r2_mean","mse_median","r2_median"],
+        "metrics.csv": ["r2", "mse"],
   
     }
 
@@ -838,11 +829,6 @@ def load_existing_metrics(filepath, expected_columns):
 def standardize_concentration(conc, mean, std): return (conc - mean) / std
 def destandardize_concentration(norm_conc, mean, std): return norm_conc * std + mean
 
-# def standardize_concentration(conc, max_value, min_value):
-#     return (conc - min_value) / (max_value - min_value)
-
-# def destandardize_concentration(norm_conc, max_value, min_value):
-#     return norm_conc * (max_value - min_value) + min_value
 
 
 
@@ -887,9 +873,10 @@ def load_models(models: dict, load_dir: str, model_name: str, device=torch.devic
     return models    
 
 
-import pandas as pd
 
-def prepare_and_merge_datasets(df_train, df_test, base_dir=None):
+
+
+def prepare_and_merge_datasets(df_train, df_test, base_dir, it):
     """
     Add censoring columns to train and test datasets, merge them, and optionally export.
 
@@ -926,9 +913,13 @@ def prepare_and_merge_datasets(df_train, df_test, base_dir=None):
     # Optional export
     if base_dir:
         os.makedirs(base_dir, exist_ok=True)  # ensure folder exists
-        export_path = os.path.join(base_dir, "merged_dataset.csv")
+
+        filename = f"merged_dataset_{it}.csv"   # add the suffix here
+        export_path = os.path.join(base_dir, filename)
         df_merged.to_csv(export_path, index=False)
         print(f"Merged dataset saved to: {export_path}")
     
     return df_merged
+
+
 

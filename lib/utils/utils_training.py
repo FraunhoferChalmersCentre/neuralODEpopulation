@@ -5,8 +5,8 @@ import torch
 
 
 
-from lib.utils.utils_preprocess import destandardize_concentration, compute_global_stats, append_metrics, export_all_metrics_and_residuals
-from lib.utils.utils_post_processing import compute_residuals, plot_individual_fits, compute_test_metrics
+from lib.utils.utils_preprocess import append_obsvspred, export_obsvspred, destandardize_concentration, compute_global_stats, append_metrics, export_all_metrics_and_residuals
+from lib.utils.utils_post_processing import plot_individual_fits, compute_test_metrics
 from lib.utils.utils_shared import encode_latent, preprocess_batch, prepare_ode_input, make_predictions, normalize_encoder_input
 
 
@@ -176,14 +176,14 @@ def pad_dose_times(dose_times_list, pad_value=-1.0):
 
 def compute_loss_and_metrics(
     encoder,
-    x_padded, mask, pred_interp,
+    x_padded, mask_missing_data, pred_interp,
     mu_q, L_q,    # full-covariance outputs
     mu_p, L_p,    # from encoder.get_prior(batch_size)
     epoch, warmup_epochs_iiv, free_bits,
     enable_ae, enable_vae,
     noise, global_mean, global_std,
     only_median_training=False,
-    replace_mask=None, repeat_factor=1
+    mask_L1=None, repeat_factor=1
 ):
     """
     Computes reconstruction + KL losses and metrics for full-covariance encoder.
@@ -192,16 +192,18 @@ def compute_loss_and_metrics(
     """
 
     device = x_padded.device
+    mask_missing_data=mask_missing_data.to(device)
+    mask_L1=mask_L1.to(device)
 
     # === Repeat data if needed ===
     if repeat_factor > 1:
-        mask = mask.repeat_interleave(repeat_factor, dim=0)
+        mask_missing_data = mask_missing_data.repeat_interleave(repeat_factor, dim=0)
         x_padded = x_padded.repeat_interleave(repeat_factor, dim=0)
 
     # === Reconstruction loss ===
     recon_loss_noise, mse = noise.nll(
         destandardize_concentration(x_padded, global_mean, global_std),
-        pred_interp, replace_mask, mask
+        pred_interp, mask_L1, mask_missing_data
     )
 
 
@@ -346,6 +348,7 @@ def log_training_epoch(end_time, epoch, total_mse, total_loss, total_recon, tota
         main_lr = optimizer.param_groups[0]['lr']
        # end_time = time.time()
         add_error = float(noise.sigma_add)
+        prop_error=float(noise.sigma_prop)
 
         if enable_ae:
             print(f"Epoch {epoch}, "
@@ -361,8 +364,9 @@ def log_training_epoch(end_time, epoch, total_mse, total_loss, total_recon, tota
                   f"MSE {total_mse/num_batches:.1f} "
                   f"loss: {total_loss/num_batches:.1f}, "
                   f"-LL: {total_recon/num_batches:.1f}, "
-                  f"KL: {total_kl/num_batches:.8f}, "
+                  f"KL: {total_kl/num_batches:.1f}, "
                   f"Add. error: {add_error:.2f}, "
+                  f"Prop. error: {prop_error:.3f}, "
                   f"lr: {main_lr:.3f}, "
                   f"{end_time:.1f} seconds")
         else:
@@ -509,7 +513,7 @@ def start_all_modules(*modules):
         for param in module.parameters():
             param.requires_grad = True
 
-def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_params,
+def train_loop_model(models_norm,models_eval,dataloader, dataset_train, main_params,
     optimizer, scheduler, t_dense,
     n_epochs, warmup_epochs_noise, warmup_epochs_iiv, smoothing_start_epoch,
      enable_ae,enable_vae,
@@ -525,9 +529,9 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
     set_all_train(models_eval)
     
     
-    encoder_med = models_median['encoder'].eval()
-    func_med = models_median['func'].eval()
-    reducer_med = models_median['reducer'].eval()
+    encoder_med = models_norm['encoder'].eval()
+    func_med = models_norm['func'].eval()
+    reducer_med = models_norm['reducer'].eval()
  
     
     global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(dataset_train)
@@ -545,9 +549,8 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
 
   
     num_batches = len(dataloader)
-    
-
- 
+   
+   
     
     for epoch in range(n_epochs):
         # After loss.backward()
@@ -568,11 +571,11 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
         for batch in dataloader:
             # Unpack batch
             (
-             occ_list,          # id_list
+             id_list,          # id_list
              treatment_list,
              t_padded,          # padded time
              x_global_padded,   # padded global features
-             mask,              # time mask
+             mask_missing_data,              # time mask
              cov_padded,
              dose_tensor,       # dose amounts
              dose_times_list,   # dose start times
@@ -582,24 +585,29 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
          ) = batch
 
             # --- Preprocess batch ---
-            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
+            id_list,treatment_list, t_padded, x_padded,  _, _,t_cut, x_cut, mask_encoder, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
                 batch, device, truncation=truncation
             )
            
-     
-             
-            
+       
+           
+ 
             if normalization:
-                x_encoder = normalize_encoder_input( x_encoder, t_encoder, x_padded,cov, dose_tensor, dose_times_list, evid,
+                x_encoder = normalize_encoder_input( x_padded, t_padded, x_padded,cov, dose_tensor, mask_encoder,dose_times_list, evid,
                  encoder_med, func_med, reducer_med,
                  t_dense, global_mean, global_std)
-           
-            k_param,z0,  mu_q, L_q, mu_p, L_p,mask_dropout, repeat_factor= encode_latent(
+            else:
+                x_encoder=x_padded
+       
+            
+            
+            k_param,z0,  mu_q, L_q, mu_p, L_p,mask_L1, repeat_factor= encode_latent(
                 encoder,
-                t_encoder,
+                t_padded,
                 x_encoder,
                 cov,
                 dose_tensor,
+                mask_encoder,
                 enable_vae=enable_vae,
                 enable_ae=enable_ae,
                 enable_onlymedian=enable_onlymedian, 
@@ -609,8 +617,8 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
                 
             )
             
-           # print(mu_p)
 
+            
             ode_func= prepare_ode_input(
                 x_padded,
                 k_param,
@@ -618,7 +626,6 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
                 cov,
                 dose_tensor,
                 dose_times_list,
-                mask_dropout,
                 evid,
                 enable_ae,
                 enable_onlymedian,
@@ -633,12 +640,12 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
             
             loss, recon_loss_noise, mse, KL_loss = compute_loss_and_metrics(encoder,
                 
-                x_padded, mask, pred_interp,
+                x_padded, mask_missing_data, pred_interp,
                 mu_q, L_q,
                 mu_p,L_p,
                 epoch, warmup_epochs_iiv, free_bits,
                 enable_ae, enable_vae,
-                noise, global_mean, global_std, enable_onlymedian, mask_dropout,repeat_factor
+                noise, global_mean, global_std, enable_onlymedian, mask_L1,repeat_factor
             )
        
             
@@ -691,8 +698,9 @@ def train_loop_model(models_median,models_eval,dataloader, dataset_train, main_p
 
 
 
-def run_train_test(models, models_normalization, dataset_train, dataset_val, dataset_test,df,
-                      main_params, optimizer, scheduler, t_dense, metrics,
+
+def run_train_test(it, models, models_normalization, dataset_train, dataset_val, dataset_test,df,
+                      main_params, optimizer, scheduler, t_dense, metrics,obsvspred,
                       n_epochs, train_loader, val_loader,test_loader,  base_dir,
                       warmup_noise, warmup_iiv,smoothing_start_epoch, enable_ae, enable_vae,enable_onlymedian,normalization,
                       free_bits=0, truncation=1):
@@ -710,7 +718,7 @@ def run_train_test(models, models_normalization, dataset_train, dataset_val, dat
         n_epochs, warmup_noise, warmup_iiv, smoothing_start_epoch,
          enable_ae,enable_vae,
         enable_onlymedian,normalization,
-        truncation,
+        truncation,10
     )
 
 
@@ -743,19 +751,22 @@ def run_train_test(models, models_normalization, dataset_train, dataset_val, dat
     #                                                df,
     #                                                truncation=truncation, num_repeats=10, show_confidence_intervals=True)
 
-    r2_mean, r2_median, mse_mean, mse_median=compute_test_metrics(
+    r2, mse, obs, pred, ids=compute_test_metrics(
          dataset_test, models,models_normalization,
         df,
-        enable_vae, enable_ae, enable_onlymedian, t_dense,
+        enable_vae=False, enable_ae=True, enable_onlymedian=False, t_dense=t_dense,
         truncation=truncation, normalization=normalization
     )
 
     # Append metrics and residuals
-    append_metrics(metrics, mse_mean, r2_mean,
-                  mse_median, r2_median)
+    append_metrics(metrics, r2, mse)
+    
+ 
+    append_obsvspred(obsvspred, obs, pred, ids, it)
 
     # Save metrics/residuals
     export_all_metrics_and_residuals(metrics, base_dir)
+    export_obsvspred(obsvspred, base_dir)
 
 
 

@@ -1,31 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Nov 19 20:09:11 2025
-
-@author: Baaz
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Nov 19 12:54:49 2025
-
-@author: Baaz
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Nov 16 22:32:06 2025
-
-@author: Baaz
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Oct 24 21:45:47 2025
-
-@author: Baaz
-"""
-
 
 
 import os
@@ -52,11 +24,11 @@ if __name__ == "__main__":
               '--data_path', 'lib/data/theophylline_data_formatted.csv',
      '--save_dir', 'models',
      '--load_dir', 'models',
-     '--base_dir','results/theo/run7']
+     '--base_dir','results/theo/run11']
       
-    from lib.utils.utils_preprocess import prepare_and_merge_datasets, prepare_datasets_and_loaders, load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists
+    from lib.utils.utils_preprocess import load_all_obsvspred, prepare_and_merge_datasets, prepare_datasets_and_loaders, load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists
     from lib.utils.utils_training import   train_loop_model, run_train_test
-    from lib.utils.utils_post_processing import compute_test_metrics, compute_residuals, vpc_true, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits, vpc
+    from lib.utils.utils_post_processing import  plot_VPC_and_residuals, vpc_true, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits
     from lib.models.NNmodels import  Encoder_Transformer, ODEFunc, SimpleDecoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
@@ -78,7 +50,7 @@ if __name__ == "__main__":
     
     load_dir = args.load_dir
     save_dir = args.save_dir
-    modelname = "MultipleDoseAddError_AE_NF2"
+
     
       
        
@@ -90,28 +62,6 @@ if __name__ == "__main__":
     df = pd.read_csv(args.data_path, sep=';')
     df_validation=pd.read_csv(args.data_validation_path, sep=';')
     df_test=pd.read_csv(args.data_test_path, sep=';')
-    
-    
-    global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df)
-    df_train,dataset_train, dataset_val, dataset_test, train_base_dataset, train_loader, val_loader, test_loader, t_dense, batch_size_train, batch_size_val, batch_size_test = prepare_datasets_and_loaders(args.data_path, args.data_validation_path, args.data_test_path,  device, batch_fraction=0.2,time_points=120)
-    
-    
-    
-    
-
-   # cov_list = ast.literal_eval(df['COV_IND'][0])
-    metrics, already_done = load_all_metrics_and_residuals_as_lists(args.base_dir)
-    start = already_done  # continue training or evaluation from here
-    
-    
-    dim_latent=2
-    dim_parameters_IC=1
-    dim_parameters_dynamic=2
-    hidden_NODE_dim=512
-
-    hidden_OBS_dim=16
-    init_add_std=1
-    init_prop_std=0
       
     number_drugs = df['EVID'].max()
     number_covariates=1
@@ -119,12 +69,15 @@ if __name__ == "__main__":
 
 
  # %%
+ 
+df_test, df_train, dataset_train, dataset_test, train_loader, test_loader, t_dense= prepare_datasets_and_loaders(args.data_path, args.data_test_path, device, batch_fraction=0.25,time_points=120)
+
+ 
 dim_latent=2
-dim_parameters_IC=0
+dim_parameters_IC=1
 dim_parameters_dynamic=2
 hidden_NODE_dim=256
 
-hidden_OBS_dim=16
 init_add_std=0.2
 init_prop_std=0.02
   
@@ -138,7 +91,7 @@ learn_prior_covariance=True
 diagonal_only=False
 IC_dose_dependent=False
 
-lr = 0.0001
+lr = 0.001
 prior_lr_factor=1.00
 min_lr=1e-5
 reduction_factor=0.8
@@ -216,7 +169,7 @@ use_ema_models=True
 )
 
 
-compute_residuals(models_ebvae, models_ebvae, train_loader, t_dense,
+plot_VPC_and_residuals(models_ebvae, models_ebvae, train_loader, t_dense,
                                                    df,
                                                    truncation=truncation, num_repeats=10, show_confidence_intervals=True)
 
@@ -250,7 +203,7 @@ plot_individual_fits(
    ) 
   #%% 
 dim_latent=2
-dim_parameters_IC=0
+dim_parameters_IC=1
 dim_parameters_dynamic=2
 hidden_NODE_dim=256
 
@@ -259,16 +212,16 @@ init_add_std=0.2
 init_prop_std=0.02
   
 hidden_Encoder_dim=36
-model_Encoder_dim=128
-heads_Encoder=4
+model_Encoder_dim=64
+heads_Encoder=2
 layers_Encoder=2
-dropout_Encoder=0.001
+
 learn_prior_mean=True
 learn_prior_covariance=True
 diagonal_only=False
 IC_dose_dependent=False
 
-lr = 0.0001
+lr = 0.001
 prior_lr_factor=1.00
 min_lr=1e-5
 reduction_factor=0.8
@@ -277,21 +230,13 @@ patience=20
  
 truncation=0.3
 
-it=5
+it=100
 for it in range(0, it):
     
-    df_test, df_train, dataset_train, dataset_test, train_loader, test_loader, t_dense= prepare_datasets_and_loaders(args.data_path, args.data_test_path, device, batch_fraction=0.2,time_points=120)
+    df_test, df_train, dataset_train, dataset_test, train_loader, test_loader, t_dense= prepare_datasets_and_loaders(args.data_path, args.data_test_path, device, batch_fraction=0.25,time_points=120)
      
-    prepare_and_merge_datasets(df_train, df_test,args.base_dir) 
+    prepare_and_merge_datasets(df_train, df_test,args.base_dir, it) 
       
-    
-    
-    
-    
-    
-    
-    
-    
     encoder_ae = Encoder_Transformer(dim_latent=dim_latent,
     dim_parameters_IC=dim_parameters_IC,
     dim_parameters_dynamic=dim_parameters_dynamic,
@@ -330,20 +275,41 @@ for it in range(0, it):
     #load_models(models, save_dir, "vae")
     
     
-    n_epochs=1
+    n_epochs=300
     
         
     
     # cov_list = ast.literal_eval(df['COV_IND'][0])
     metrics, already_done = load_all_metrics_and_residuals_as_lists(args.base_dir)
+    obsvspred = load_all_obsvspred(args.base_dir)
     start = already_done  # continue training or evaluation from here
     
     
-    run_train_test(models_ebvae, models_ebvae, dataset_train, dataset_test, dataset_test,df_train,
-                          main_params2, optimizer2, scheduler2, t_dense, metrics,
-                          n_epochs, train_loader, val_loader,test_loader,  args.base_dir,
-                          warmup_noise=30, warmup_iiv=0,smoothing_start_epoch=0, enable_ae=False, enable_vae=True,enable_onlymedian=False,normalization=False,
+    run_train_test(it, models_ebvae, models_ebvae, dataset_train, dataset_test, dataset_test,df_train,
+                          main_params2, optimizer2, scheduler2, t_dense, metrics,obsvspred,
+                          n_epochs, train_loader, test_loader,test_loader,  args.base_dir,
+                          warmup_noise=100, warmup_iiv=100,smoothing_start_epoch=0, enable_ae=False, enable_vae=True,enable_onlymedian=False,normalization=False,
                           free_bits=0, truncation=0.3)
 
 
-
+    plot_individual_fits(
+     models_ebvae,
+     models_ebvae,
+     dataset_test,
+     t_dense,
+     df,
+     truncation=0.3,
+     max_plots=3,
+     n_samples=100,
+     ci_lower=0.05,
+     ci_upper=0.95,
+     nr_row=1,
+     nr_col=3,
+     enable_vae=False,
+     enable_ae=False,
+     enable_onlymedian=False,
+     add_noise=True,
+     use_ema_models=False,
+     normalization=False,
+     fontsize=14  # Added a parameter to control font size
+ )

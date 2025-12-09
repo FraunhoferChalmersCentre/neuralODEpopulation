@@ -1,13 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sat Sep 20 07:10:20 2025
-@author: Baaz
-"""
-# ===== Standard Library =====
 import os
 import math
 import gc
 import ast
+import re
 from contextlib import contextmanager
 from itertools import combinations
 
@@ -19,25 +14,11 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, mean_squared_error
 import torch
 from torch.utils.data import DataLoader, Subset
-from torch.nn.utils.rnn import pad_sequence
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+
 from matplotlib.lines import Line2D
-
-
-
-
-
-
-
-    
-
-
-
-
-
-import os
 
 # ===== Local Project Imports =====
 from lib.utils.utils_shared import (
@@ -48,11 +29,9 @@ from lib.utils.utils_shared import (
     encode_latent,
     prepare_ode_input,
     make_predictions,
-    sample_from_prior
+    ODEWrapper
 )
 from lib.utils.utils_preprocess import make_collate_fn, compute_global_stats
-
-from lib.utils.utils_shared import ODEWrapper
 
 def compute_test_metrics(
      dataset, models,models_med,
@@ -87,13 +66,10 @@ def compute_test_metrics(
 
     for batch in dataloader:
         # Preprocess batch (single subject)
-        id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
+        id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask,mask_encoder, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
             batch, device, truncation=truncation
         )
        
-
-        # if t_cut.numel() == 0:
-        #     continue  # skip if no cut values
 
 
           
@@ -105,13 +81,14 @@ def compute_test_metrics(
          
         k_param,z0,  mu_q, L_q, mu_p, L_p,mask_dropout, _= encode_latent(
               encoder,
-              t_encoder,
-              x_encoder,
+              t_padded,
+              x_padded,
               cov,
               dose_tensor,
-              enable_vae=enable_vae,
-              enable_ae=enable_ae,
-              enable_onlymedian=enable_onlymedian
+              mask_encoder,
+              enable_vae=False,
+              enable_ae=True,
+              enable_onlymedian=False
               
           )
           
@@ -138,32 +115,22 @@ def compute_test_metrics(
         # Denormalize true and predicted cut values
         x_cut_true = (x_cut.squeeze(0).detach().cpu().numpy() * global_std + global_mean)
         x_cut_pred = pred_interp.squeeze(0).detach().cpu().numpy()
-        mask_obs = mask.bool()
-        mask_obs_np = mask_obs.detach().cpu().numpy()
+        n = len(x_cut_true)  # how many cut points this subject has
+        id_val = int(id_list.item())  # actual subject ID
+        
 
         # Collect global arrays
         all_targets.extend(x_cut_true.tolist())
         all_predictions.extend(x_cut_pred.tolist())
+        all_ids.extend([id_val] * n)   # repeat ID for each measurement
 
-        # Per-subject metrics
-        if len(x_cut_true) > 1:  # avoid error on single points
-            per_subject_r2.append(r2_score(x_cut_true, x_cut_pred))
-            per_subject_mse.append(mean_squared_error(x_cut_true, x_cut_pred))
 
-    # # Compute aggregated metrics
-    # if len(per_subject_r2) == 0:
-    #     return None, None, None, pd.DataFrame(
-    #         columns=["Prediction", "Observation", "ID"]
-    #     )
-
-    r2_mean = float(np.mean(per_subject_r2))
-    r2_median = float(np.median(per_subject_r2))
-    mse_mean = float(np.mean(per_subject_mse))
-    mse_median = float(np.median(per_subject_mse))
-
+        r2=r2_score(all_targets,all_predictions)
+        mse=mean_squared_error(all_targets,all_predictions)
+        
   
 
-    return r2_mean, r2_median, mse_mean, mse_median
+    return r2, mse, all_targets, all_predictions, all_ids
 
 
 
@@ -470,14 +437,16 @@ def plot_individual_fits(
         k_param_samples_list = []
      
         if normalization:
-            x_encoder = normalize_encoder_input( x_encoder, t_encoder, x_padded,cov, dose_tensor, dose_times_list,evid,
+            x_encoder_norm = normalize_encoder_input( x_encoder, t_encoder, x_padded,cov, dose_tensor, mask, dose_times_list,evid,
              encoder_med, func_med, reducer_med,
              t_dense, global_mean, global_std)
+        else:
+            x_encoder_norm=x_encoder
         
         with use_ema(encoder):# if use_ema_models else contextmanager(lambda: (yield))():  
             for _ in range(n_samples):
                 k_param_samples,_, _, _, _,_,_,_ = encode_latent(
-                    encoder, t_encoder, x_encoder,cov,dose_tensor,
+                    encoder, t_encoder, x_encoder_norm,cov,dose_tensor,mask,
                     enable_vae=enable_vae,
                     enable_ae=enable_ae,
                     enable_onlymedian=enable_onlymedian
@@ -515,7 +484,6 @@ def plot_individual_fits(
                     cov,
                     dose_tensor_exp,
                     dose_times_list_exp,
-                    mask,
                     evid_exp,
                     enable_ae,
                     enable_onlymedian
@@ -638,7 +606,7 @@ def torch_linear_interpolate2(x_dense, y_dense, x_target):
     return y0 + slope * (x_target - x0)  
 
 
-def compute_residuals(models_eval, models_median, dataloader, t_dense,
+def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
                                                    df,
                                                    truncation=1, num_repeats=50, show_confidence_intervals=True):
     """
@@ -666,13 +634,13 @@ def compute_residuals(models_eval, models_median, dataloader, t_dense,
 
     with torch.no_grad():
         for batch in dataloader:
-            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
+            id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask_encoder, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
                 batch, device, truncation=truncation
             )
             # Encode latent
             k_param,z0,  mu_q, L_q, mu_p, L_p,mask_dropout, _= encode_latent(
                 encoder, t_encoder, x_encoder,   cov,
-                   dose_tensor,
+                   dose_tensor,mask_encoder,
                 enable_vae=False, enable_ae=True, enable_onlymedian=False
             )
 
@@ -685,8 +653,7 @@ def compute_residuals(models_eval, models_median, dataloader, t_dense,
                 cov,
                 dose_tensor,
                 dose_times_list,
-                mask_dropout,
-                evid,
+                  evid,
                 enable_ae=True
                 
             )
@@ -706,20 +673,21 @@ def compute_residuals(models_eval, models_median, dataloader, t_dense,
             
             
             
-            mask_obs = mask.bool()
+       
             
           #  mask_obs = mask_obs.unsqueeze(1).expand_as(residuals)  # shape [batch_size, seq_len]
             
             # Flatten both before appending
-            std_residuals_list.append(std_residuals[mask_obs].view(-1))
-            residuals_list.append(residuals[mask_obs].view(-1))
-            predictions_list.append(pred_interp[mask_obs].view(-1))
-            targets_list.append(targets[mask_obs].view(-1))
-            times_list.append(t_padded[mask_obs].view(-1))
+            std_residuals_list.append(std_residuals.view(-1))
+            residuals_list.append(residuals.view(-1))
+            predictions_list.append(pred_interp.view(-1))
+            targets_list.append(targets.view(-1))
+            times_list.append(t_padded.view(-1))
             
             # For VPC scatter
-            all_times.append(t_padded[mask_obs].cpu().numpy().flatten())
-            all_targets.append(targets[mask_obs].cpu().numpy().flatten())
+            all_times.append(t_padded.cpu().numpy().flatten())
+            all_targets.append(targets.cpu().numpy().flatten())
+
 
     residuals_all = torch.cat(residuals_list)
     predictions_all = torch.cat(predictions_list)
@@ -883,8 +851,7 @@ def compute_residuals(models_eval, models_median, dataloader, t_dense,
     plt.show()
 
     # ---- Return the original 4 outputs ----
-    return residuals_all, predictions_all, targets_all, times_all
-
+   # return residuals_all, predictions_all, targets_all, times_all
 
 
 
@@ -914,7 +881,7 @@ def split_dataloader_by_treatment(dataloader, dataset):
 
 
 def plot_encoder_histograms(
-   models_eval,models_median,
+   models_norm,models_eval,
     t_dense, df,
     dataset, dataloader,
  truncation=None, normalization=True
@@ -928,9 +895,9 @@ def plot_encoder_histograms(
 
     encoder = models_eval['encoder'].eval()
 
-    encoder_med = models_median['encoder'].eval()
-    func_med = models_median['func'].eval()
-    reducer_med = models_median['reducer'].eval()
+    encoder_med = models_norm['encoder'].eval()
+    func_med = models_norm['func'].eval()
+    reducer_med = models_norm['reducer'].eval()
 
     global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df)
 
@@ -966,7 +933,7 @@ def plot_encoder_histograms(
                 # Optional normalization
                 if normalization:
                     x_encoder = normalize_encoder_input(
-                        x_encoder, t_encoder, x_padded, cov, dose_tensor, dose_times_padded, evid,
+                        x_encoder, t_encoder, x_padded, cov, dose_tensor, mask,dose_times_padded, evid,
                         encoder_med, func_med, reducer_med,
                         t_dense, global_mean, global_std
                     )
@@ -974,15 +941,15 @@ def plot_encoder_histograms(
                 # Encode latent with EMA weights
                 with use_ema(encoder):
                     k_param,_, mu_q, L_q, mu_p, L_p,_, repeat_factor = encode_latent(
-                        encoder, t_encoder, x_encoder,cov, dose_tensor,
+                        encoder, t_encoder, x_encoder,cov, dose_tensor,mask,
                         enable_vae=True, enable_ae=False, enable_onlymedian=False
                     )
                 
-                    mu_q=mu_q-mu_p
+                    mu_q=mu_q -mu_p
           
           
                     if L_q.dim() == 2:
-                                          L_q = torch.diag_embed(L_q)  # convert [B, D] -> [B, D, D]
+                        L_q = torch.diag_embed(L_q)  # convert [B, D] -> [B, D, D]
                     
                     Sigma_q = L_q @ L_q.transpose(-1, -2)
                     sigma_q = torch.sqrt(torch.diagonal(Sigma_q, dim1=-2, dim2=-1))  # [B, D]
@@ -1005,7 +972,7 @@ def plot_encoder_histograms(
     # Prior correlation
     with torch.no_grad():
         _,_, _, _, mu_p, L_p, _,_= encode_latent(
-            encoder, t_encoder, x_encoder, cov, dose_tensor,
+            encoder, t_encoder, x_encoder, cov, dose_tensor, mask,
             enable_vae=True, enable_ae=False, enable_onlymedian=False
         )
         L_p = L_p.to(device)  # [B, D, D]
@@ -1102,10 +1069,8 @@ def plot_encoder_histograms(
 
 def plot_single_model_encoders_and_regression(
     df_train, df_val, dataset_train, dataset_val,
-    encoder1, func1, reducer1,
-    encoder_med, func_med, reducer_med,
-     global_mean, global_std, t_dense,
-    device=None, truncation=1, use_ema_models=False, normalization=False, dim_parameter_encoder=2
+   models_eval, models_median,t_dense,
+   truncation=1, use_ema_models=False, normalization=False
 ):
     """
     Plot regression and encoder outputs using μ for regression,
@@ -1115,9 +1080,21 @@ def plot_single_model_encoders_and_regression(
 
     gc.collect()
     torch.cuda.empty_cache()
-    if device is None:
-        device = next(encoder1.parameters()).device
-    latent_dim=encoder1.total_parameters
+
+    encoder = models_eval['encoder'].eval()
+
+    func = models_eval['func'].eval()
+    reducer = models_eval['reducer'].eval()
+    noise = models_eval['noise'].eval()
+    
+    
+    encoder_med = models_median['encoder'].eval()
+    func_med = models_median['func'].eval()
+    reducer_med = models_median['reducer'].eval()
+    
+    global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value=compute_global_stats(df_train)
+    device = next(encoder.parameters()).device
+    latent_dim=encoder.total_parameters
   
     # ---------------- Extract latents helper ----------------
     def extract_latents(df, dataset, encoder):
@@ -1144,7 +1121,7 @@ def plot_single_model_encoders_and_regression(
                     cov=cov.to(device)
 
                     # Preprocess
-                    id_list, treatment_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask_dose, cov,dose_tensor, dose_times_list, evid = preprocess_batch(
+                    id_list, treatment_list, t_padded, x_padded, t_encoder, x_encoder, t_cut, x_cut, mask, cov,dose_tensor, dose_times_list, evid = preprocess_batch(
                         batch, device, truncation=truncation
                     )
 
@@ -1153,13 +1130,13 @@ def plot_single_model_encoders_and_regression(
                         
               
                         x_encoder = normalize_encoder_input(
-                            x_encoder, t_encoder, x_padded,cov, dose_tensor, dose_times_padded, evid_padded,
+                            x_encoder, t_encoder, x_padded,cov, dose_tensor,mask, dose_times_padded, evid_padded,
                             encoder_med, func_med, reducer_med,
                             t_dense, global_mean, global_std
                         )
 
-                    k_param,z0,  mu_q, logvar_q, mu_p, logvar_p,mask,  repeat_factor= encode_latent(
-                        encoder, t_encoder, x_encoder,cov, dose_tensor,
+                    k_param,z0,  mu_q, logvar_q, mu_p, logvar_p,mask2,  repeat_factor= encode_latent(
+                        encoder, t_encoder, x_encoder,cov, dose_tensor,mask,
                         enable_vae=False, enable_ae=True, enable_onlymedian=False
                     )
                     mu_q=mu_q -mu_p
@@ -1173,7 +1150,17 @@ def plot_single_model_encoders_and_regression(
                         row = df[df["ID"] == int(sid)]
                         if row.empty:
                             continue
-                        param_values = ast.literal_eval(row["PARAM_VALUES"].values[0])
+                        s = row["PARAM_VALUES"].values[0]
+
+                        # Remove np.float64( ... )
+                        cleaned = re.sub(r'np\.float64\(', '', s)
+                        cleaned = cleaned.replace(')', '')
+                        
+                        param_values = ast.literal_eval(cleaned)
+                                                
+                        
+                        
+                       # param_values = ast.literal_eval(row["PARAM_VALUES"].values[0])
                         param_values = param_values[:n_params]
                         param_values_list.append(param_values)
                         id_list_all.append(sid.item())
@@ -1188,8 +1175,8 @@ def plot_single_model_encoders_and_regression(
         return X, y, treatments, param_names
 
     # ---------------- Extract latents ----------------
-    X_train, y_train, treatments_train, param_names = extract_latents(df_train, dataset_train, encoder1)
-    X_val, y_val, treatments_val, _ = extract_latents(df_val, dataset_val, encoder1)
+    X_train, y_train, treatments_train, param_names = extract_latents(df_train, dataset_train, encoder)
+    X_val, y_val, treatments_val, _ = extract_latents(df_val, dataset_val, encoder)
 
     n_params = y_train.shape[1]
     actual_latent_dim = X_val.shape[1]  # safe in case latent_dim is inconsistent
@@ -1242,7 +1229,7 @@ def plot_single_model_encoders_and_regression(
                            color=treatment_color_map[t_val], s=marker_size)
             ax.set_xlabel(f"μ{d}", fontsize=fs)
             ax.set_ylabel(f"True {param_names[i]}", fontsize=fs)
-            ax.set_title(f"Latent dim {d}", fontsize=fs)
+            ax.set_title(f"Latent individual dim {1+d}", fontsize=fs)
             ax.tick_params(axis='both', labelsize=fs-2)
             ax.grid(True, linestyle="--", alpha=0.6)
 
@@ -1267,7 +1254,7 @@ def plot_single_model_encoders_and_regression(
         # Legend below
         handles = [plt.Line2D([0], [0], marker='o', color='w',
                               markerfacecolor=treatment_color_map[t],
-                              markersize=10, label=f"Treatment {t}") for t in unique_treatments]
+                              markersize=10, label=f"Treatment {global_max_dose*(t+1)} mg/kg") for t in unique_treatments]
         fig.legend(handles=handles, loc='lower center', ncol=len(unique_treatments), fontsize=fs)
         plt.tight_layout(rect=[0, 0.15, 1, 0.95])
         plt.show()
@@ -1297,7 +1284,7 @@ def split_dataloader_by_treatment(dataloader, dataset):
         subset = Subset(dataset, subset_indices)
         loaders_by_treatment[t] = DataLoader(
             subset,
-            batch_size=dataloader.batch_size,
+            batch_size=1000,
             shuffle=False,
             collate_fn=dataloader.collate_fn,
             num_workers=getattr(dataloader, 'num_workers', 0)
@@ -1378,7 +1365,7 @@ def generate_plot_data(
                     if isinstance(evid, list):
                         evid = torch.stack(evid, dim=0).to(device)  # shape: [batch, n_doses]
                     x_encoder = normalize_encoder_input(
-                        x_encoder, t_encoder, x_padded, cov_tensor, dose_tensor, dose_times_list,evid,
+                        x_encoder, t_encoder, x_padded, cov_tensor, dose_tensor,mask, dose_times_list,evid,
                         encoder_med,  func_med, reducer_med,
                         t_dense, global_mean, global_std
                     )
@@ -1386,19 +1373,18 @@ def generate_plot_data(
                 # === Encode latent ===
                 with use_ema(encoder):
                     k_param,_, mu_q, logvar_q, mu_p,L_p,mask_dropout,_ = encode_latent(
-                        encoder, t_encoder, x_encoder,cov_tensor,dose_tensor,
+                        encoder, t_encoder, x_encoder,cov_tensor,dose_tensor,mask,
                         enable_vae=enable_vae,
                         enable_ae=enable_ae,
                         enable_onlymedian=enable_onlymedian,
                         warmup_epochs_iiv=0,
                         epoch=0,
-                        min_batch_size=50,
+                        min_batch_size=1,
                         augment=False,
                         sample_posterior=False
                     )
-  
-                
-
+                    
+               
                 with use_ema(func):
                         ode_func= prepare_ode_input(
                             x_padded,
@@ -1407,7 +1393,6 @@ def generate_plot_data(
                             cov_tensor,
                             dose_tensor,
                             dose_times_list,
-                            mask_dropout,
                             evid,
                             enable_ae,
                             enable_onlymedian
@@ -1603,11 +1588,11 @@ def vpc(func_med,
 
     
 def vpc_true(
-    models_median,models_eval, dataset, t_dense, df,
+    models_norm,models_eval, dataset, t_dense, df,
     add_noise_to_prediction=False,
     enable_onlymedian=True, enable_ae=False,
-    enable_vae=False, truncation=1, num_repeats=100,
-    use_ema_models=False,
+    enable_vae=False, normalization=True, truncation=1, num_repeats=100,
+    use_ema_models=False,cols=2,
     fontsize=14,
     show_confidence_intervals=True   # toggle all CI shading
 ):
@@ -1636,13 +1621,13 @@ def vpc_true(
     all_repeats_data = []
     for r in range(num_repeats):
         plot_data_r = generate_plot_data(
-            models_median,
+            models_norm,
             models_eval,
             dataloader=dataloader, dataset=dataset, t_dense=t_dense,
             df=df,
             add_noise_to_prediction=add_noise_to_prediction,
             enable_onlymedian=enable_onlymedian, enable_ae=enable_ae,
-            enable_vae=enable_vae, normalization=True, truncation=truncation,
+            enable_vae=enable_vae, normalization=normalization, truncation=truncation,
             use_ema_models=use_ema_models
         )
         all_repeats_data.append(plot_data_r)
@@ -1661,7 +1646,7 @@ def vpc_true(
     # --- Create subplots ---
     # ============================================================
     n_plots = len(treatments)
-    n_cols = 3
+    n_cols = cols
     n_rows = math.ceil(n_plots / n_cols)
     fig, axes = plt.subplots(
         n_rows, n_cols,
