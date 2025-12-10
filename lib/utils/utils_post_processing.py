@@ -379,7 +379,9 @@ def plot_individual_fits(
     add_noise=True,
     use_ema_models=False,
     normalization=True,
-    fontsize=14  # Added a parameter to control font size
+    fontsize=14,  # Added a parameter to control font size
+    export=False,
+    pdf_filename="individual_fits.csv"
 ):
 
     # --- Set global font sizes ---
@@ -437,7 +439,7 @@ def plot_individual_fits(
         k_param_samples_list = []
      
         if normalization:
-            x_encoder_norm = normalize_encoder_input( x_encoder, t_encoder, x_padded,cov, dose_tensor, mask, dose_times_list,evid,
+            x_encoder_norm = normalize_encoder_input( x_padded, t_padded, x_padded,cov, dose_tensor, mask, dose_times_list,evid,
              encoder_med, func_med, reducer_med,
              t_dense, global_mean, global_std)
         else:
@@ -446,7 +448,7 @@ def plot_individual_fits(
         with use_ema(encoder):# if use_ema_models else contextmanager(lambda: (yield))():  
             for _ in range(n_samples):
                 k_param_samples,_, _, _, _,_,_,_ = encode_latent(
-                    encoder, t_encoder, x_encoder_norm,cov,dose_tensor,mask,
+                    encoder, t_padded, x_padded,cov,dose_tensor,mask,
                     enable_vae=enable_vae,
                     enable_ae=enable_ae,
                     enable_onlymedian=enable_onlymedian
@@ -534,9 +536,9 @@ def plot_individual_fits(
             ax.plot(t_cut_np, x_cut_np, 'o', color='red', label='Removed')
         ax.plot(t_dense_np, pred_median, '-', color='green', label='Predicted median')
         ax.fill_between(t_dense_np, pred_lower, pred_upper, color='green', alpha=0.3, label='95% CI')
-        ax.set_title(f'Ind {i} | Coverage: {coverage:.1%}')
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Value')
+        ax.set_title(f'Test Individual {i+1}')
+        ax.set_xlabel('Time (hours)')
+        ax.set_ylabel('Concentration (mg/L)')
 
         population_preds.append(pred_batch.detach().cpu())
 
@@ -552,13 +554,19 @@ def plot_individual_fits(
         fig.legend(
             handles, 
             labels, 
+            frameon=False,
             loc='lower center', 
             ncol=max(1, len(labels)),  # ensure at least 1 column
-            bbox_to_anchor=(0.5, 0.1)
+            bbox_to_anchor=(0.5, 0.05)
         )
 
     plt.tight_layout(rect=[0, 0.15, 1, 1])  # more space at bottom for legend
     plt.show()
+    if export:
+        pp = PdfPages(pdf_filename)
+        pp.savefig(fig)
+        pp.close()
+        plt.close(fig)
 
     coverage_array = np.array([c for c in coverage_list if not np.isnan(c)])
     if len(coverage_array) > 0:
@@ -608,7 +616,7 @@ def torch_linear_interpolate2(x_dense, y_dense, x_target):
 
 def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
                                                    df,
-                                                   truncation=1, num_repeats=50, show_confidence_intervals=True):
+                                                   truncation=1, num_repeats=50, show_confidence_intervals=True, export=False, pdf_filename="vpcres.csv"):
     """
     Compute residuals and generate VPC plot showing:
     - Predicted percentiles with confidence intervals
@@ -803,10 +811,10 @@ def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
                 ax.plot(times, med, color=line_color, linestyle=line_style, linewidth=line_width)
     
     ax.set_xlabel("Time (hours)")
-    ax.set_ylabel("Concentration")
+    ax.set_ylabel("Concentration (mg/L)")
     ax.set_title("Visual Predictive Check")
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=12, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
+    ax.legend(fontsize=12, loc='upper center', frameon=False, bbox_to_anchor=(0.5, -0.1), ncol=2)
 
     
     # --- [0,1] Residual histogram ---
@@ -819,7 +827,7 @@ def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
     ax_hist.set_xlabel("Residual")
     ax_hist.set_ylabel("Density")
     ax_hist.set_title("Residual histogram")
-    ax_hist.legend(fontsize=12, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
+    ax_hist.legend(fontsize=12, loc='upper center', frameon=False, bbox_to_anchor=(0.5, -0.1), ncol=2)
     
     # --- [1,0] Observation vs Prediction ---
     ax_res_time = axes[2]
@@ -836,7 +844,7 @@ def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
     ax_res_time.set_ylabel("Prediction")
     ax_res_time.set_title("Observation vs Prediction")
     ax_res_time.grid(True, alpha=0.3)
-    ax_res_time.legend(fontsize=12, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
+    ax_res_time.legend(fontsize=12, loc='upper center', frameon=False, bbox_to_anchor=(0.5, -0.1), ncol=2)
 
     
     # # --- [1,1] Residuals vs Observed ---
@@ -849,6 +857,11 @@ def plot_VPC_and_residuals(models_eval, models_median, dataloader, t_dense,
 
     plt.tight_layout()
     plt.show()
+    if export:
+        pp = PdfPages(pdf_filename)
+        pp.savefig(fig)
+        pp.close()
+        plt.close(fig)
 
     # ---- Return the original 4 outputs ----
    # return residuals_all, predictions_all, targets_all, times_all
@@ -1065,12 +1078,13 @@ def plot_encoder_histograms(
 
 
 
+from matplotlib.backends.backend_pdf import PdfPages
 
 
 def plot_single_model_encoders_and_regression(
     df_train, df_val, dataset_train, dataset_val,
    models_eval, models_median,t_dense,
-   truncation=1, use_ema_models=False, normalization=False
+   truncation=1, use_ema_models=False, normalization=False,   single_figure=False,export=False, pdf_filename="encoder_regression_plots.pdf"
 ):
     """
     Plot regression and encoder outputs using μ for regression,
@@ -1209,56 +1223,115 @@ def plot_single_model_encoders_and_regression(
     
     # Map treatments to colors
     treatment_color_map = {t: c for t, c in zip(unique_treatments, colors)}
+    if single_figure:
+        # Single large figure
+        n_rows = n_params
+        n_cols = actual_latent_dim + 1
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 5*n_rows))
+        if n_params == 1:
+            axes = np.expand_dims(axes, axis=0)  # ensure 2D
+        if actual_latent_dim == 1:
+            axes = np.expand_dims(axes, axis=1)
+        fig.suptitle("Latent Individual Parameters", fontsize=fs+6, fontweight='bold')
 
-    for i in range(n_params):
-        fig, axes = plt.subplots(1, actual_latent_dim + 1, figsize=(5*(actual_latent_dim+1), 5))
-        fig.suptitle(f"Parameter: {param_names[i]}", fontsize=fs+6, fontweight='bold')
+        for i in range(n_params):
+            # Latent scatter plots
+            for d in range(actual_latent_dim):
+                ax = axes[i, d]
+                y_true = y_val[:, i]
+                mu_vals = X_val[:, d]
+                for t_val in unique_treatments:
+                    mask = treatments_val == t_val
+                    ax.scatter(mu_vals[mask], y_true[mask], alpha=0.8,
+                               color=treatment_color_map[t_val], s=marker_size)
+                ax.set_xlabel(f"μ{d+1}", fontsize=fs)
+                ax.set_ylabel(f"True {param_names[i]}", fontsize=fs)
+                ax.set_title(f"Latent dim {d+1}", fontsize=fs)
+                ax.tick_params(axis='both', labelsize=fs-2)
+                ax.grid(True, linestyle="--", alpha=0.6)
 
-        # Ensure axes is iterable
-        if not isinstance(axes, np.ndarray):
-            axes = np.array([axes])
-
-        # μ vs true parameter plots
-        for d in range(actual_latent_dim):
-            ax = axes[d]
+            # Regression plot
+            ax_last = axes[i, -1]
             y_true = y_val[:, i]
-            mu_vals = X_val[:, d]
+            y_pred = y_pred_val[:, i]
+            r2 = r2_score(y_true, y_pred)
             for t_val in unique_treatments:
                 mask = treatments_val == t_val
-                ax.scatter(mu_vals[mask], y_true[mask], alpha=0.8, label=f"Treatment {t_val}",
-                           color=treatment_color_map[t_val], s=marker_size)
-            ax.set_xlabel(f"μ{d}", fontsize=fs)
-            ax.set_ylabel(f"True {param_names[i]}", fontsize=fs)
-            ax.set_title(f"Latent individual dim {1+d}", fontsize=fs)
-            ax.tick_params(axis='both', labelsize=fs-2)
-            ax.grid(True, linestyle="--", alpha=0.6)
-
-        # Regression plot
-        ax_last = axes[-1]
-        y_true = y_val[:, i]
-        y_pred = y_pred_val[:, i]
-        r2 = r2_score(y_true, y_pred)
-        for t_val in unique_treatments:
-            mask = treatments_val == t_val
-            ax_last.scatter(y_pred[mask], y_true[mask], alpha=0.8, s=marker_size,
-                            edgecolors='k', color=treatment_color_map[t_val], label=f"Treatment {t_val}")
-        min_val, max_val = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
-        ax_last.plot([min_val, max_val], [min_val, max_val], "r--")
-        ax_last.set_xlabel("Predicted", fontsize=fs)
-        ax_last.set_ylabel(f"True {param_names[i]}", fontsize=fs)
-        ax_last.set_title("Regression", fontsize=fs)
-        ax_last.tick_params(axis='both', labelsize=fs-2)
-        ax_last.text(0.05, 0.9, f"R² = {r2:.2f}", transform=ax_last.transAxes,
-                     fontsize=fs-2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
+                ax_last.scatter(y_pred[mask], y_true[mask], alpha=0.8, s=marker_size,
+                                edgecolors='k', color=treatment_color_map[t_val])
+            min_val, max_val = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+            ax_last.plot([min_val, max_val], [min_val, max_val], "r--")
+            ax_last.set_xlabel("Predicted", fontsize=fs)
+            ax_last.set_ylabel(f"True {param_names[i]}", fontsize=fs)
+            ax_last.set_title("Regression", fontsize=fs)
+            ax_last.tick_params(axis='both', labelsize=fs-2)
+            ax_last.text(0.05, 0.9, f"R² = {r2:.2f}", transform=ax_last.transAxes,
+                         fontsize=fs-2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
 
         # Legend below
         handles = [plt.Line2D([0], [0], marker='o', color='w',
                               markerfacecolor=treatment_color_map[t],
-                              markersize=10, label=f"Treatment {global_max_dose*(t+1)} mg/kg") for t in unique_treatments]
-        fig.legend(handles=handles, loc='lower center', ncol=len(unique_treatments), fontsize=fs)
-        plt.tight_layout(rect=[0, 0.15, 1, 0.95])
-        plt.show()
+                              markersize=10, label=f"Treatment {int(global_max_dose*(t+1)/2)} mg/kg") for t in unique_treatments]
+        fig.legend(handles=handles, loc='lower center',   frameon=False, ncol=len(unique_treatments), fontsize=fs)
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
 
+        # Save as PDF
+        if export:
+            pp = PdfPages(pdf_filename)
+            
+        pp.savefig(fig)
+        pp.close()
+        plt.close(fig)
+    else:    
+        for i in range(n_params):
+            fig, axes = plt.subplots(1, actual_latent_dim + 1, figsize=(5*(actual_latent_dim+1), 5))
+            fig.suptitle(f"Parameter: {param_names[i]}", fontsize=fs+6, fontweight='bold')
+    
+            # Ensure axes is iterable
+            if not isinstance(axes, np.ndarray):
+                axes = np.array([axes])
+    
+            # μ vs true parameter plots
+            for d in range(actual_latent_dim):
+                ax = axes[d]
+                y_true = y_val[:, i]
+                mu_vals = X_val[:, d]
+                for t_val in unique_treatments:
+                    mask = treatments_val == t_val
+                    ax.scatter(mu_vals[mask], y_true[mask], alpha=0.8, label=f"Treatment {t_val}",
+                               color=treatment_color_map[t_val], s=marker_size)
+                ax.set_xlabel(f"μ{d+1}", fontsize=fs)
+                ax.set_ylabel(f"True {param_names[i]}", fontsize=fs)
+                ax.set_title(f"Latent individual dim {1+d}", fontsize=fs)
+                ax.tick_params(axis='both', labelsize=fs-2)
+                ax.grid(True, linestyle="--", alpha=0.6)
+    
+            # Regression plot
+            ax_last = axes[-1]
+            y_true = y_val[:, i]
+            y_pred = y_pred_val[:, i]
+            r2 = r2_score(y_true, y_pred)
+            for t_val in unique_treatments:
+                mask = treatments_val == t_val
+                ax_last.scatter(y_pred[mask], y_true[mask], alpha=0.8, s=marker_size,
+                                edgecolors='k', color=treatment_color_map[t_val], label=f"Treatment {t_val}")
+            min_val, max_val = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+            ax_last.plot([min_val, max_val], [min_val, max_val], "r--")
+            ax_last.set_xlabel("Predicted", fontsize=fs)
+            ax_last.set_ylabel(f"True {param_names[i]}", fontsize=fs)
+            ax_last.set_title("Regression", fontsize=fs)
+            ax_last.tick_params(axis='both', labelsize=fs-2)
+            ax_last.text(0.05, 0.9, f"R² = {r2:.2f}", transform=ax_last.transAxes,
+                         fontsize=fs-2, bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
+    
+            # Legend below
+            handles = [plt.Line2D([0], [0], marker='o', color='w',
+                                  markerfacecolor=treatment_color_map[t],
+                                  markersize=10, label=f"Treatment {global_max_dose*(t+1)/2} mg/kg") for t in unique_treatments]
+            fig.legend(handles=handles, loc='lower center', ncol=len(unique_treatments), fontsize=fs)
+            plt.tight_layout(rect=[0, 0.15, 1, 0.95])
+            plt.show()
+    
 
 
 
@@ -1473,128 +1546,15 @@ def generate_plot_data(
 
 
 
-
-
-
-
-
-
-          
-           
-
-def vpc(func_med,
-        reducer_med,
-        encoder_med,
-        noise_med,
-        models,
-        dataloader,
-        global_mean_dose,
-        global_mean_time,
-        global_mean, 
-        global_std,
-        dataset,
-        encoder,
-        func,
-        reducer,
-        noise,
-        ODEWrapper,
-        t_dense,
-          onlymedian,
-        enable_ae,
-        enable_vae,
-        add_noise_to_prediction,  
-        num_simulated_total,
-        normalization,
-        truncation
-       ):
     
-    plot_data = generate_plot_data(
-        func_med,
-        reducer_med,
-        encoder_med,
-        noise_med,
-        models=models,
-        dataloader=dataloader,
-        dataset=dataset,
-        t_dense=t_dense,
-        global_mean_time=global_mean_time,
-        global_mean_dose=global_mean_dose,
-        global_mean=global_mean,
-        global_std=global_std,
-        encoder=encoder,
-        func=func,
-        reducer=reducer,
-        noise=noise,
-        ODEWrapper=ODEWrapper,
-        num_simulated_total=num_simulated_total,
-        add_noise_to_prediction=add_noise_to_prediction,
-        enable_ae=enable_ae,
-        enable_vae=enable_vae,
-        enable_onlymedian=onlymedian,
-        normalization=normalization,
-        truncation=truncation
-    )
-    
-    # ---- Plot all in a grid ---- #
-    n_plots = len(plot_data)
-    n_cols = 2
-    n_rows = math.ceil(n_plots / n_cols)
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 8 * n_rows), sharex=True, sharey=True)
-    axes = axes.flatten()  # Flatten to 1D for easy iteration
-    
-    for i, data in enumerate(plot_data):
-        ax = axes[i]
-        
-        ax.plot(data["time_hours"], data["perc10_sim"], label="Prediction 10th", color="blue", linestyle="--", linewidth=2)
-        ax.plot(data["time_hours"], data["median_sim"], label="Prediction median", color="blue", marker="o", markersize=4, linewidth=2)
-        ax.plot(data["time_hours"], data["perc90_sim"], label="Prediction 90th", color="blue", linestyle="--", linewidth=2)
-        
-        ax.plot(data["time_hours_data"], data["perc10_data"], label="Raw 10th", color="orange", linestyle="--", linewidth=2)
-        ax.plot(data["time_hours_data"], data["median_data"], label="Raw median", color="orange", linewidth=2)
-        ax.plot(data["time_hours_data"], data["perc90_data"], label="Raw 90th", color="orange", linestyle="--", linewidth=2)
-        
-        ax.set_xlim(0, 36)
-        ax.set_ylim(0, 600)
-        # ax.set_ylim(0, 180)
-        ax.set_title(f"Treatment {data['treatment']}", fontsize=32, fontweight='bold')
-        ax.set_xlabel("Time (hours)", fontsize=24)
-        ax.set_ylabel(f"Concentration (mL/g)", fontsize=28)
-        ax.grid(True, linestyle="--", alpha=0.6)
-        ax.tick_params(axis='both', which='major', labelsize=24, width=1.5)
-    
-    # Hide any unused subplots
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-    
-    # Add a single legend below all plots
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels,
-        loc="lower center",
-        ncol=3,
-        fontsize=26,
-        frameon=False,
-        bbox_to_anchor=(0.5, -0.1)
-    )
-    
-    plt.tight_layout(rect=[0, 0.05, 1, 1])  # Leave space at the bottom for legend
-    plt.show()
-    
-            
-
-
-
-
-    
-def vpc_true(
+def vpc(
     models_norm,models_eval, dataset, t_dense, df,
     add_noise_to_prediction=False,
     enable_onlymedian=True, enable_ae=False,
     enable_vae=False, normalization=True, truncation=1, num_repeats=100,
-    use_ema_models=False,cols=2,
+    use_ema_models=False,cols=2,export=False,pdf_filename="vpc.pdf",
     fontsize=14,
-    show_confidence_intervals=True   # toggle all CI shading
+    show_confidence_intervals=True  # toggle all CI shading
 ):
     
 
@@ -1724,7 +1684,7 @@ def vpc_true(
         ax.set_xlim(0, global_max_time)
         ax.set_title(f"Treatment {treat}", fontsize=28, fontweight="bold")
         ax.set_xlabel("Time (hours)", fontsize=22)
-        ax.set_ylabel("Concentration (mL/g)", fontsize=22)
+        ax.set_ylabel("Concentration (mg/L)", fontsize=22)
         ax.grid(True, linestyle="--", alpha=0.6)
         ax.tick_params(axis='both', which='major', labelsize=18, width=1.5)
 
@@ -1753,7 +1713,7 @@ def vpc_true(
     loc='lower center',
     ncol=3,                       # <-- FORCE 3 per row
     fontsize=fontsize_legend,
-    bbox_to_anchor=(0.5, -0.05),
+    bbox_to_anchor=(0.5, -0.01),
     frameon=False,
     columnspacing=1.2,            # tidy spacing between columns
     handletextpad=0.5,            # spacing between line and label
@@ -1764,7 +1724,163 @@ def vpc_true(
 
     plt.tight_layout(rect=[0, 0.12, 1, 1])
     plt.show()
+    if export:
+        pp = PdfPages(pdf_filename)
+        pp.savefig(fig)
+        pp.close()
+        plt.close(fig)
+               
+def vpc_dual(
+    models_norm, models_eval1, models_eval2, dataset, t_dense, df,
+    add_noise_to_prediction=False,
+    enable_onlymedian=True, enable_ae=False,
+    enable_vae=False, normalization=True, truncation=1, num_repeats=100,
+    use_ema_models=False, cols=2, export=False, pdf_filename="vpc_dual.pdf",
+    fontsize=14, show_confidence_intervals=True
+):
+    import gc
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
+    from matplotlib.lines import Line2D
+    from matplotlib.backends.backend_pdf import PdfPages
+    from torch.utils.data import DataLoader
+    import numpy as np
+    import math
+
+    gc.collect()
+
+    mpl.rcParams.update({
+        'axes.titlesize': fontsize + 2,
+        'axes.labelsize': fontsize,
+        'xtick.labelsize': fontsize - 2,
+        'ytick.labelsize': fontsize - 2,
+        'legend.fontsize': fontsize,
+    })
+
+    collate_fn = make_collate_fn(dataset.global_max_len)
+    global_max_dose, global_max_time, global_mean, global_std, global_max_value, global_min_value = compute_global_stats(df)
+    dataloader = DataLoader(dataset, batch_size=12, shuffle=False, collate_fn=collate_fn)
+
+    # ---------------- collect data for both models ----------------
+    def collect_data(models_eval):
+        all_repeats_data = []
+        for r in range(num_repeats):
+            plot_data_r = generate_plot_data(
+                models_norm, models_eval,
+                dataloader=dataloader, dataset=dataset, t_dense=t_dense,
+                df=df, add_noise_to_prediction=add_noise_to_prediction,
+                enable_onlymedian=enable_onlymedian, enable_ae=enable_ae,
+                enable_vae=enable_vae, normalization=normalization, truncation=truncation,
+                use_ema_models=use_ema_models
+            )
+            all_repeats_data.append(plot_data_r)
+        treatments = sorted(set(d["treatment"] for d in all_repeats_data[0]))
+        plot_by_treat = {t: [next(d for d in repeat if d["treatment"] == t) for repeat in all_repeats_data] for t in treatments}
+        return treatments, plot_by_treat
+
+    treatments1, plot_by_treat1 = collect_data(models_eval1)
+    treatments2, plot_by_treat2 = collect_data(models_eval2)
+
+    # ---------------- create figure with two rows (one per model) ----------------
+    n_cols = cols
+    n_rows1 = math.ceil(len(treatments1) / n_cols)
+    n_rows2 = math.ceil(len(treatments2) / n_cols)
+    total_rows = n_rows1 + n_rows2
+    fig, axes = plt.subplots(total_rows, n_cols, figsize=(24, 8 * total_rows), sharex=True, sharey=True, gridspec_kw={'hspace': 0.6})  # vertical space between rows)
+    axes = axes.flatten()
+
+    color_pred = "blue"
+    color_obs = "orange"
+
+    # ---------------- helper to plot a single model ----------------
+    def plot_model(plot_by_treat, start_idx):
+        for i, (treat, repeat_dicts) in enumerate(plot_by_treat.items()):
+            ax = axes[start_idx + i]
+            times = repeat_dicts[0]["time_hours"]
+
+            percentile_keys = ["perc5_sim", "perc10_sim", "perc25_sim", "median_sim", "perc75_sim", "perc90_sim", "perc95_sim"]
+            available_keys = [k for k in percentile_keys if k in repeat_dicts[0]]
+
+            sim_stats = {}
+            for k in available_keys:
+                arr = np.stack([d[k] for d in repeat_dicts], axis=0)
+                sim_stats[k] = {"median": np.median(arr, axis=0)}
+                if show_confidence_intervals:
+                    sim_stats[k]["lower"] = np.percentile(arr, 2.5, axis=0)
+                    sim_stats[k]["upper"] = np.percentile(arr, 97.5, axis=0)
+
+            obs = repeat_dicts[0]
+            ax.plot(obs["time_hours_data"], obs["median_data"], color=color_obs, linewidth=2.5, label="Observed median")
+            ax.plot(obs["time_hours_data"], obs["perc10_data"], color=color_obs, linestyle="--", linewidth=2, label="Observed 10th")
+            ax.plot(obs["time_hours_data"], obs["perc90_data"], color=color_obs, linestyle="--", linewidth=2, label="Observed 90th")
+
+            def plot_with_ci(x, median, lower, upper, label, alpha, style="-", width=2):
+                if show_confidence_intervals and lower is not None and upper is not None:
+                    ax.fill_between(x, lower, upper, color=color_pred, alpha=alpha, linewidth=0)
+                ax.plot(x, median, color=color_pred, linestyle=style, linewidth=width, label=label)
+
+            style_map = {
+                "perc5_sim": (":", 1.5, 0.10), "perc10_sim": ("--", 2, 0.12), "perc25_sim": ("-.", 2, 0.15),
+                "median_sim": ("-", 2.5, 0.20), "perc75_sim": ("-.", 2, 0.15), "perc90_sim": ("--", 2, 0.12),
+                "perc95_sim": (":", 1.5, 0.10)
+            }
+            for k, (style, width, alpha) in style_map.items():
+                if k in sim_stats:
+                    plot_with_ci(times, sim_stats[k]["median"], sim_stats[k].get("lower"), sim_stats[k].get("upper"),
+                                 f"Predicted {k.replace('_sim','').replace('perc','')}th", alpha, style=style, width=width)
+
+            ax.set_xlim(0, global_max_time)
+            ax.set_title(f"Treatment {treat}", fontsize=22, fontweight="bold")  # Only treatment title
+            ax.set_xlabel("Time (hours)", fontsize=18)
+            ax.set_ylabel("Concentration (mg/L)", fontsize=18)
+            ax.grid(True, linestyle="--", alpha=0.6)
+            ax.tick_params(axis='both', which='major', labelsize=16, width=1.5)
+
+        return start_idx + len(plot_by_treat)
+
+    # ---------------- plot both models ----------------
+    next_idx = 0
+    row_start1 = next_idx
+    next_idx = plot_model(plot_by_treat1, next_idx)
+    row_start2 = next_idx
+    next_idx = plot_model(plot_by_treat2, next_idx)
+
+    for j in range(next_idx, len(axes)):
+        fig.delaxes(axes[j])
+
+    # ---------------- Add large panel titles ----------------
+    # Model 1 title
+    fig.text(0.5, 1 - 0.05, "Variational Autoencoder", ha='center', va='top', fontsize=32, fontweight='bold')
+    # Model 2 title
+    fig.text(0.5, 0.45, "Empirical Bayes Variational Autoencoder", ha='center', va='bottom', fontsize=32, fontweight='bold')
+
+    # ---------------- legend ----------------
+    fontsize_legend = fontsize + 8
+    legend_elements = [
+        Line2D([0], [0], color="blue", linestyle="--", linewidth=3, label="10th Prediction"),
+        Line2D([0], [0], color="orange", linestyle="--", linewidth=3, label="10th Observation"),
+        Line2D([0], [0], color="blue", linestyle="-", linewidth=3, label="Median Prediction"),
+        Line2D([0], [0], color="orange", linestyle="-", linewidth=3, label="Median Observation"),
+        Line2D([0], [0], color="blue", linestyle="--", linewidth=3, label="90th Prediction"),
+        Line2D([0], [0], color="orange", linestyle="--", linewidth=3, label="90th Observation"),
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=3,
+               fontsize=fontsize_legend, bbox_to_anchor=(0.5, -0.03),
+               frameon=False, columnspacing=1.2, handletextpad=0.5,
+               borderpad=0.7, labelspacing=1.0)
+
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
+    
+    # ---------------- after plotting both models ----------------
 
 
 
- 
+
+    
+    plt.show()
+
+    if export:
+        pp = PdfPages(pdf_filename)
+        pp.savefig(fig)
+        pp.close()
+        plt.close(fig)

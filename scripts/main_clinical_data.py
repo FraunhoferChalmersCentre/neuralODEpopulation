@@ -28,7 +28,7 @@ if __name__ == "__main__":
       
     from lib.utils.utils_preprocess import load_all_obsvspred, prepare_and_merge_datasets, prepare_datasets_and_loaders, load_models, save_models, prepare_optimizer, prepare_datasets_and_loaders_simulated, compute_global_stats, export_all_metrics_and_residuals, append_metrics, load_all_metrics_and_residuals_as_lists
     from lib.utils.utils_training import   train_loop_model, run_train_test
-    from lib.utils.utils_post_processing import  plot_VPC_and_residuals, vpc_true, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits
+    from lib.utils.utils_post_processing import  plot_VPC_and_residuals, vpc, plot_single_model_encoders_and_regression , plot_encoder_histograms, plot_individual_fits
     from lib.models.NNmodels import  Encoder_Transformer, ODEFunc, SimpleDecoder, TrainableNoise
     
     parser = argparse.ArgumentParser(description="Train Neural-ODE model on dataset.")
@@ -78,8 +78,8 @@ dim_parameters_IC=1
 dim_parameters_dynamic=2
 hidden_NODE_dim=256
 
-init_add_std=0.2
-init_prop_std=0.02
+init_add_std=0.25
+init_prop_std=0.05
   
 hidden_Encoder_dim=36
 model_Encoder_dim=128
@@ -95,7 +95,7 @@ lr = 0.001
 prior_lr_factor=1.00
 min_lr=1e-5
 reduction_factor=0.8
-patience=20
+patience=10
 
  
 truncation=1
@@ -160,18 +160,12 @@ train_loop_model(
  truncation=truncation)
 
   
-vpc_true(
-models_ebvae,models_ebvae, dataset_train, t_dense, df,
-add_noise_to_prediction=True,
-enable_onlymedian=False, enable_ae=False,
-enable_vae=True, truncation=truncation, num_repeats=2,
-use_ema_models=True
-)
+
 
 
 plot_VPC_and_residuals(models_ebvae, models_ebvae, train_loader, t_dense,
                                                    df,
-                                                   truncation=truncation, num_repeats=10, show_confidence_intervals=True)
+                                                   truncation=truncation, num_repeats=100, show_confidence_intervals=True, export=True, pdf_filename="Figure6.pdf")
 
 plot_encoder_histograms(
     models_ebvae,models_ebvae,
@@ -230,7 +224,7 @@ patience=20
  
 truncation=0.3
 
-it=100
+it=1
 for it in range(0, it):
     
     df_test, df_train, dataset_train, dataset_test, train_loader, test_loader, t_dense= prepare_datasets_and_loaders(args.data_path, args.data_test_path, device, batch_fraction=0.25,time_points=120)
@@ -311,5 +305,7 @@ for it in range(0, it):
      add_noise=True,
      use_ema_models=False,
      normalization=False,
-     fontsize=14  # Added a parameter to control font size
+     fontsize=14,
+     export=True,
+     pdf_filename="Figure7.pdf"# Added a parameter to control font size
  )
