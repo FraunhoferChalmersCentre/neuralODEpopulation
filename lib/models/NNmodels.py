@@ -446,20 +446,22 @@ class Encoder_Transformer(nn.Module):
         
 
         self.z0_transformed=nn.Sequential(
-             nn.Linear(dim_latent+dim_parameters_IC, 128),
+             nn.Linear(dim_latent+dim_parameters_IC, 32),
              nn.SELU(),
-       nn.Linear(128, dim_latent),
+       nn.Linear(32, dim_latent),
          )
-        
+        self.cov_transform = nn.Linear(self.dim_cov + model_dim * num_heads, model_dim * num_heads)
+        self.cov_embeddings = nn.Linear(self.dim_cov, self.dim_cov)
+
         # NODE initial condition
         if IC_dose_dependent:
             self.z0_mu=nn.Sequential(
-                 nn.Linear(1, 128),
+                 nn.Linear(1, 32),
                  nn.SELU(),
-                 nn.Linear(128, 128),
+                 nn.Linear(32, 32),
                  nn.SELU(),
-                 nn.Linear(128, 128),
-           nn.Linear(128, dim_latent),
+                 nn.Linear(32, 32),
+           nn.Linear(32, dim_latent),
              )
             
             
@@ -494,6 +496,13 @@ class Encoder_Transformer(nn.Module):
                 self.prior_A = nn.Parameter(
                         torch.eye(self.total_parameters) + torch.randn(self.total_parameters, self.total_parameters) * init_std
                     )
+                self.cov_to_A = nn.Sequential(
+                    nn.Linear(self.dim_cov, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, self.total_parameters * self.total_parameters)
+                )
+
+
         else:
             self.register_buffer("prior_A", torch.eye(self.total_parameters))
    
@@ -523,7 +532,15 @@ class Encoder_Transformer(nn.Module):
        device = self.prior_A.device
 
        if self.learn_prior_covariance:
-           Sigma_p = self.prior_A @ self.prior_A.T + self.cov_diag_epsilon * torch.eye(D, device=device)
+           delta_A = self.cov_to_A(cov)  # [B, D*D]
+           delta_A = delta_A.view(batch_size, D, D)  # reshape to [B, D, D]
+
+           prior_base = self.prior_A.unsqueeze(0) + delta_A  # [B, D, D]
+
+           Sigma_p = prior_base @ prior_base.mT + self.cov_diag_epsilon * torch.eye(D, device=device)
+
+
+
        else:
            Sigma_p = torch.eye(D, device=device)
 
@@ -537,8 +554,8 @@ class Encoder_Transformer(nn.Module):
                mu_p = mu_p.unsqueeze(0).expand(batch_size, -1)
 
        
-       if batch_size is not None:
-            L_p = L_p.unsqueeze(0).expand(batch_size, -1, -1)
+      # if batch_size is not None:
+        #    L_p = L_p.unsqueeze(0).expand(batch_size, -1, -1)
           #  if mu_p.dim() == 1:
                 
 
@@ -554,10 +571,9 @@ class Encoder_Transformer(nn.Module):
        else:
            eps = torch.randn(B, D, device=device)  # [B, D]
            return mu_q + torch.einsum("bij,bj->bi", L_q, eps)  # [B, D]
-    
-   
- 
- 
+
+
+
    
     # ---------------- Forward ----------------
     def forward(self, t, x, cov, dose_tensor, mask=None, only_median=False,enable_ae=False, num_samples=1, min_batch_size=None, augment=False,sample_posterior=True):
@@ -593,7 +609,13 @@ class Encoder_Transformer(nn.Module):
         # Masked pooling
         pooled = self.pooler(h_enc, mask)
         pooled = self.pool_norm(pooled)
-        pooled = F.dropout(pooled, p=0.1, training=self.training) #+ torch.randn_like(pooled) 
+        pooled = F.dropout(pooled, p=0.1, training=self.training) #+ torch.randn_like(pooled)
+        cov_embeddings = self.cov_embeddings(cov)
+
+
+        pooled = self.cov_transform(torch.cat([pooled, cov_embeddings], dim=1))
+
+
      
         # Posterior mean
         mu_q = self.fc_mu2 (self.fc_mu1(pooled))
