@@ -1,10 +1,12 @@
 # Byte-compiled Python files
 *.pyc
 __pycache__/
+.DS_Store
 
 # Virtual environments
 venv/
 .env/
+.venv/
 
 # IDE-specific files
 .idea/

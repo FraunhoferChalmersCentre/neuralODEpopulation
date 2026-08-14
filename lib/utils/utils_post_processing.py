@@ -66,7 +66,7 @@ def compute_test_metrics(
 
     for batch in dataloader:
         # Preprocess batch (single subject)
-        id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut, mask,mask_encoder, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
+        id_list,treatment_list, t_padded, x_padded,  t_encoder, x_encoder,t_cut, x_cut,mask_encoder, cov, dose_tensor, dose_times_list, evid = preprocess_batch(
             batch, device, truncation=truncation
         )
        
@@ -94,19 +94,17 @@ def compute_test_metrics(
           
          # print(mu_p)
 
-        ode_func= prepare_ode_input(
-              x_padded,
-              k_param,
-              func,
-              cov,
-              dose_tensor,
-              dose_times_list,
-              mask_dropout,
-              evid,
-              enable_ae,
-              enable_onlymedian,
-              
-          )
+        ode_func = prepare_ode_input(
+            x_padded,
+            k_param,
+            func,
+            cov,
+            dose_tensor,
+            dose_times_list,
+            evid=evid,
+            enable_ae=enable_ae,
+            enable_onlymedian=enable_onlymedian,
+        )
         pred_interp, pred_batch = make_predictions(
             t_cut, t_dense, k_param, ode_func, reducer,global_mean,global_std
         )
